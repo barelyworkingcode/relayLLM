@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,7 +21,7 @@ type ClaudeProvider struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	mu     sync.Mutex // serializes writes to stdin
-	alive  bool
+	alive  atomic.Bool
 
 	claudeSessionID string
 	model           string
@@ -81,7 +82,7 @@ func (p *ClaudeProvider) Start() error {
 
 	p.cmd = cmd
 	p.stdin = stdin
-	p.alive = true
+	p.alive.Store(true)
 
 	go p.readStdout(stdout)
 	go p.readStderr(stderr)
@@ -121,7 +122,7 @@ func (p *ClaudeProvider) readStderr(r io.ReadCloser) {
 
 func (p *ClaudeProvider) waitForExit() {
 	err := p.cmd.Wait()
-	p.alive = false
+	p.alive.Store(false)
 
 	exitCode := 0
 	if err != nil {
@@ -194,7 +195,7 @@ func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if !p.alive || p.stdin == nil {
+	if !p.alive.Load() || p.stdin == nil {
 		return fmt.Errorf("claude process not running")
 	}
 
@@ -260,12 +261,12 @@ func (p *ClaudeProvider) Kill() {
 		<-done
 	}
 
-	p.alive = false
+	p.alive.Store(false)
 	slog.Info("claude process killed", "session", p.session.ID)
 }
 
 func (p *ClaudeProvider) Alive() bool {
-	return p.alive
+	return p.alive.Load()
 }
 
 func (p *ClaudeProvider) GetState() json.RawMessage {

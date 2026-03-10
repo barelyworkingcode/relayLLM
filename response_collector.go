@@ -9,15 +9,13 @@ import (
 )
 
 // ResponseCollector captures a complete LLM response for synchronous HTTP callers.
+// Registered via SessionManager.collectors map — does not replace the global sink.
 type ResponseCollector struct {
-	mu       sync.Mutex
-	text     strings.Builder
-	stats    SessionStats
-	done     chan struct{}
-	err      error
-	session  *Session
-	manager  *SessionManager
-	origSink EventSink
+	mu    sync.Mutex
+	text  strings.Builder
+	stats SessionStats
+	done  chan struct{}
+	err   error
 }
 
 func NewResponseCollector() *ResponseCollector {
@@ -26,31 +24,8 @@ func NewResponseCollector() *ResponseCollector {
 	}
 }
 
-// Install redirects the session's events to this collector.
-func (c *ResponseCollector) Install(session *Session, manager *SessionManager) {
-	c.session = session
-	c.manager = manager
-	c.origSink = manager.sink
-	manager.sink = c
-}
-
-// Uninstall restores the original event sink.
-func (c *ResponseCollector) Uninstall() {
-	if c.origSink != nil {
-		c.manager.sink = c.origSink
-	}
-}
-
-// SendToSession implements EventSink. Captures text and stats, detects completion.
-func (c *ResponseCollector) SendToSession(sessionID string, msg map[string]interface{}) {
-	if sessionID != c.session.ID {
-		// Forward events for other sessions to the original sink.
-		if c.origSink != nil {
-			c.origSink.SendToSession(sessionID, msg)
-		}
-		return
-	}
-
+// HandleEvent processes a routed event, capturing text and stats.
+func (c *ResponseCollector) HandleEvent(msg map[string]interface{}) {
 	msgType, _ := msg["type"].(string)
 
 	switch msgType {
@@ -81,11 +56,6 @@ func (c *ResponseCollector) SendToSession(sessionID string, msg map[string]inter
 			close(c.done)
 		}
 	}
-
-	// Also forward to original sink so WebSocket clients see events.
-	if c.origSink != nil {
-		c.origSink.SendToSession(sessionID, msg)
-	}
 }
 
 func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
@@ -103,6 +73,15 @@ func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content_block"`
+		// Claude CLI stream-json: assistant message with full content.
+		Message *struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+		// Claude CLI stream-json: result event with final text.
+		Result string `json:"result"`
 	}
 
 	if err := json.Unmarshal(eventRaw, &event); err != nil {
@@ -117,6 +96,14 @@ func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 	}
 	if event.ContentBlock != nil && event.ContentBlock.Type == "text" {
 		c.text.WriteString(event.ContentBlock.Text)
+	}
+	// Handle Claude CLI assistant message format.
+	if event.Type == "assistant" && event.Message != nil {
+		for _, block := range event.Message.Content {
+			if block.Type == "text" {
+				c.text.WriteString(block.Text)
+			}
+		}
 	}
 }
 

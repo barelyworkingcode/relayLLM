@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -45,6 +47,7 @@ type EventSink interface {
 type SessionManager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
+	collectors   map[string]*ResponseCollector // sessionID → active collector
 	projectStore *ProjectStore
 	sessionStore *SessionStore
 	perms        *PermissionManager
@@ -55,6 +58,7 @@ type SessionManager struct {
 func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
 	return &SessionManager{
 		sessions:     make(map[string]*Session),
+		collectors:   make(map[string]*ResponseCollector),
 		projectStore: projects,
 		sessionStore: sessionStore,
 		perms:        perms,
@@ -110,6 +114,10 @@ func (m *SessionManager) CreateSession(projectID, name, model string) (*Session,
 }
 
 func (m *SessionManager) initProvider(session *Session) error {
+	if err := m.ensureHookConfig(session.Directory); err != nil {
+		slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
+	}
+
 	handler := func(eventType string, data json.RawMessage) {
 		m.handleProviderEvent(session, eventType, data)
 	}
@@ -123,36 +131,107 @@ func (m *SessionManager) initProvider(session *Session) error {
 	return provider.Start()
 }
 
-func (m *SessionManager) handleProviderEvent(session *Session, eventType string, data json.RawMessage) {
-	if m.sink == nil {
-		return
+// ensureHookConfig writes .claude/settings.local.json in the project directory
+// to register the hook binary as a PreToolUse hook. Without this, Claude CLI
+// has no idea the hook exists and will never invoke it.
+func (m *SessionManager) ensureHookConfig(projectDir string) error {
+	hookPath, err := resolveHookPath()
+	if err != nil {
+		return fmt.Errorf("resolve hook path: %w", err)
 	}
+
+	claudeDir := filepath.Join(projectDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+
+	// Read existing settings to preserve other config.
+	var settings map[string]interface{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		json.Unmarshal(data, &settings)
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+
+	settings["hooks"] = map[string]interface{}{
+		"PreToolUse": []interface{}{
+			map[string]interface{}{
+				"matcher": "",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": hookPath,
+						"timeout": 120,
+					},
+				},
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+
+	slog.Info("hook config written", "path", settingsPath, "hookBinary", hookPath)
+	return nil
+}
+
+// resolveHookPath returns the absolute path to the hook binary,
+// located at cmd/hook/hook relative to the relayLLM executable.
+func resolveHookPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", err
+	}
+	hookPath := filepath.Join(filepath.Dir(exe), "cmd", "hook", "hook")
+	if _, err := os.Stat(hookPath); err != nil {
+		return "", fmt.Errorf("hook binary not found at %s", hookPath)
+	}
+	return hookPath, nil
+}
+
+func (m *SessionManager) handleProviderEvent(session *Session, eventType string, data json.RawMessage) {
+	// Build the message once.
+	var msg map[string]interface{}
 
 	switch eventType {
 	case "llm_event":
-		m.sink.SendToSession(session.ID, map[string]interface{}{
+		msg = map[string]interface{}{
 			"type":      "llm_event",
 			"sessionId": session.ID,
 			"event":     json.RawMessage(data),
-		})
+		}
 
 	case "stats_update":
 		var stats SessionStats
-		if err := json.Unmarshal(data, &stats); err == nil {
-			session.mu.Lock()
-			session.Stats.InputTokens += stats.InputTokens
-			session.Stats.OutputTokens += stats.OutputTokens
-			session.Stats.CacheReadTokens += stats.CacheReadTokens
-			session.Stats.CacheCreationTokens += stats.CacheCreationTokens
-			session.Stats.CostUsd = stats.CostUsd // total, not delta
-			currentStats := session.Stats
-			session.mu.Unlock()
+		if err := json.Unmarshal(data, &stats); err != nil {
+			return
+		}
+		session.mu.Lock()
+		session.Stats.InputTokens = stats.InputTokens
+		session.Stats.OutputTokens = stats.OutputTokens
+		session.Stats.CacheReadTokens = stats.CacheReadTokens
+		session.Stats.CacheCreationTokens = stats.CacheCreationTokens
+		session.Stats.CostUsd = stats.CostUsd
+		currentStats := session.Stats
+		session.mu.Unlock()
 
-			m.sink.SendToSession(session.ID, map[string]interface{}{
-				"type":      "stats_update",
-				"sessionId": session.ID,
-				"stats":     currentStats,
-			})
+		msg = map[string]interface{}{
+			"type":      "stats_update",
+			"sessionId": session.ID,
+			"stats":     currentStats,
 		}
 
 	case "message_complete":
@@ -160,33 +239,50 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.processing = false
 		session.mu.Unlock()
 
-		m.sink.SendToSession(session.ID, map[string]interface{}{
+		msg = map[string]interface{}{
 			"type":      "message_complete",
 			"sessionId": session.ID,
-		})
+		}
 
 		// Persist session state.
 		m.saveSession(session)
 
 	case "process_exited":
-		m.sink.SendToSession(session.ID, map[string]interface{}{
+		msg = map[string]interface{}{
 			"type":      "process_exited",
 			"sessionId": session.ID,
-		})
+		}
 
 	case "raw_output":
-		m.sink.SendToSession(session.ID, map[string]interface{}{
+		msg = map[string]interface{}{
 			"type":      "raw_output",
 			"sessionId": session.ID,
 			"text":      string(data),
-		})
+		}
 
 	case "error":
-		m.sink.SendToSession(session.ID, map[string]interface{}{
+		msg = map[string]interface{}{
 			"type":      "error",
 			"sessionId": session.ID,
 			"message":   string(data),
-		})
+		}
+
+	default:
+		return
+	}
+
+	// Route to collector if one is registered for this session.
+	m.mu.RLock()
+	collector := m.collectors[session.ID]
+	m.mu.RUnlock()
+
+	if collector != nil {
+		collector.HandleEvent(msg)
+	}
+
+	// Always forward to the main sink (WebSocket clients).
+	if m.sink != nil {
+		m.sink.SendToSession(session.ID, msg)
 	}
 }
 
@@ -236,24 +332,26 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
 	collector := NewResponseCollector()
 
-	// Temporarily redirect events to the collector.
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	// Register collector for this session.
+	m.mu.Lock()
+	if _, ok := m.sessions[sessionID]; !ok {
+		m.mu.Unlock()
 		return "", SessionStats{}, fmt.Errorf("session not found: %s", sessionID)
 	}
+	m.collectors[sessionID] = collector
+	m.mu.Unlock()
 
-	collector.Install(session, m)
+	defer func() {
+		m.mu.Lock()
+		delete(m.collectors, sessionID)
+		m.mu.Unlock()
+	}()
 
 	if err := m.SendMessage(sessionID, text, files); err != nil {
-		collector.Uninstall()
 		return "", SessionStats{}, err
 	}
 
-	response, stats, err := collector.Wait(5 * time.Minute)
-	collector.Uninstall()
-	return response, stats, err
+	return collector.Wait(5 * time.Minute)
 }
 
 func (m *SessionManager) GetSession(id string) (*Session, bool) {
