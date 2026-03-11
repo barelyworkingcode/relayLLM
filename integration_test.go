@@ -313,10 +313,7 @@ func TestIntegration_SessionResume(t *testing.T) {
 	// End session (persists ProviderState with claudeSessionId).
 	endSession(t, ts, sessionID)
 
-	// Restore sessions from disk — simulates server restart.
-	ts.Sessions.RestoreAll()
-
-	// Send follow-up message to the restored session.
+	// Send follow-up message — session will be lazy-loaded from disk.
 	response2, _ := sendMessage(t, ts, sessionID,
 		"What was the code word I told you?")
 	if response2 == "" {

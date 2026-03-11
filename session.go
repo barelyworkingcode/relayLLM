@@ -19,6 +19,7 @@ type Session struct {
 	Name          string          `json:"name"`
 	Directory     string          `json:"directory"`
 	Model         string          `json:"model"`
+	ProviderType  string          `json:"providerType"`
 	CreatedAt     string          `json:"createdAt"`
 	Messages      []Message       `json:"messages"`
 	Stats         SessionStats    `json:"stats"`
@@ -53,6 +54,7 @@ type SessionManager struct {
 	perms        *PermissionManager
 	sink         EventSink
 	hookURL      string
+	lmStudioURL  string
 }
 
 func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -73,28 +75,49 @@ func (m *SessionManager) SetHookURL(url string) {
 	m.hookURL = url
 }
 
-func (m *SessionManager) CreateSession(projectID, name, model string) (*Session, error) {
-	project, ok := m.projectStore.Get(projectID)
-	if !ok {
-		return nil, fmt.Errorf("project not found: %s", projectID)
+func (m *SessionManager) SetLMStudioURL(url string) {
+	m.lmStudioURL = url
+}
+
+func (m *SessionManager) CreateSession(projectID, directory, name, model string) (*Session, error) {
+	var dir string
+
+	if projectID != "" {
+		project, ok := m.projectStore.Get(projectID)
+		if !ok {
+			return nil, fmt.Errorf("project not found: %s", projectID)
+		}
+		dir = project.Path
+		if model == "" {
+			model = project.Model
+		}
+	} else {
+		// Ungrouped session - directory is required
+		if directory == "" {
+			return nil, fmt.Errorf("directory is required for sessions without a project")
+		}
+		dir = directory
+		if model == "" {
+			model = "sonnet"
+		}
 	}
 
-	if model == "" {
-		model = project.Model
-	}
 	if name == "" {
 		name = "New Session"
 	}
 
+	providerType := deriveProviderType(model)
+
 	session := &Session{
-		ID:        uuid.New().String(),
-		ProjectID: projectID,
-		Name:      name,
-		Directory: project.Path,
-		Model:     model,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Messages:  []Message{},
-		Stats:     SessionStats{},
+		ID:           uuid.New().String(),
+		ProjectID:    projectID,
+		Name:         name,
+		Directory:    dir,
+		Model:        model,
+		ProviderType: providerType,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		Messages:     []Message{},
+		Stats:        SessionStats{},
 	}
 
 	m.mu.Lock()
@@ -109,22 +132,50 @@ func (m *SessionManager) CreateSession(projectID, name, model string) (*Session,
 		return nil, fmt.Errorf("failed to start provider: %w", err)
 	}
 
-	slog.Info("session created", "id", session.ID, "project", project.Name, "model", model)
+	slog.Info("session created", "id", session.ID, "project", projectID, "model", model)
 	return session, nil
 }
 
-func (m *SessionManager) initProvider(session *Session) error {
-	if err := m.ensureHookConfig(session.Directory); err != nil {
-		slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
+// deriveProviderType returns "claude" for known Claude model names, "lmstudio" otherwise.
+func deriveProviderType(model string) string {
+	switch model {
+	case "haiku", "sonnet", "opus":
+		return "claude"
+	default:
+		return "lmstudio"
 	}
+}
 
+func (m *SessionManager) initProvider(session *Session) error {
 	handler := func(eventType string, data json.RawMessage) {
 		m.handleProviderEvent(session, eventType, data)
 	}
 
-	provider := NewClaudeProvider(session, handler, m.hookURL)
-	if session.ProviderState != nil {
-		provider.RestoreState(session.ProviderState)
+	var provider Provider
+
+	switch session.ProviderType {
+	case "lmstudio":
+		var integrations json.RawMessage
+		if session.ProjectID != "" {
+			if proj, ok := m.projectStore.Get(session.ProjectID); ok {
+				integrations = proj.Integrations
+			}
+		}
+		p := NewLMStudioProvider(session, handler, m.lmStudioURL, integrations)
+		if session.ProviderState != nil {
+			p.RestoreState(session.ProviderState)
+		}
+		provider = p
+
+	default: // "claude" or unset (backward compat)
+		if err := m.ensureHookConfig(session.Directory); err != nil {
+			slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
+		}
+		p := NewClaudeProvider(session, handler, m.hookURL)
+		if session.ProviderState != nil {
+			p.RestoreState(session.ProviderState)
+		}
+		provider = p
 	}
 
 	session.provider = provider
@@ -239,6 +290,23 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.processing = false
 		session.mu.Unlock()
 
+		// If provider sent text with message_complete (LM Studio), store assistant message.
+		if data != nil {
+			var complete struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(data, &complete) == nil && complete.Text != "" {
+				contentJSON, _ := json.Marshal([]map[string]string{{"type": "text", "text": complete.Text}})
+				session.mu.Lock()
+				session.Messages = append(session.Messages, Message{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Role:      "assistant",
+					Content:   contentJSON,
+				})
+				session.mu.Unlock()
+			}
+		}
+
 		msg = map[string]interface{}{
 			"type":      "message_complete",
 			"sessionId": session.ID,
@@ -327,6 +395,28 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	return session.provider.SendMessage(text, files)
 }
 
+// StopGeneration aborts the in-flight response for a session.
+func (m *SessionManager) StopGeneration(sessionID string) error {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if session.provider != nil {
+		session.provider.StopGeneration()
+	}
+
+	session.mu.Lock()
+	session.processing = false
+	session.mu.Unlock()
+
+	m.saveSession(session)
+	return nil
+}
+
 // SendMessageSync sends a message and waits for the complete response.
 // Used by HTTP API for non-streaming clients (relayTelegram, relayScheduler).
 func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
@@ -356,17 +446,38 @@ func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAtt
 
 func (m *SessionManager) GetSession(id string) (*Session, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
-	return s, ok
+	m.mu.RUnlock()
+	if ok {
+		return s, true
+	}
+
+	// Lazy-load from disk.
+	s, err := m.sessionStore.Load(id)
+	if err != nil {
+		return nil, false
+	}
+
+	m.mu.Lock()
+	// Check again in case another goroutine loaded it.
+	if existing, ok := m.sessions[id]; ok {
+		m.mu.Unlock()
+		return existing, true
+	}
+	m.sessions[id] = s
+	m.mu.Unlock()
+
+	slog.Info("session restored from disk", "id", id)
+	return s, true
 }
 
 func (m *SessionManager) ListSessions() []map[string]interface{} {
+	// Merge in-memory sessions with persisted sessions from disk.
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
+	seen := make(map[string]bool, len(m.sessions))
 	list := make([]map[string]interface{}, 0, len(m.sessions))
 	for _, s := range m.sessions {
+		seen[s.ID] = true
 		list = append(list, map[string]interface{}{
 			"id":        s.ID,
 			"projectId": s.ProjectID,
@@ -376,6 +487,26 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 			"active":    s.provider != nil && s.provider.Alive(),
 		})
 	}
+	m.mu.RUnlock()
+
+	// Add persisted sessions not already in memory.
+	persisted, err := m.sessionStore.LoadAll()
+	if err == nil {
+		for _, s := range persisted {
+			if seen[s.ID] {
+				continue
+			}
+			list = append(list, map[string]interface{}{
+				"id":        s.ID,
+				"projectId": s.ProjectID,
+				"name":      s.Name,
+				"directory": s.Directory,
+				"model":     s.Model,
+				"active":    false,
+			})
+		}
+	}
+
 	return list
 }
 
@@ -397,6 +528,111 @@ func (m *SessionManager) EndSession(id string) {
 	slog.Info("session ended", "id", id)
 }
 
+// DeleteSession kills the provider, removes from memory, and deletes persisted file.
+func (m *SessionManager) DeleteSession(id string) {
+	m.mu.Lock()
+	session, ok := m.sessions[id]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, id)
+	m.mu.Unlock()
+
+	if session.provider != nil {
+		session.provider.Kill()
+	}
+
+	if err := m.sessionStore.Delete(id); err != nil {
+		slog.Warn("failed to delete session file", "id", id, "error", err)
+	}
+
+	slog.Info("session deleted", "id", id)
+}
+
+// ClearSession kills the provider, clears messages/stats, and restarts the provider.
+func (m *SessionManager) ClearSession(id string) error {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	// Kill existing provider
+	if session.provider != nil {
+		session.provider.Kill()
+		session.provider = nil
+	}
+
+	// Clear messages and stats
+	session.mu.Lock()
+	session.Messages = []Message{}
+	session.Stats = SessionStats{}
+	session.ProviderState = nil
+	session.processing = false
+	session.mu.Unlock()
+
+	// Persist cleared state
+	m.saveSession(session)
+
+	// Restart provider
+	if err := m.initProvider(session); err != nil {
+		return fmt.Errorf("failed to restart provider: %w", err)
+	}
+
+	// Send clear events to WS client
+	if m.sink != nil {
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      "clear_messages",
+			"sessionId": id,
+		})
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      "stats_update",
+			"sessionId": id,
+			"stats":     SessionStats{},
+		})
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      "system_message",
+			"sessionId": id,
+			"message":   "Conversation history cleared",
+		})
+	}
+
+	slog.Info("session cleared", "id", id)
+	return nil
+}
+
+// RenameSession updates the session name in memory and persists.
+func (m *SessionManager) RenameSession(id, name string) error {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.Lock()
+	session.Name = name
+	session.mu.Unlock()
+
+	m.saveSession(session)
+
+	// Notify WS clients
+	if m.sink != nil {
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      "session_renamed",
+			"sessionId": id,
+			"name":      name,
+		})
+	}
+
+	slog.Info("session renamed", "id", id, "name", name)
+	return nil
+}
+
 func (m *SessionManager) StopAll() {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
@@ -413,21 +649,6 @@ func (m *SessionManager) StopAll() {
 	}
 }
 
-func (m *SessionManager) RestoreAll() {
-	sessions, err := m.sessionStore.LoadAll()
-	if err != nil {
-		slog.Error("failed to load sessions", "error", err)
-		return
-	}
-
-	m.mu.Lock()
-	for _, s := range sessions {
-		m.sessions[s.ID] = s
-	}
-	m.mu.Unlock()
-
-	slog.Info("restored sessions", "count", len(sessions))
-}
 
 func (m *SessionManager) saveSession(session *Session) {
 	session.mu.Lock()
