@@ -33,16 +33,17 @@ func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore) {
 
 		case http.MethodPost:
 			var body struct {
-				Name         string   `json:"name"`
-				Path         string   `json:"path"`
-				Model        string   `json:"model"`
-				AllowedTools []string `json:"allowedTools"`
+				Name         string          `json:"name"`
+				Path         string          `json:"path"`
+				Model        string          `json:"model"`
+				AllowedTools []string        `json:"allowedTools"`
+				Integrations json.RawMessage `json:"integrations"`
 			}
 			if err := readJSON(r, &body); err != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 				return
 			}
-			p, err := store.Create(body.Name, body.Path, body.Model, body.AllowedTools)
+			p, err := store.Create(body.Name, body.Path, body.Model, body.AllowedTools, body.Integrations)
 			if err != nil {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
@@ -107,6 +108,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		case http.MethodPost:
 			var body struct {
 				ProjectID string `json:"projectId"`
+				Directory string `json:"directory"`
 				Name      string `json:"name"`
 				Model     string `json:"model"`
 			}
@@ -114,15 +116,17 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 				return
 			}
-			session, err := sessions.CreateSession(body.ProjectID, body.Name, body.Model)
+			session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model)
 			if err != nil {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
 			}
-			writeJSON(w, 201, map[string]string{
+			writeJSON(w, 201, map[string]interface{}{
 				"sessionId": session.ID,
 				"projectId": session.ProjectID,
+				"directory": session.Directory,
 				"model":     session.Model,
+				"name":      session.Name,
 			})
 
 		default:
@@ -134,6 +138,16 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 		parts := strings.SplitN(path, "/", 2)
 		sessionID := parts[0]
+
+		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
+			// POST /api/sessions/:id/stop — abort in-flight generation
+			if err := sessions.StopGeneration(sessionID); err != nil {
+				writeJSON(w, 404, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]bool{"success": true})
+			return
+		}
 
 		if len(parts) == 2 && parts[1] == "message" && r.Method == http.MethodPost {
 			// POST /api/sessions/:id/message — synchronous message (for HTTP clients)
@@ -174,6 +188,38 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		}
 
 		w.WriteHeader(405)
+	})
+}
+
+// --- Models Route ---
+
+type ModelInfo struct {
+	Label    string `json:"label"`
+	Value    string `json:"value"`
+	Group    string `json:"group"`
+	Provider string `json:"provider"`
+}
+
+func RegisterModelRoutes(mux *http.ServeMux, lmStudioURL string) {
+	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(405)
+			return
+		}
+
+		models := []ModelInfo{
+			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
+			{Label: "Claude Sonnet", Value: "sonnet", Group: "Claude", Provider: "claude"},
+			{Label: "Claude Opus", Value: "opus", Group: "Claude", Provider: "claude"},
+		}
+
+		if lmStudioURL != "" {
+			if lmModels := fetchLMStudioModels(lmStudioURL); len(lmModels) > 0 {
+				models = append(models, lmModels...)
+			}
+		}
+
+		writeJSON(w, 200, models)
 	})
 }
 

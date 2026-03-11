@@ -10,6 +10,9 @@ type Provider interface {
 	// SendMessage sends a user message. Events stream via the EventHandler.
 	SendMessage(text string, files []FileAttachment) error
 
+	// StopGeneration aborts the in-flight response without killing the provider.
+	StopGeneration()
+
 	// Kill terminates the provider process.
 	Kill()
 

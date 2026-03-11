@@ -82,6 +82,8 @@ func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 		} `json:"message"`
 		// Claude CLI stream-json: result event with final text.
 		Result string `json:"result"`
+		// LM Studio message.delta: {"type":"message.delta","content":"..."}
+		Content string `json:"content"`
 	}
 
 	if err := json.Unmarshal(eventRaw, &event); err != nil {
@@ -104,6 +106,10 @@ func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 				c.text.WriteString(block.Text)
 			}
 		}
+	}
+	// Handle LM Studio message.delta format.
+	if event.Type == "message.delta" && event.Content != "" {
+		c.text.WriteString(event.Content)
 	}
 }
 

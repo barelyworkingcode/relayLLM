@@ -11,12 +11,13 @@ import (
 )
 
 type Project struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Path         string   `json:"path"`
-	Model        string   `json:"model"`
-	AllowedTools []string `json:"allowedTools"`
-	CreatedAt    string   `json:"createdAt"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Path         string          `json:"path"`
+	Model        string          `json:"model"`
+	AllowedTools []string        `json:"allowedTools"`
+	Integrations json.RawMessage `json:"integrations,omitempty"`
+	CreatedAt    string          `json:"createdAt"`
 }
 
 type projectFile struct {
@@ -79,7 +80,7 @@ func (s *ProjectStore) Get(id string) (Project, bool) {
 	return Project{}, false
 }
 
-func (s *ProjectStore) Create(name, path, model string, allowedTools []string) (Project, error) {
+func (s *ProjectStore) Create(name, path, model string, allowedTools []string, integrations json.RawMessage) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,6 +100,7 @@ func (s *ProjectStore) Create(name, path, model string, allowedTools []string) (
 		Path:         path,
 		Model:        model,
 		AllowedTools: allowedTools,
+		Integrations: integrations,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	s.projects = append(s.projects, p)
@@ -131,6 +133,16 @@ func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Projec
 					}
 				}
 				s.projects[i].AllowedTools = strs
+			}
+		}
+		if v, ok := updates["integrations"]; ok {
+			if v == nil {
+				s.projects[i].Integrations = nil
+			} else {
+				raw, err := json.Marshal(v)
+				if err == nil {
+					s.projects[i].Integrations = raw
+				}
 			}
 		}
 		return s.projects[i], s.save()

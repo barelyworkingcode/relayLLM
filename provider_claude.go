@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,12 +54,15 @@ func (p *ClaudeProvider) Start() error {
 		args = append(args, "--resume", p.claudeSessionID)
 	}
 
-	cmd := exec.Command("claude", args...)
+	claudePath := resolveClaudePath()
+	cmd := exec.Command(claudePath, args...)
 	cmd.Dir = p.directory
-	cmd.Env = append(os.Environ(),
+	cmd.Env = ensurePath(os.Environ())
+	cmd.Env = append(cmd.Env,
 		fmt.Sprintf("RELAY_LLM_HOOK_URL=%s", p.hookURL),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
 	)
+
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -237,6 +242,11 @@ func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error 
 	return nil
 }
 
+func (p *ClaudeProvider) StopGeneration() {
+	// Claude CLI doesn't have a lightweight stop — Kill is the only option.
+	p.Kill()
+}
+
 func (p *ClaudeProvider) Kill() {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
@@ -287,4 +297,43 @@ func (p *ClaudeProvider) RestoreState(state json.RawMessage) {
 	if err := json.Unmarshal(state, &s); err == nil {
 		p.claudeSessionID = s.ClaudeSessionID
 	}
+}
+
+// resolveClaudePath finds the claude binary, checking well-known locations
+// before falling back to PATH lookup. Necessary when launched from minimal
+// environments (Raycast, launchd) that don't source shell profiles.
+func resolveClaudePath() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "claude"),
+		filepath.Join(home, ".claude", "local", "claude"),
+		"/usr/local/bin/claude",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Fall back to PATH lookup.
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	return "claude"
+}
+
+// ensurePath adds ~/.local/bin to PATH in the environment slice if not already present.
+func ensurePath(env []string) []string {
+	home, _ := os.UserHomeDir()
+	localBin := filepath.Join(home, ".local", "bin")
+
+	for i, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			if !strings.Contains(e, localBin) {
+				env[i] = e + ":" + localBin
+			}
+			return env
+		}
+	}
+	// No PATH at all — set one.
+	return append(env, "PATH=/usr/local/bin:/usr/bin:/bin:"+localBin)
 }

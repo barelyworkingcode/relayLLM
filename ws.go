@@ -127,9 +127,31 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			h.mu.Unlock()
 
 			// Send session history.
+			// Try reading from Claude CLI's JSONL session file first (has both user + assistant).
+			var history []Message
+			var claudeSessionID string
+			if session.ProviderState != nil {
+				var ps struct {
+					ClaudeSessionID string `json:"claudeSessionId"`
+				}
+				json.Unmarshal(session.ProviderState, &ps)
+				claudeSessionID = ps.ClaudeSessionID
+			}
+			if claudeSessionID != "" {
+				if h, err := readClaudeHistory(session.Directory, claudeSessionID); err == nil && len(h) > 0 {
+					history = h
+				} else if err != nil {
+					slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
+				}
+			}
+			// Fall back to session.Messages (user-only) if Claude history unavailable.
+			if history == nil {
+				session.mu.Lock()
+				history = make([]Message, len(session.Messages))
+				copy(history, session.Messages)
+				session.mu.Unlock()
+			}
 			session.mu.Lock()
-			history := make([]Message, len(session.Messages))
-			copy(history, session.Messages)
 			stats := session.Stats
 			session.mu.Unlock()
 
@@ -180,6 +202,85 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			}
 			if sessionID != "" {
 				h.sessions.EndSession(sessionID)
+			}
+
+		case "rename_session":
+			var req struct {
+				SessionID string `json:"sessionId"`
+				Name      string `json:"name"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			sessionID := req.SessionID
+			if sessionID == "" {
+				sessionID = boundSessionID
+			}
+			if sessionID != "" {
+				if err := h.sessions.RenameSession(sessionID, req.Name); err != nil {
+					sendWSError(wc, err.Error())
+				}
+			}
+
+		case "delete_session":
+			var req struct {
+				SessionID string `json:"sessionId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			sessionID := req.SessionID
+			if sessionID == "" {
+				sessionID = boundSessionID
+			}
+			if sessionID != "" {
+				h.sessions.DeleteSession(sessionID)
+				// Unbind if this was the bound session
+				if sessionID == boundSessionID {
+					h.mu.Lock()
+					delete(h.conns, boundSessionID)
+					h.mu.Unlock()
+					boundSessionID = ""
+				}
+				// Notify the client
+				resp := map[string]interface{}{
+					"type":      "session_ended",
+					"sessionId": sessionID,
+				}
+				data, _ := json.Marshal(resp)
+				wc.mu.Lock()
+				wc.conn.WriteMessage(websocket.TextMessage, data)
+				wc.mu.Unlock()
+			}
+
+		case "stop_generation":
+			var req struct {
+				SessionID string `json:"sessionId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			sessionID := req.SessionID
+			if sessionID == "" {
+				sessionID = boundSessionID
+			}
+			if sessionID != "" {
+				if err := h.sessions.StopGeneration(sessionID); err != nil {
+					sendWSError(wc, err.Error())
+				}
+			}
+
+		case "clear_session":
+			var req struct {
+				SessionID string `json:"sessionId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			sessionID := req.SessionID
+			if sessionID == "" {
+				sessionID = boundSessionID
+			}
+			if sessionID != "" {
+				if err := h.sessions.ClearSession(sessionID); err != nil {
+					sendWSError(wc, err.Error())
+				}
 			}
 
 		case "permission_response":
