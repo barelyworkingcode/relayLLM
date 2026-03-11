@@ -56,3 +56,12 @@ Default: `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
 go build .                          # main binary
 go build ./cmd/hook                 # permission hook binary
 ```
+
+## Ecosystem
+
+relayLLM is the LLM engine for the Relay ecosystem. Eve, relayScheduler, and relayTelegram all connect to its HTTP/WS API.
+
+- `../relay/` -- MCP orchestrator. Manages relayLLM as a background service.
+- `../eve/` -- Browser-based LLM frontend. Proxies to relayLLM for sessions, projects, and permissions.
+- `../relayScheduler/` -- Task scheduler. Runs LLM prompts on schedule via relayLLM's HTTP API.
+- `../relayTelegram/` -- Telegram bot. Bridges messages to relayLLM sessions.
