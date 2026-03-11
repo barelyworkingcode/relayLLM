@@ -219,3 +219,16 @@ go test ./...            # all tests (requires claude CLI + API key)
 ./smoketest.sh           # end-to-end against a running instance (default: localhost:3001)
 ./smoketest.sh http://localhost:4000  # custom URL
 ```
+
+## Ecosystem
+
+relayLLM is the LLM engine for the Relay ecosystem. Eve, relayScheduler, and relayTelegram all connect to its HTTP/WS API.
+
+- **[Relay](https://github.com/barelyworkingcode/relay)** -- MCP orchestrator. Manages relayLLM as a background service.
+- **[Eve](https://github.com/barelyworkingcode/eve)** -- Browser-based LLM frontend. Proxies to relayLLM.
+- **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** -- Task scheduler. Runs LLM prompts on schedule.
+- **[relayTelegram](https://github.com/barelyworkingcode/relayTelegram)** -- Telegram bot bridge to relayLLM sessions.
+
+## License
+
+[MIT](./LICENSE)
