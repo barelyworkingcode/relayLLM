@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const claudeIdleTimeout = 15 * time.Minute
+
 // ClaudeProvider manages a persistent Claude CLI process.
 type ClaudeProvider struct {
 	session *Session
@@ -29,6 +31,10 @@ type ClaudeProvider struct {
 	model           string
 	directory       string
 	hookURL         string // URL for permission hook binary
+
+	lastActivity atomic.Int64  // unix timestamp of last activity
+	stopIdle     chan struct{} // signals idle watcher to stop
+	stopIdleOnce sync.Once    // prevents double-close of stopIdle
 }
 
 func NewClaudeProvider(session *Session, handler EventHandler, hookURL string) *ClaudeProvider {
@@ -38,6 +44,29 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookURL string) *
 		model:     session.Model,
 		directory: session.Directory,
 		hookURL:   hookURL,
+	}
+}
+
+func (p *ClaudeProvider) touchActivity() {
+	p.lastActivity.Store(time.Now().Unix())
+}
+
+func (p *ClaudeProvider) idleWatcher() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopIdle:
+			return
+		case <-ticker.C:
+			idle := time.Now().Unix() - p.lastActivity.Load()
+			if idle > int64(claudeIdleTimeout.Seconds()) {
+				slog.Info("claude process idle, killing", "session", p.session.ID, "idleSecs", idle)
+				p.Kill()
+				return
+			}
+		}
 	}
 }
 
@@ -88,10 +117,14 @@ func (p *ClaudeProvider) Start() error {
 	p.cmd = cmd
 	p.stdin = stdin
 	p.alive.Store(true)
+	p.stopIdle = make(chan struct{})
+	p.stopIdleOnce = sync.Once{}
+	p.touchActivity()
 
 	go p.readStdout(stdout)
 	go p.readStderr(stderr)
 	go p.waitForExit()
+	go p.idleWatcher()
 
 	slog.Info("claude process started", "session", p.session.ID, "model", p.model, "pid", cmd.Process.Pid)
 	return nil
@@ -145,6 +178,8 @@ func (p *ClaudeProvider) waitForExit() {
 }
 
 func (p *ClaudeProvider) processLine(raw json.RawMessage) {
+	p.touchActivity()
+
 	// Extract the event type for routing.
 	var envelope struct {
 		Type    string `json:"type"`
@@ -204,6 +239,8 @@ func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error 
 		return fmt.Errorf("claude process not running")
 	}
 
+	p.touchActivity()
+
 	// Build content blocks.
 	var content []interface{}
 	for _, f := range files {
@@ -250,6 +287,11 @@ func (p *ClaudeProvider) StopGeneration() {
 func (p *ClaudeProvider) Kill() {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
+	}
+
+	// Stop the idle watcher goroutine.
+	if p.stopIdle != nil {
+		p.stopIdleOnce.Do(func() { close(p.stopIdle) })
 	}
 
 	if p.stdin != nil {
