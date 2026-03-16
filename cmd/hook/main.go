@@ -19,6 +19,11 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Headless sessions auto-approve all tool use — no human in the loop.
+	if os.Getenv("RELAY_LLM_HEADLESS") == "true" {
+		os.Exit(0)
+	}
+
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		os.Exit(0)
@@ -30,6 +35,12 @@ func main() {
 		ToolUseID string          `json:"tool_use_id"`
 	}
 	if err := json.Unmarshal(input, &data); err != nil {
+		os.Exit(0)
+	}
+
+	// Interactive UI tools have no side effects — skip the permission roundtrip.
+	switch data.ToolName {
+	case "ExitPlanMode", "AskUserQuestion":
 		os.Exit(0)
 	}
 

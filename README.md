@@ -86,6 +86,12 @@ Request:
 ```
 Either `projectId` or `directory` is required. If `projectId` is provided, the project's path and model are used as defaults. `model` defaults to `"sonnet"`. `name` defaults to `"New Session"`.
 
+Optional `settings` object is passed through to the provider. For headless (non-interactive) sessions:
+```json
+{"projectId": "uuid", "settings": {"headless": true}}
+```
+See [Headless Sessions](#headless-sessions) below.
+
 Response `201`:
 ```json
 {"sessionId": "uuid", "projectId": "uuid", "directory": "/code/myapp", "model": "haiku", "name": "my session"}
@@ -106,6 +112,10 @@ Response `200`:
 `504` on timeout (5 min). `500` on provider error.
 
 **`DELETE /api/sessions/:id`** -- End a session and kill the provider process.
+
+Response `200`: `{"success": true}`.
+
+**`POST /api/sessions/:id/delete`** -- Permanently delete a session, its provider data, and persisted file.
 
 Response `200`: `{"success": true}`.
 
@@ -201,6 +211,17 @@ Connect to `/ws`. All messages are JSON with a `type` field.
 6. The hook binary returns the decision to Claude CLI
 
 The hook binary is automatically registered in `.claude/settings.local.json` when a session starts. It uses `RELAY_LLM_HOOK_URL` and `RELAY_LLM_SESSION_ID` env vars set by the provider.
+
+### Headless Sessions
+
+When a session is created with `settings: {"headless": true}`, the Claude provider:
+
+1. Adds `--dangerously-skip-permissions --permission-mode bypassPermissions` to CLI args
+2. Sets `RELAY_LLM_HEADLESS=true` env var on the Claude process
+
+The hook binary inherits the env var and exits 0 immediately (auto-approve) instead of POSTing to `/api/permission`. This prevents headless sessions (e.g. from relayScheduler) from stalling on permission prompts with no human to respond.
+
+Used by relayScheduler for scheduled tasks. Interactive sessions from Eve don't set this flag.
 
 ## Data Storage
 
