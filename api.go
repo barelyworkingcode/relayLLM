@@ -33,17 +33,15 @@ func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore) {
 
 		case http.MethodPost:
 			var body struct {
-				Name         string          `json:"name"`
-				Path         string          `json:"path"`
-				Model        string          `json:"model"`
-				AllowedTools []string        `json:"allowedTools"`
-				Integrations json.RawMessage `json:"integrations"`
+				Name         string   `json:"name"`
+				Path         string   `json:"path"`
+				AllowedTools []string `json:"allowedTools"`
 			}
 			if err := readJSON(r, &body); err != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 				return
 			}
-			p, err := store.Create(body.Name, body.Path, body.Model, body.AllowedTools, body.Integrations)
+			p, err := store.Create(body.Name, body.Path, body.AllowedTools)
 			if err != nil {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
@@ -107,16 +105,17 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 		case http.MethodPost:
 			var body struct {
-				ProjectID string `json:"projectId"`
-				Directory string `json:"directory"`
-				Name      string `json:"name"`
-				Model     string `json:"model"`
+				ProjectID string          `json:"projectId"`
+				Directory string          `json:"directory"`
+				Name      string          `json:"name"`
+				Model     string          `json:"model"`
+				Settings  json.RawMessage `json:"settings"`
 			}
 			if err := readJSON(r, &body); err != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 				return
 			}
-			session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model)
+			session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.Settings)
 			if err != nil {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
@@ -181,6 +180,12 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			return
 		}
 
+		if len(parts) == 2 && parts[1] == "delete" && r.Method == http.MethodPost {
+			sessions.DeleteSession(sessionID)
+			writeJSON(w, 200, map[string]bool{"success": true})
+			return
+		}
+
 		if r.Method == http.MethodDelete {
 			sessions.EndSession(sessionID)
 			writeJSON(w, 200, map[string]bool{"success": true})
@@ -219,7 +224,10 @@ func RegisterModelRoutes(mux *http.ServeMux, lmStudioURL string) {
 			}
 		}
 
-		writeJSON(w, 200, models)
+		writeJSON(w, 200, map[string]interface{}{
+			"models":           models,
+			"providerSettings": ProviderSettings(),
+		})
 	})
 }
 

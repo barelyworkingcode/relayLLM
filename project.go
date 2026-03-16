@@ -11,13 +11,11 @@ import (
 )
 
 type Project struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Path         string          `json:"path"`
-	Model        string          `json:"model"`
-	AllowedTools []string        `json:"allowedTools"`
-	Integrations json.RawMessage `json:"integrations,omitempty"`
-	CreatedAt    string          `json:"createdAt"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Path         string   `json:"path"`
+	AllowedTools []string `json:"allowedTools"`
+	CreatedAt    string   `json:"createdAt"`
 }
 
 type projectFile struct {
@@ -80,15 +78,12 @@ func (s *ProjectStore) Get(id string) (Project, bool) {
 	return Project{}, false
 }
 
-func (s *ProjectStore) Create(name, path, model string, allowedTools []string, integrations json.RawMessage) (Project, error) {
+func (s *ProjectStore) Create(name, path string, allowedTools []string) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if name == "" || path == "" {
 		return Project{}, fmt.Errorf("name and path are required")
-	}
-	if model == "" {
-		model = "sonnet"
 	}
 	if allowedTools == nil {
 		allowedTools = []string{}
@@ -98,9 +93,7 @@ func (s *ProjectStore) Create(name, path, model string, allowedTools []string, i
 		ID:           uuid.New().String(),
 		Name:         name,
 		Path:         path,
-		Model:        model,
 		AllowedTools: allowedTools,
-		Integrations: integrations,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	s.projects = append(s.projects, p)
@@ -121,9 +114,6 @@ func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Projec
 		if v, ok := updates["path"].(string); ok && v != "" {
 			s.projects[i].Path = v
 		}
-		if v, ok := updates["model"].(string); ok && v != "" {
-			s.projects[i].Model = v
-		}
 		if v, ok := updates["allowedTools"]; ok {
 			if tools, ok := v.([]interface{}); ok {
 				strs := make([]string, 0, len(tools))
@@ -133,16 +123,6 @@ func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Projec
 					}
 				}
 				s.projects[i].AllowedTools = strs
-			}
-		}
-		if v, ok := updates["integrations"]; ok {
-			if v == nil {
-				s.projects[i].Integrations = nil
-			} else {
-				raw, err := json.Marshal(v)
-				if err == nil {
-					s.projects[i].Integrations = raw
-				}
 			}
 		}
 		return s.projects[i], s.save()

@@ -16,30 +16,42 @@ import (
 	"time"
 )
 
-// LMStudioProvider manages an LM Studio HTTP connection using the native /api/v1/chat endpoint.
-type LMStudioProvider struct {
-	session      *Session
-	handler      EventHandler
-	baseURL      string
-	apiToken     string
-	model        string
-	integrations json.RawMessage
-	client       *http.Client
-	mu           sync.Mutex
-	started      atomic.Bool
-	cancelFn     context.CancelFunc
-	responseID   string // last response_id for stateful chain
+// lmStudioSettings holds parsed per-session settings for LM Studio.
+type lmStudioSettings struct {
+	Temperature   *float64 `json:"temperature,omitempty"`
+	Reasoning     *bool    `json:"reasoning,omitempty"`
+	ContextLength *int     `json:"contextLength,omitempty"`
+	Integrations  []string `json:"integrations,omitempty"`
 }
 
-func NewLMStudioProvider(session *Session, handler EventHandler, baseURL string, integrations json.RawMessage) *LMStudioProvider {
+// LMStudioProvider manages an LM Studio HTTP connection using the native /api/v1/chat endpoint.
+type LMStudioProvider struct {
+	session    *Session
+	handler    EventHandler
+	baseURL    string
+	apiToken   string
+	model      string
+	settings   lmStudioSettings
+	client     *http.Client
+	mu         sync.Mutex
+	started    atomic.Bool
+	cancelFn   context.CancelFunc
+	responseID string // last response_id for stateful chain
+}
+
+func NewLMStudioProvider(session *Session, handler EventHandler, baseURL string, settings json.RawMessage) *LMStudioProvider {
+	var parsed lmStudioSettings
+	if len(settings) > 0 {
+		json.Unmarshal(settings, &parsed)
+	}
 	return &LMStudioProvider{
-		session:      session,
-		handler:      handler,
-		baseURL:      strings.TrimRight(baseURL, "/"),
-		apiToken:     os.Getenv("LM_STUDIO_API_TOKEN"),
-		model:        session.Model,
-		integrations: integrations,
-		client:       &http.Client{Timeout: 0}, // no timeout — streaming
+		session:  session,
+		handler:  handler,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		apiToken: os.Getenv("LM_STUDIO_API_TOKEN"),
+		model:    session.Model,
+		settings: parsed,
+		client:   &http.Client{Timeout: 0}, // no timeout — streaming
 	}
 }
 
@@ -108,8 +120,17 @@ func (p *LMStudioProvider) SendMessage(text string, files []FileAttachment) erro
 	if p.responseID != "" {
 		body["previous_response_id"] = p.responseID
 	}
-	if len(p.integrations) > 0 {
-		body["integrations"] = json.RawMessage(p.integrations)
+	if p.settings.Temperature != nil {
+		body["temperature"] = *p.settings.Temperature
+	}
+	if p.settings.Reasoning != nil && *p.settings.Reasoning {
+		body["reasoning"] = true
+	}
+	if p.settings.ContextLength != nil && *p.settings.ContextLength > 0 {
+		body["context_length"] = *p.settings.ContextLength
+	}
+	if len(p.settings.Integrations) > 0 {
+		body["integrations"] = p.settings.Integrations
 	}
 
 	err := p.doSend(body)
@@ -404,6 +425,10 @@ func (p *LMStudioProvider) Kill() {
 
 func (p *LMStudioProvider) Alive() bool {
 	return p.started.Load()
+}
+
+func (p *LMStudioProvider) DeleteSession() error {
+	return nil
 }
 
 func (p *LMStudioProvider) GetState() json.RawMessage {

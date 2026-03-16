@@ -83,6 +83,16 @@ func (p *ClaudeProvider) Start() error {
 		args = append(args, "--resume", p.claudeSessionID)
 	}
 
+	var settings struct {
+		Headless bool `json:"headless"`
+	}
+	if p.session.Settings != nil {
+		json.Unmarshal(p.session.Settings, &settings)
+	}
+	if settings.Headless {
+		args = append(args, "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions")
+	}
+
 	claudePath := resolveClaudePath()
 	cmd := exec.Command(claudePath, args...)
 	cmd.Dir = p.directory
@@ -91,6 +101,10 @@ func (p *ClaudeProvider) Start() error {
 		fmt.Sprintf("RELAY_LLM_HOOK_URL=%s", p.hookURL),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
 	)
+
+	if settings.Headless {
+		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")
+	}
 
 
 	stdin, err := cmd.StdinPipe()
@@ -319,6 +333,32 @@ func (p *ClaudeProvider) Kill() {
 
 func (p *ClaudeProvider) Alive() bool {
 	return p.alive.Load()
+}
+
+func (p *ClaudeProvider) DeleteSession() error {
+	if p.claudeSessionID == "" {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	pattern := filepath.Join(home, ".claude", "projects", "*", p.claudeSessionID+".jsonl")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob claude session: %w", err)
+	}
+
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove claude session file: %w", err)
+		}
+		slog.Info("deleted claude session file", "path", path)
+	}
+
+	return nil
 }
 
 func (p *ClaudeProvider) GetState() json.RawMessage {

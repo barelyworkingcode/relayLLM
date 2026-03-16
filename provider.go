@@ -16,6 +16,9 @@ type Provider interface {
 	// Kill terminates the provider process.
 	Kill()
 
+	// DeleteSession removes provider-specific session data from disk.
+	DeleteSession() error
+
 	// Alive returns true if the provider process is running.
 	Alive() bool
 
