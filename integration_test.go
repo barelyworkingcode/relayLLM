@@ -111,9 +111,8 @@ func createTestProject(t *testing.T, ts *testServer) string {
 		ID string `json:"id"`
 	}
 	resp := doJSON(t, "POST", ts.Server.URL+"/api/projects", map[string]interface{}{
-		"name":  "integration-test",
-		"path":  projectDir,
-		"model": "haiku",
+		"name": "integration-test",
+		"path": projectDir,
 	}, &project)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create project: expected 201, got %d", resp.StatusCode)
@@ -182,9 +181,8 @@ func TestIntegration_ProjectCRUD(t *testing.T) {
 		Path string `json:"path"`
 	}
 	resp := doJSON(t, "POST", ts.Server.URL+"/api/projects", map[string]interface{}{
-		"name":  "test-project",
-		"path":  t.TempDir(),
-		"model": "haiku",
+		"name": "test-project",
+		"path": t.TempDir(),
 	}, &created)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: expected 201, got %d", resp.StatusCode)

@@ -20,7 +20,7 @@ cmd/hook/            Compiled PreToolUse hook binary
 
 ## Providers
 
-- **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`.
+- **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves).
 - **Gemini**: (planned) One-shot process per message.
 - **LM Studio**: (planned) HTTP client with SSE streaming.
 

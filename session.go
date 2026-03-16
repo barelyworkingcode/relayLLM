@@ -20,6 +20,7 @@ type Session struct {
 	Directory     string          `json:"directory"`
 	Model         string          `json:"model"`
 	ProviderType  string          `json:"providerType"`
+	Settings      json.RawMessage `json:"settings,omitempty"`
 	CreatedAt     string          `json:"createdAt"`
 	Messages      []Message       `json:"messages"`
 	Stats         SessionStats    `json:"stats"`
@@ -79,7 +80,7 @@ func (m *SessionManager) SetLMStudioURL(url string) {
 	m.lmStudioURL = url
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model string) (*Session, error) {
+func (m *SessionManager) CreateSession(projectID, directory, name, model string, settings json.RawMessage) (*Session, error) {
 	var dir string
 
 	if projectID != "" {
@@ -88,20 +89,17 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string)
 			return nil, fmt.Errorf("project not found: %s", projectID)
 		}
 		dir = project.Path
-		if model == "" {
-			model = project.Model
-		}
 	} else {
 		// Ungrouped session - directory is required
 		if directory == "" {
 			return nil, fmt.Errorf("directory is required for sessions without a project")
 		}
 		dir = directory
-		if model == "" {
-			model = "sonnet"
-		}
 	}
 
+	if model == "" {
+		model = "sonnet"
+	}
 	if name == "" {
 		name = "New Session"
 	}
@@ -115,6 +113,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string)
 		Directory:    dir,
 		Model:        model,
 		ProviderType: providerType,
+		Settings:     settings,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		Messages:     []Message{},
 		Stats:        SessionStats{},
@@ -155,13 +154,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 
 	switch session.ProviderType {
 	case "lmstudio":
-		var integrations json.RawMessage
-		if session.ProjectID != "" {
-			if proj, ok := m.projectStore.Get(session.ProjectID); ok {
-				integrations = proj.Integrations
-			}
-		}
-		p := NewLMStudioProvider(session, handler, m.lmStudioURL, integrations)
+		p := NewLMStudioProvider(session, handler, m.lmStudioURL, session.Settings)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
@@ -540,6 +533,9 @@ func (m *SessionManager) DeleteSession(id string) {
 	m.mu.Unlock()
 
 	if session.provider != nil {
+		if err := session.provider.DeleteSession(); err != nil {
+			slog.Warn("failed to delete provider session data", "id", id, "error", err)
+		}
 		session.provider.Kill()
 	}
 
