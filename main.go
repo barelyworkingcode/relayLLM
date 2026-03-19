@@ -19,6 +19,7 @@ func main() {
 	port := flag.String("port", envOrDefault("RELAY_LLM_PORT", "3001"), "HTTP/WebSocket listen port")
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	lmStudioURL := flag.String("lmstudio-url", envOrDefault("LM_STUDIO_URL", "http://localhost:1234"), "LM Studio base URL")
+	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -54,12 +55,19 @@ func main() {
 	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
 	sessions.SetLMStudioURL(*lmStudioURL)
 
+	schedulerClient := NewSchedulerClient(*schedulerURL)
+
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, store)
+	RegisterProjectRoutes(mux, store, schedulerClient)
 	RegisterSessionRoutes(mux, sessions)
 	RegisterPermissionRoutes(mux, perms)
 	RegisterModelRoutes(mux, *lmStudioURL)
+	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
+
+	// Forward scheduler WebSocket events to all connected clients.
+	schedulerWS := NewSchedulerWSForwarder(*schedulerURL, wsHub)
+	go schedulerWS.Run()
 
 	// Graceful shutdown.
 	go func() {
@@ -67,6 +75,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		slog.Info("shutting down")
+		schedulerWS.Close()
 		sessions.StopAll()
 		os.Exit(0)
 	}()

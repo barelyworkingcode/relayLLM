@@ -17,6 +17,7 @@ var upgrader = websocket.Upgrader{
 type WSHub struct {
 	mu       sync.RWMutex
 	conns    map[string]*wsConn // sessionID → connection
+	allConns map[*wsConn]bool   // all connected clients (for broadcast)
 	sessions *SessionManager
 	perms    *PermissionManager
 }
@@ -29,6 +30,7 @@ type wsConn struct {
 func NewWSHub(sessions *SessionManager, perms *PermissionManager) *WSHub {
 	return &WSHub{
 		conns:    make(map[string]*wsConn),
+		allConns: make(map[*wsConn]bool),
 		sessions: sessions,
 		perms:    perms,
 	}
@@ -72,12 +74,17 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	wc := &wsConn{conn: conn}
 	var boundSessionID string
 
+	h.mu.Lock()
+	h.allConns[wc] = true
+	h.mu.Unlock()
+
 	defer func() {
+		h.mu.Lock()
+		delete(h.allConns, wc)
 		if boundSessionID != "" {
-			h.mu.Lock()
 			delete(h.conns, boundSessionID)
-			h.mu.Unlock()
 		}
+		h.mu.Unlock()
 		conn.Close()
 		slog.Info("websocket disconnected", "remote", r.RemoteAddr)
 	}()
@@ -158,11 +165,13 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			resp := map[string]interface{}{
 				"type":      "session_joined",
 				"sessionId": session.ID,
+				"projectId": session.ProjectID,
 				"directory": session.Directory,
 				"model":     session.Model,
 				"name":      session.Name,
 				"history":   history,
 				"stats":     stats,
+				"headless":  session.Headless,
 			}
 			data, _ := json.Marshal(resp)
 			wc.mu.Lock()
@@ -300,6 +309,24 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 				Reason:   req.Reason,
 			})
 		}
+	}
+}
+
+// Broadcast sends a message to all connected WebSocket clients,
+// including those not currently bound to a session.
+func (h *WSHub) Broadcast(msg map[string]interface{}) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		slog.Error("failed to marshal broadcast message", "error", err)
+		return
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.allConns {
+		c.mu.Lock()
+		c.conn.WriteMessage(websocket.TextMessage, data)
+		c.mu.Unlock()
 	}
 }
 

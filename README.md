@@ -31,6 +31,7 @@ This builds both binaries and registers the service with Relay (`relay service r
 |------|---------|---------|-------------|
 | `--port` | `RELAY_LLM_PORT` | `3001` | HTTP/WebSocket listen port |
 | `--data-dir` | `RELAY_LLM_DATA` | `~/.config/relayLLM` | Data directory |
+| `--scheduler-url` | `RELAY_SCHEDULER_URL` | `http://localhost:3002` | relayScheduler URL for task proxy |
 
 ## HTTP API
 
@@ -65,7 +66,7 @@ Request: partial object with fields to update (`name`, `path`, `model`, `allowed
 
 Response `200`: updated project object. `404` if not found.
 
-**`DELETE /api/projects/:id`** -- Delete a project.
+**`DELETE /api/projects/:id`** -- Delete a project. Also deletes any associated tasks in relayScheduler (via scheduler proxy).
 
 Response `200`: `{"success": true}`. `404` if not found.
 
@@ -143,6 +144,26 @@ Response `200`:
 ```
 `decision` is `"allow"` or `"deny"`. Defaults to `"deny"` with reason `"timeout"` after 60s.
 
+### Tasks (Scheduler Proxy)
+
+All task endpoints proxy to relayScheduler. Returns `502` if relayScheduler is unavailable.
+
+**`GET /api/tasks`** -- List all tasks.
+
+**`POST /api/tasks`** -- Create a task.
+
+**`GET /api/tasks/:id`** -- Get a task.
+
+**`PUT /api/tasks/:id`** -- Update a task.
+
+**`DELETE /api/tasks/:id`** -- Delete a task.
+
+**`POST /api/tasks/:id/run`** -- Trigger immediate execution of a task.
+
+**`GET /api/tasks/:id/history`** -- Get execution history for a task.
+
+**`GET /api/tasks/project/:projectId`** -- List tasks for a specific project.
+
 ## WebSocket Protocol
 
 Connect to `/ws`. All messages are JSON with a `type` field.
@@ -199,6 +220,10 @@ Connect to `/ws`. All messages are JSON with a `type` field.
 | `process_exited` | `sessionId` | Provider process died |
 | `raw_output` | `sessionId`, `text` | Non-JSON provider output |
 | `system_message` | `sessionId`, `message` | System notification |
+| `task_started` | `taskId`, `projectId` | Task execution started (forwarded from relayScheduler) |
+| `task_completed` | `taskId`, `projectId`, `result` | Task execution completed (forwarded from relayScheduler) |
+| `task_error` | `taskId`, `projectId`, `error` | Task execution failed (forwarded from relayScheduler) |
+| `task_status` | `taskId`, `projectId`, `status` | Task status changed (forwarded from relayScheduler) |
 | `error` | `message` | Error message |
 
 ## Permission Flow
@@ -243,11 +268,11 @@ go test ./...            # all tests (requires claude CLI + API key)
 
 ## Ecosystem
 
-relayLLM is the LLM engine for the Relay ecosystem. Eve, relayScheduler, and relayTelegram all connect to its HTTP/WS API.
+relayLLM is the LLM engine for the Relay ecosystem. It serves as the single backend for Eve and relayTelegram, and proxies task operations to relayScheduler. Eve, relayScheduler, and relayTelegram all connect to its HTTP/WS API.
 
 - **[Relay](https://github.com/barelyworkingcode/relay)** -- MCP orchestrator. Manages relayLLM as a background service.
-- **[Eve](https://github.com/barelyworkingcode/eve)** -- Browser-based LLM frontend. Proxies to relayLLM.
-- **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** -- Task scheduler. Runs LLM prompts on schedule.
+- **[Eve](https://github.com/barelyworkingcode/eve)** -- Browser-based LLM frontend. Single-backend client to relayLLM for all operations including tasks.
+- **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** -- Task scheduler. Runs LLM prompts on schedule. relayLLM proxies task API and forwards scheduler WebSocket events.
 - **[relayTelegram](https://github.com/barelyworkingcode/relayTelegram)** -- Telegram bot bridge to relayLLM sessions.
 
 ## License

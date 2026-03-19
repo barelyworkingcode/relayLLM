@@ -26,6 +26,8 @@ type Session struct {
 	Stats         SessionStats    `json:"stats"`
 	ProviderState json.RawMessage `json:"providerState,omitempty"`
 
+	Headless bool `json:"headless,omitempty"`
+
 	provider   Provider
 	processing bool
 	mu         sync.Mutex
@@ -106,6 +108,13 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string,
 
 	providerType := deriveProviderType(model)
 
+	var parsedSettings struct {
+		Headless bool `json:"headless"`
+	}
+	if settings != nil {
+		json.Unmarshal(settings, &parsedSettings)
+	}
+
 	session := &Session{
 		ID:           uuid.New().String(),
 		ProjectID:    projectID,
@@ -117,6 +126,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		Messages:     []Message{},
 		Stats:        SessionStats{},
+		Headless:     parsedSettings.Headless,
 	}
 
 	m.mu.Lock()
@@ -471,6 +481,9 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 	list := make([]map[string]interface{}, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		seen[s.ID] = true
+		if s.Headless {
+			continue
+		}
 		list = append(list, map[string]interface{}{
 			"id":        s.ID,
 			"projectId": s.ProjectID,
@@ -486,7 +499,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 	persisted, err := m.sessionStore.LoadAll()
 	if err == nil {
 		for _, s := range persisted {
-			if seen[s.ID] {
+			if seen[s.ID] || s.Headless {
 				continue
 			}
 			list = append(list, map[string]interface{}{
@@ -525,20 +538,20 @@ func (m *SessionManager) EndSession(id string) {
 func (m *SessionManager) DeleteSession(id string) {
 	m.mu.Lock()
 	session, ok := m.sessions[id]
-	if !ok {
-		m.mu.Unlock()
-		return
+	if ok {
+		delete(m.sessions, id)
 	}
-	delete(m.sessions, id)
 	m.mu.Unlock()
 
-	if session.provider != nil {
+	if ok && session.provider != nil {
 		if err := session.provider.DeleteSession(); err != nil {
 			slog.Warn("failed to delete provider session data", "id", id, "error", err)
 		}
 		session.provider.Kill()
 	}
 
+	// Always delete the persisted file — the session may have been saved
+	// to disk by EndSession but removed from memory.
 	if err := m.sessionStore.Delete(id); err != nil {
 		slog.Warn("failed to delete session file", "id", id, "error", err)
 	}
