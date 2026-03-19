@@ -11,7 +11,6 @@ echo "Built hook binary."
 /Applications/Relay.app/Contents/MacOS/relay service register \
   --name "Relay LLM" \
   --command "$(pwd)/relayllm" \
-  --settings-command "open https://www.barelyworkingcode.com" \
   --autostart
 echo ""
 echo "Registered with Relay."

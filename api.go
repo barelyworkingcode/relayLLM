@@ -25,7 +25,12 @@ func readJSON(r *http.Request, v interface{}) error {
 
 // --- Project Routes ---
 
-func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore) {
+func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore, schedulerClient ...*SchedulerClient) {
+	var sc *SchedulerClient
+	if len(schedulerClient) > 0 {
+		sc = schedulerClient[0]
+	}
+	_ = sc // used in delete handler
 	mux.HandleFunc("/api/projects", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -83,6 +88,12 @@ func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore) {
 			writeJSON(w, 200, p)
 
 		case http.MethodDelete:
+			// Cascade: delete tasks for this project in scheduler
+			if sc != nil {
+				if _, _, err := sc.Proxy("DELETE", "/api/tasks/by-project/"+id, "", nil); err != nil {
+					slog.Warn("scheduler cascade delete failed", "project", id, "error", err)
+				}
+			}
 			if err := store.Delete(id); err != nil {
 				writeJSON(w, 404, map[string]string{"error": err.Error()})
 				return
@@ -187,7 +198,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		}
 
 		if r.Method == http.MethodDelete {
-			sessions.EndSession(sessionID)
+			sessions.DeleteSession(sessionID)
 			writeJSON(w, 200, map[string]bool{"success": true})
 			return
 		}
