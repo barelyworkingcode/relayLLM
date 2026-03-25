@@ -33,6 +33,21 @@ type Session struct {
 	mu         sync.Mutex
 }
 
+// getProvider returns the current provider, safe for concurrent use.
+func (s *Session) getProvider() Provider {
+	s.mu.Lock()
+	p := s.provider
+	s.mu.Unlock()
+	return p
+}
+
+// setProvider sets the provider, safe for concurrent use.
+func (s *Session) setProvider(p Provider) {
+	s.mu.Lock()
+	s.provider = p
+	s.mu.Unlock()
+}
+
 // SessionStore handles session persistence to disk.
 type SessionStore struct {
 	dir string
@@ -181,7 +196,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		provider = p
 	}
 
-	session.provider = provider
+	session.setProvider(provider)
 	return provider.Start()
 }
 
@@ -319,10 +334,16 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		m.saveSession(session)
 
 	case "process_exited":
+		session.mu.Lock()
+		session.processing = false
+		session.mu.Unlock()
+
 		msg = map[string]interface{}{
 			"type":      "process_exited",
 			"sessionId": session.ID,
 		}
+
+		m.saveSession(session)
 
 	case "raw_output":
 		msg = map[string]interface{}{
@@ -332,6 +353,10 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		}
 
 	case "error":
+		session.mu.Lock()
+		session.processing = false
+		session.mu.Unlock()
+
 		msg = map[string]interface{}{
 			"type":      "error",
 			"sessionId": session.ID,
@@ -375,13 +400,15 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	session.mu.Unlock()
 
 	// Restart provider if dead.
-	if session.provider == nil || !session.provider.Alive() {
+	provider := session.getProvider()
+	if provider == nil || !provider.Alive() {
 		if err := m.initProvider(session); err != nil {
 			session.mu.Lock()
 			session.processing = false
 			session.mu.Unlock()
 			return fmt.Errorf("failed to restart provider: %w", err)
 		}
+		provider = session.getProvider()
 	}
 
 	// Persist user message.
@@ -395,7 +422,7 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	})
 	session.mu.Unlock()
 
-	return session.provider.SendMessage(text, files)
+	return provider.SendMessage(text, files)
 }
 
 // StopGeneration aborts the in-flight response for a session.
@@ -408,8 +435,8 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if session.provider != nil {
-		session.provider.StopGeneration()
+	if provider := session.getProvider(); provider != nil {
+		provider.StopGeneration()
 	}
 
 	session.mu.Lock()
@@ -484,13 +511,14 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 		if s.Headless {
 			continue
 		}
+		provider := s.getProvider()
 		list = append(list, map[string]interface{}{
 			"id":        s.ID,
 			"projectId": s.ProjectID,
 			"name":      s.Name,
 			"directory": s.Directory,
 			"model":     s.Model,
-			"active":    s.provider != nil && s.provider.Alive(),
+			"active":    provider != nil && provider.Alive(),
 		})
 	}
 	m.mu.RUnlock()
@@ -526,8 +554,8 @@ func (m *SessionManager) EndSession(id string) {
 	delete(m.sessions, id)
 	m.mu.Unlock()
 
-	if session.provider != nil {
-		session.provider.Kill()
+	if provider := session.getProvider(); provider != nil {
+		provider.Kill()
 	}
 
 	m.saveSession(session)
@@ -543,11 +571,13 @@ func (m *SessionManager) DeleteSession(id string) {
 	}
 	m.mu.Unlock()
 
-	if ok && session.provider != nil {
-		if err := session.provider.DeleteSession(); err != nil {
-			slog.Warn("failed to delete provider session data", "id", id, "error", err)
+	if ok {
+		if provider := session.getProvider(); provider != nil {
+			if err := provider.DeleteSession(); err != nil {
+				slog.Warn("failed to delete provider session data", "id", id, "error", err)
+			}
+			provider.Kill()
 		}
-		session.provider.Kill()
 	}
 
 	// Always delete the persisted file — the session may have been saved
@@ -570,18 +600,18 @@ func (m *SessionManager) ClearSession(id string) error {
 	}
 
 	// Kill existing provider
-	if session.provider != nil {
-		session.provider.Kill()
-		session.provider = nil
-	}
-
-	// Clear messages and stats
 	session.mu.Lock()
+	provider := session.provider
+	session.provider = nil
 	session.Messages = []Message{}
 	session.Stats = SessionStats{}
 	session.ProviderState = nil
 	session.processing = false
 	session.mu.Unlock()
+
+	if provider != nil {
+		provider.Kill()
+	}
 
 	// Persist cleared state
 	m.saveSession(session)
@@ -651,13 +681,12 @@ func (m *SessionManager) StopAll() {
 	m.mu.Unlock()
 
 	for _, s := range sessions {
-		if s.provider != nil {
-			s.provider.Kill()
+		if provider := s.getProvider(); provider != nil {
+			provider.Kill()
 		}
 		m.saveSession(s)
 	}
 }
-
 
 func (m *SessionManager) saveSession(session *Session) {
 	session.mu.Lock()

@@ -38,7 +38,7 @@ func newTestServer(t *testing.T) *testServer {
 	perms.sink = wsHub
 
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, store)
+	RegisterProjectRoutes(mux, store, nil)
 	RegisterSessionRoutes(mux, sessions)
 	RegisterPermissionRoutes(mux, perms)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)

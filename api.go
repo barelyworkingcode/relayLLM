@@ -25,12 +25,7 @@ func readJSON(r *http.Request, v interface{}) error {
 
 // --- Project Routes ---
 
-func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore, schedulerClient ...*SchedulerClient) {
-	var sc *SchedulerClient
-	if len(schedulerClient) > 0 {
-		sc = schedulerClient[0]
-	}
-	_ = sc // used in delete handler
+func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore, sc *SchedulerClient) {
 	mux.HandleFunc("/api/projects", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

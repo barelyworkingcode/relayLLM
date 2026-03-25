@@ -348,7 +348,9 @@ func (p *LMStudioProvider) handleSSEEvent(eventName string, data []byte, fullTex
 		}
 		if err := json.Unmarshal(data, &envelope); err == nil {
 			if envelope.Result.ResponseID != "" {
+				p.mu.Lock()
 				p.responseID = envelope.Result.ResponseID
+				p.mu.Unlock()
 			}
 
 			if envelope.Result.Stats != nil {
@@ -410,9 +412,12 @@ func (p *LMStudioProvider) emitTextDelta(text string) {
 }
 
 func (p *LMStudioProvider) StopGeneration() {
-	if p.cancelFn != nil {
-		p.cancelFn()
-		p.cancelFn = nil
+	p.mu.Lock()
+	cancel := p.cancelFn
+	p.cancelFn = nil
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	slog.Info("lmstudio generation stopped", "session", p.session.ID)
 }
@@ -432,8 +437,11 @@ func (p *LMStudioProvider) DeleteSession() error {
 }
 
 func (p *LMStudioProvider) GetState() json.RawMessage {
+	p.mu.Lock()
+	rid := p.responseID
+	p.mu.Unlock()
 	state := map[string]string{
-		"responseId": p.responseID,
+		"responseId": rid,
 	}
 	data, _ := json.Marshal(state)
 	return data
@@ -447,7 +455,9 @@ func (p *LMStudioProvider) RestoreState(state json.RawMessage) {
 		ResponseID string `json:"responseId"`
 	}
 	if err := json.Unmarshal(state, &s); err == nil {
+		p.mu.Lock()
 		p.responseID = s.ResponseID
+		p.mu.Unlock()
 	}
 }
 

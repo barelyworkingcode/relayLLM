@@ -11,11 +11,12 @@ import (
 // ResponseCollector captures a complete LLM response for synchronous HTTP callers.
 // Registered via SessionManager.collectors map — does not replace the global sink.
 type ResponseCollector struct {
-	mu    sync.Mutex
-	text  strings.Builder
-	stats SessionStats
-	done  chan struct{}
-	err   error
+	mu       sync.Mutex
+	text     strings.Builder
+	stats    SessionStats
+	done     chan struct{}
+	doneOnce sync.Once
+	err      error
 }
 
 func NewResponseCollector() *ResponseCollector {
@@ -41,20 +42,16 @@ func (c *ResponseCollector) HandleEvent(msg map[string]interface{}) {
 		}
 
 	case "message_complete":
-		close(c.done)
+		c.doneOnce.Do(func() { close(c.done) })
 
 	case "error":
 		errMsg, _ := msg["message"].(string)
 		c.err = fmt.Errorf("%s", errMsg)
-		close(c.done)
+		c.doneOnce.Do(func() { close(c.done) })
 
 	case "process_exited":
 		c.err = fmt.Errorf("provider process exited unexpectedly")
-		select {
-		case <-c.done:
-		default:
-			close(c.done)
-		}
+		c.doneOnce.Do(func() { close(c.done) })
 	}
 }
 

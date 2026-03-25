@@ -46,7 +46,6 @@ func main() {
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(store, sessionStore, perms)
 
-
 	wsHub := NewWSHub(sessions, perms)
 	sessions.SetEventSink(wsHub)
 	perms.sink = wsHub
