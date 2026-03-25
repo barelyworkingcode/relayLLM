@@ -35,6 +35,7 @@ type ClaudeProvider struct {
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
 	stopIdleOnce sync.Once    // prevents double-close of stopIdle
+	waitDone     chan struct{} // closed when cmd.Wait() returns
 }
 
 func NewClaudeProvider(session *Session, handler EventHandler, hookURL string) *ClaudeProvider {
@@ -106,7 +107,6 @@ func (p *ClaudeProvider) Start() error {
 		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")
 	}
 
-
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -133,6 +133,7 @@ func (p *ClaudeProvider) Start() error {
 	p.alive.Store(true)
 	p.stopIdle = make(chan struct{})
 	p.stopIdleOnce = sync.Once{}
+	p.waitDone = make(chan struct{})
 	p.touchActivity()
 
 	go p.readStdout(stdout)
@@ -175,6 +176,7 @@ func (p *ClaudeProvider) readStderr(r io.ReadCloser) {
 func (p *ClaudeProvider) waitForExit() {
 	err := p.cmd.Wait()
 	p.alive.Store(false)
+	close(p.waitDone)
 
 	exitCode := 0
 	if err != nil {
@@ -212,7 +214,9 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 			SessionID string `json:"session_id"`
 		}
 		if err := json.Unmarshal(raw, &init); err == nil && init.SessionID != "" {
+			p.mu.Lock()
 			p.claudeSessionID = init.SessionID
+			p.mu.Unlock()
 		}
 	}
 
@@ -303,6 +307,10 @@ func (p *ClaudeProvider) Kill() {
 		return
 	}
 
+	// Mark dead early so concurrent SendMessage calls fail fast
+	// instead of writing to a closing stdin pipe.
+	p.alive.Store(false)
+
 	// Stop the idle watcher goroutine.
 	if p.stopIdle != nil {
 		p.stopIdleOnce.Do(func() { close(p.stopIdle) })
@@ -314,20 +322,14 @@ func (p *ClaudeProvider) Kill() {
 
 	// Try SIGTERM first, then SIGKILL after 3 seconds.
 	_ = p.cmd.Process.Signal(os.Interrupt)
-	done := make(chan struct{})
-	go func() {
-		p.cmd.Wait()
-		close(done)
-	}()
 
 	select {
-	case <-done:
+	case <-p.waitDone:
 	case <-time.After(3 * time.Second):
 		_ = p.cmd.Process.Kill()
-		<-done
+		<-p.waitDone
 	}
 
-	p.alive.Store(false)
 	slog.Info("claude process killed", "session", p.session.ID)
 }
 
@@ -336,7 +338,10 @@ func (p *ClaudeProvider) Alive() bool {
 }
 
 func (p *ClaudeProvider) DeleteSession() error {
-	if p.claudeSessionID == "" {
+	p.mu.Lock()
+	sid := p.claudeSessionID
+	p.mu.Unlock()
+	if sid == "" {
 		return nil
 	}
 
@@ -345,7 +350,7 @@ func (p *ClaudeProvider) DeleteSession() error {
 		return fmt.Errorf("get home dir: %w", err)
 	}
 
-	pattern := filepath.Join(home, ".claude", "projects", "*", p.claudeSessionID+".jsonl")
+	pattern := filepath.Join(home, ".claude", "projects", "*", sid+".jsonl")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return fmt.Errorf("glob claude session: %w", err)
@@ -362,8 +367,11 @@ func (p *ClaudeProvider) DeleteSession() error {
 }
 
 func (p *ClaudeProvider) GetState() json.RawMessage {
+	p.mu.Lock()
+	sid := p.claudeSessionID
+	p.mu.Unlock()
 	state := map[string]interface{}{
-		"claudeSessionId": p.claudeSessionID,
+		"claudeSessionId": sid,
 	}
 	data, _ := json.Marshal(state)
 	return data
@@ -377,7 +385,9 @@ func (p *ClaudeProvider) RestoreState(state json.RawMessage) {
 		ClaudeSessionID string `json:"claudeSessionId"`
 	}
 	if err := json.Unmarshal(state, &s); err == nil {
+		p.mu.Lock()
 		p.claudeSessionID = s.ClaudeSessionID
+		p.mu.Unlock()
 	}
 }
 
