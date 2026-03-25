@@ -5,22 +5,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
 )
 
+func logDebug(format string, args ...interface{}) {
+	f, err := os.OpenFile("/tmp/relay-hook.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	logger := log.New(f, "", log.LstdFlags)
+	logger.Printf(format, args...)
+}
+
 func main() {
 	hookURL := os.Getenv("RELAY_LLM_HOOK_URL")
 	sessionID := os.Getenv("RELAY_LLM_SESSION_ID")
+	headless := os.Getenv("RELAY_LLM_HEADLESS")
+
+	logDebug("hook invoked: hookURL=%q sessionID=%q headless=%q", hookURL, sessionID, headless)
 
 	// No-op when not running under relayLLM.
 	if hookURL == "" {
+		logDebug("no hookURL, exiting 0")
 		os.Exit(0)
 	}
 
 	// Headless sessions auto-approve all tool use — no human in the loop.
-	if os.Getenv("RELAY_LLM_HEADLESS") == "true" {
+	// Must output an explicit "allow" decision so Claude Code bypasses all
+	// permission checks including path-level restrictions (e.g. .claude/ dir).
+	// A silent exit(0) only means "no opinion" and defers to built-in checks.
+	if headless == "true" {
+		output, _ := json.Marshal(map[string]interface{}{
+			"hookSpecificOutput": map[string]string{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "allow",
+				"permissionDecisionReason": "headless session — all tools auto-approved",
+			},
+		})
+		logDebug("headless allow: %s", string(output))
+		fmt.Println(string(output))
 		os.Exit(0)
 	}
 
