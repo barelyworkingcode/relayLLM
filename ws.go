@@ -72,7 +72,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	slog.Info("websocket connected", "remote", r.RemoteAddr)
 
 	wc := &wsConn{conn: conn}
-	var boundSessionID string
+	boundSessions := make(map[string]bool)
 
 	h.mu.Lock()
 	h.allConns[wc] = true
@@ -81,8 +81,8 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.mu.Lock()
 		delete(h.allConns, wc)
-		if boundSessionID != "" {
-			delete(h.conns, boundSessionID)
+		for sid := range boundSessions {
+			delete(h.conns, sid)
 		}
 		h.mu.Unlock()
 		conn.Close()
@@ -121,14 +121,8 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Unbind previous session.
-			if boundSessionID != "" {
-				h.mu.Lock()
-				delete(h.conns, boundSessionID)
-				h.mu.Unlock()
-			}
-
-			boundSessionID = req.SessionID
+			// Add binding (keep existing bindings for other sessions).
+			boundSessions[req.SessionID] = true
 			h.mu.Lock()
 			h.conns[req.SessionID] = wc
 			h.mu.Unlock()
@@ -188,10 +182,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
-			}
-			if sessionID == "" {
-				sendWSError(wc, "no session bound")
+				sendWSError(wc, "sessionId required")
 				continue
 			}
 
@@ -207,11 +198,10 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
+				sendWSError(wc, "sessionId required")
+				continue
 			}
-			if sessionID != "" {
-				h.sessions.EndSession(sessionID)
-			}
+			h.sessions.EndSession(sessionID)
 
 		case "rename_session":
 			var req struct {
@@ -222,12 +212,11 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
+				sendWSError(wc, "sessionId required")
+				continue
 			}
-			if sessionID != "" {
-				if err := h.sessions.RenameSession(sessionID, req.Name); err != nil {
-					sendWSError(wc, err.Error())
-				}
+			if err := h.sessions.RenameSession(sessionID, req.Name); err != nil {
+				sendWSError(wc, err.Error())
 			}
 
 		case "delete_session":
@@ -238,26 +227,38 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
+				sendWSError(wc, "sessionId required")
+				continue
 			}
-			if sessionID != "" {
-				h.sessions.DeleteSession(sessionID)
-				// Unbind if this was the bound session
-				if sessionID == boundSessionID {
-					h.mu.Lock()
-					delete(h.conns, boundSessionID)
-					h.mu.Unlock()
-					boundSessionID = ""
-				}
-				// Notify the client
-				resp := map[string]interface{}{
-					"type":      "session_ended",
-					"sessionId": sessionID,
-				}
-				data, _ := json.Marshal(resp)
-				wc.mu.Lock()
-				wc.conn.WriteMessage(websocket.TextMessage, data)
-				wc.mu.Unlock()
+			h.sessions.DeleteSession(sessionID)
+			// Unbind if this was a bound session
+			if boundSessions[sessionID] {
+				h.mu.Lock()
+				delete(h.conns, sessionID)
+				h.mu.Unlock()
+				delete(boundSessions, sessionID)
+			}
+			// Notify the client
+			resp := map[string]interface{}{
+				"type":      "session_ended",
+				"sessionId": sessionID,
+			}
+			data, _ := json.Marshal(resp)
+			wc.mu.Lock()
+			wc.conn.WriteMessage(websocket.TextMessage, data)
+			wc.mu.Unlock()
+
+		case "leave_session":
+			var req struct {
+				SessionID string `json:"sessionId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.SessionID != "" && boundSessions[req.SessionID] {
+				h.mu.Lock()
+				delete(h.conns, req.SessionID)
+				h.mu.Unlock()
+				delete(boundSessions, req.SessionID)
 			}
 
 		case "stop_generation":
@@ -268,12 +269,11 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
+				sendWSError(wc, "sessionId required")
+				continue
 			}
-			if sessionID != "" {
-				if err := h.sessions.StopGeneration(sessionID); err != nil {
-					sendWSError(wc, err.Error())
-				}
+			if err := h.sessions.StopGeneration(sessionID); err != nil {
+				sendWSError(wc, err.Error())
 			}
 
 		case "clear_session":
@@ -284,12 +284,11 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 			sessionID := req.SessionID
 			if sessionID == "" {
-				sessionID = boundSessionID
+				sendWSError(wc, "sessionId required")
+				continue
 			}
-			if sessionID != "" {
-				if err := h.sessions.ClearSession(sessionID); err != nil {
-					sendWSError(wc, err.Error())
-				}
+			if err := h.sessions.ClearSession(sessionID); err != nil {
+				sendWSError(wc, err.Error())
 			}
 
 		case "permission_response":
