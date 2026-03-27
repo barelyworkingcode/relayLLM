@@ -197,6 +197,7 @@ func (p *LMStudioProvider) streamResponse(resp *http.Response, cancel context.Ca
 	var fullText strings.Builder
 	var reasoning strings.Builder
 	var currentEvent string
+	completed := false
 
 	state := &streamState{}
 
@@ -218,6 +219,9 @@ func (p *LMStudioProvider) streamResponse(resp *http.Response, cancel context.Ca
 			}
 
 			p.handleSSEEvent(currentEvent, []byte(dataStr), &fullText, &reasoning, state)
+			if currentEvent == "chat.end" || currentEvent == "error" {
+				completed = true
+			}
 			currentEvent = ""
 			continue
 		}
@@ -227,8 +231,18 @@ func (p *LMStudioProvider) streamResponse(resp *http.Response, cancel context.Ca
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("lmstudio: stream read error", "session", p.session.ID, "error", err)
-		errData, _ := json.Marshal(err.Error())
-		p.handler("error", errData)
+		p.handler("error", json.RawMessage(err.Error()))
+		return
+	}
+
+	// Fallback: if the stream ended without a chat.end event (e.g. server
+	// closed connection cleanly, or [DONE] arrived before chat.end), emit
+	// message_complete to prevent the session from getting stuck.
+	if !completed {
+		completeData, _ := json.Marshal(map[string]string{
+			"text": fullText.String(),
+		})
+		p.handler("message_complete", completeData)
 	}
 }
 
