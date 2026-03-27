@@ -1,5 +1,32 @@
 # Code Review Log
 
+## 2026-03-26 — Full codebase review (clean)
+
+**No HIGH priority issues found.** Reviewed all 18 Go source files. Verified uncommitted changes (6 bug fixes across `api.go`, `session.go`, `provider_claude.go`, `provider_lmstudio.go`) are correct. Traced event flow, lock ordering, double-emit edge cases, and collector lifecycle. Cross-referenced all prior review entries — no regressions or flip-flops. Build and vet pass.
+
+## 2026-03-26 — LM Studio stuck session on clean stream end
+
+**Issues found (HIGH):**
+
+1. **Bug: `streamResponse` exits without terminal event on clean EOF** — If the LM Studio SSE stream ends cleanly (EOF or `[DONE]`) without a `chat.end` event — due to server-side issues, protocol mismatch, or abnormal termination — `streamResponse` returned without emitting `message_complete` or `error`. The session's `processing` flag stays `true` permanently and no further messages can be sent. The Claude provider is immune because `waitForExit()` always fires `process_exited`, but LM Studio had no equivalent fallback.
+
+**Fixes applied:**
+
+- `provider_lmstudio.go`: Track whether a terminal event (`chat.end` or `error`) was processed during the stream. After the scanner loop, if the stream ended without error and no terminal event was seen, emit `message_complete` with accumulated text as a fallback. Added early `return` after the scanner error path to prevent double-emit.
+
+## 2026-03-26 — Broken session resume for HTTP clients
+
+**Issues found (HIGH):**
+
+1. **Bug: `DELETE /api/sessions/:id` permanently deletes instead of ending the session** — Both `DELETE /api/sessions/:id` and `POST /api/sessions/:id/delete` called `DeleteSession` (removes from memory + deletes from disk). CLAUDE.md documents `DELETE` as "end session", which should preserve to disk for future resume. Only the WS `end_session` handler correctly called `EndSession`. HTTP clients (relayTelegram, relayScheduler) could never gracefully end sessions — only permanently delete them.
+2. **Bug: `SendMessage`/`SendMessageSync` don't lazy-load sessions from disk** — After `EndSession` removes a session from the in-memory map (or after a server restart), `SendMessage` and `SendMessageSync` used direct map lookups and returned "session not found" instead of lazy-loading from disk like `GetSession` does. This made session resume impossible for HTTP clients.
+
+**Fixes applied:**
+
+- `api.go`: `DELETE /api/sessions/:id` now calls `EndSession` (persist to disk) instead of `DeleteSession` (permanent removal). `POST /api/sessions/:id/delete` remains as the permanent delete route.
+- `session.go`: `SendMessage` now uses `GetSession` (which lazy-loads from disk) instead of direct map lookup.
+- `session.go`: `SendMessageSync` now uses `GetSession` to ensure the session is loaded before registering the collector.
+
 ## 2026-03-24 — Data race fixes and dead code cleanup
 
 **Issues found (HIGH):**
@@ -31,6 +58,22 @@
 - `response_collector.go`: Added `doneOnce sync.Once` field. All three close sites now use `c.doneOnce.Do(func() { close(c.done) })`.
 - `session.go`: Added `getProvider()`/`setProvider()` helpers on `Session` that access `session.provider` under `session.mu`. Updated `SendMessage`, `StopGeneration`, `EndSession`, `DeleteSession`, `ClearSession`, `StopAll`, `ListSessions`, and `initProvider` to use them.
 - `provider_claude.go`: Added `waitDone chan struct{}` closed by `waitForExit()`. `Kill()` now waits on `waitDone` instead of calling `cmd.Wait()` directly, eliminating the double-Wait race.
+
+## 2026-03-26 — Stuck session on send failure, hook config clobber, event encoding
+
+**Issues found (HIGH):**
+
+1. **Bug: `processing` flag stuck when `provider.SendMessage()` returns error** — If the provider rejects the message (dead process, stdin error, HTTP failure), `processing` stays `true` and no provider event fires to clear it. The session is permanently stuck. Different from the prior "process_exited/error event" fix — this is the `SendMessage` return-value path.
+2. **Bug: `ensureHookConfig` clobbers all existing hooks** — The entire `hooks` key was overwritten, destroying any pre-existing hook types (PostToolUse, etc.) in the project's `settings.local.json`.
+3. **Bug: `raw_output` event double-encoded** — Non-JSON stdout was JSON-marshaled into `{"text":"..."}`, then `handleProviderEvent` used `string(data)` producing JSON-inside-a-string for Eve.
+4. **Bug: LM Studio scanner error double-quoted** — `json.Marshal(err.Error())` wrapped the error in JSON quotes, then `string(data)` preserved the literal quote chars in the WS error message.
+
+**Fixes applied:**
+
+- `session.go`: `SendMessage` now clears `session.processing` when `provider.SendMessage()` returns an error.
+- `session.go`: `ensureHookConfig` merges into existing `hooks` map instead of replacing it, preserving other hook types.
+- `provider_claude.go`: `processLine` passes raw bytes directly to handler for `raw_output` instead of double-encoding via `json.Marshal`.
+- `provider_lmstudio.go`: `streamResponse` passes error string directly as `json.RawMessage` instead of JSON-encoding it.
 
 ## 2026-03-24 — Stuck session fix
 

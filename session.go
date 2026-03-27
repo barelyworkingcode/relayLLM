@@ -225,20 +225,23 @@ func (m *SessionManager) ensureHookConfig(projectDir string) error {
 		settings = make(map[string]interface{})
 	}
 
-	settings["hooks"] = map[string]interface{}{
-		"PreToolUse": []interface{}{
-			map[string]interface{}{
-				"matcher": "",
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": hookPath,
-						"timeout": 120,
-					},
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = make(map[string]interface{})
+	}
+	hooks["PreToolUse"] = []interface{}{
+		map[string]interface{}{
+			"matcher": "",
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": hookPath,
+					"timeout": 120,
 				},
 			},
 		},
 	}
+	settings["hooks"] = hooks
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -383,10 +386,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 }
 
 func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachment) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-
+	session, ok := m.GetSession(sessionID)
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
@@ -422,7 +422,13 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	})
 	session.mu.Unlock()
 
-	return provider.SendMessage(text, files)
+	if err := provider.SendMessage(text, files); err != nil {
+		session.mu.Lock()
+		session.processing = false
+		session.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // StopGeneration aborts the in-flight response for a session.
@@ -452,12 +458,13 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
 	collector := NewResponseCollector()
 
-	// Register collector for this session.
-	m.mu.Lock()
-	if _, ok := m.sessions[sessionID]; !ok {
-		m.mu.Unlock()
+	// Ensure session is loaded (lazy-load from disk if needed).
+	if _, ok := m.GetSession(sessionID); !ok {
 		return "", SessionStats{}, fmt.Errorf("session not found: %s", sessionID)
 	}
+
+	// Register collector for this session.
+	m.mu.Lock()
 	m.collectors[sessionID] = collector
 	m.mu.Unlock()
 
