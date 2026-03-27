@@ -203,8 +203,7 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		// Non-JSON output — forward as raw_output.
-		data, _ := json.Marshal(map[string]string{"text": string(raw)})
-		p.handler("raw_output", data)
+		p.handler("raw_output", raw)
 		return
 	}
 

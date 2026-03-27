@@ -193,7 +193,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		}
 
 		if r.Method == http.MethodDelete {
-			sessions.DeleteSession(sessionID)
+			sessions.EndSession(sessionID)
 			writeJSON(w, 200, map[string]bool{"success": true})
 			return
 		}
