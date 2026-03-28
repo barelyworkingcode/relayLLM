@@ -11,6 +11,8 @@ session.go           Session lifecycle management
 session_store.go     Session persistence to disk
 provider.go          Provider interface + shared types
 provider_claude.go   Claude CLI provider (stream-json, persistent process)
+provider_lmstudio.go LM Studio HTTP provider (SSE streaming)
+provider_settings.go Per-provider settings schema for Eve UI
 response_collector.go  Headless response accumulation for HTTP clients
 api.go               HTTP routes (projects, sessions, permissions)
 ws.go                WebSocket server (streaming events to Eve)
@@ -25,7 +27,7 @@ cmd/hook/            Compiled PreToolUse hook binary
 
 - **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves).
 - **Gemini**: (planned) One-shot process per message.
-- **LM Studio**: (planned) HTTP client with SSE streaming.
+- **LM Studio**: HTTP client with SSE streaming. Base URL via `--lmstudio-url` / `LM_STUDIO_URL` (default `http://localhost:1234`). Optional `LM_STUDIO_API_TOKEN` env var for Bearer auth. Per-session settings: `temperature`, `reasoning`, `contextLength`, `integrations`.
 
 ## API
 
@@ -35,6 +37,7 @@ HTTP on `--port` (default 3001). WebSocket at `/ws`.
 ```
 GET/POST       /api/projects       — list/create projects
 GET/PUT/DELETE /api/projects/:id   — get/update/delete project
+GET            /api/models         — list available models (Claude + LM Studio)
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session

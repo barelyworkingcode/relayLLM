@@ -31,6 +31,8 @@ This builds both binaries and registers the service with Relay (`relay service r
 |------|---------|---------|-------------|
 | `--port` | `RELAY_LLM_PORT` | `3001` | HTTP/WebSocket listen port |
 | `--data-dir` | `RELAY_LLM_DATA` | `~/.config/relayLLM` | Data directory |
+| `--lmstudio-url` | `LM_STUDIO_URL` | `http://localhost:1234` | LM Studio base URL |
+| *(none)* | `LM_STUDIO_API_TOKEN` | *(none)* | Bearer token for LM Studio API auth |
 | `--scheduler-url` | `RELAY_SCHEDULER_URL` | `http://localhost:3002` | relayScheduler URL for task proxy |
 
 ## HTTP API
@@ -122,11 +124,17 @@ Response `200`: `{"success": true}`.
 
 ### Models
 
-**`GET /api/models`** -- List available models.
+**`GET /api/models`** -- List available models. Includes Claude models and, when LM Studio is reachable, any loaded LM Studio models discovered via `/v1/models`.
 
 Response `200`:
 ```json
-[{"label": "Claude Haiku", "value": "haiku", "group": "Claude", "provider": "claude"}]
+{
+  "models": [
+    {"label": "Claude Haiku", "value": "haiku", "group": "Claude", "provider": "claude"},
+    {"label": "qwen2.5-coder-32b", "value": "qwen2.5-coder-32b", "group": "LM Studio", "provider": "lmstudio"}
+  ],
+  "providerSettings": { ... }
+}
 ```
 
 ### Permissions
