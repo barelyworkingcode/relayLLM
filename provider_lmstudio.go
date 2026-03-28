@@ -496,6 +496,7 @@ func fetchLMStudioModels(baseURL string) []ModelInfo {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		slog.Warn("lmstudio: model discovery returned non-OK status", "status", resp.StatusCode, "url", baseURL)
 		return nil
 	}
 
