@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -15,11 +16,13 @@ var upgrader = websocket.Upgrader{
 
 // WSHub manages WebSocket connections and routes events to them.
 type WSHub struct {
-	mu       sync.RWMutex
-	conns    map[string]*wsConn // sessionID → connection
-	allConns map[*wsConn]bool   // all connected clients (for broadcast)
-	sessions *SessionManager
-	perms    *PermissionManager
+	mu        sync.RWMutex
+	conns     map[string]*wsConn          // sessionID → connection
+	termConns map[string]map[*wsConn]bool // terminalID → set of viewer connections
+	allConns  map[*wsConn]bool            // all connected clients (for broadcast)
+	sessions  *SessionManager
+	perms     *PermissionManager
+	terminals *TerminalManager
 }
 
 type wsConn struct {
@@ -27,12 +30,42 @@ type wsConn struct {
 	mu   sync.Mutex
 }
 
-func NewWSHub(sessions *SessionManager, perms *PermissionManager) *WSHub {
+func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *TerminalManager) *WSHub {
 	return &WSHub{
-		conns:    make(map[string]*wsConn),
-		allConns: make(map[*wsConn]bool),
-		sessions: sessions,
-		perms:    perms,
+		conns:     make(map[string]*wsConn),
+		termConns: make(map[string]map[*wsConn]bool),
+		allConns:  make(map[*wsConn]bool),
+		sessions:  sessions,
+		perms:     perms,
+		terminals: terminals,
+	}
+}
+
+// SendToTerminal sends a message to all WebSocket clients viewing a terminal.
+func (h *WSHub) SendToTerminal(terminalID string, msg map[string]interface{}) {
+	h.mu.RLock()
+	viewers, ok := h.termConns[terminalID]
+	if !ok || len(viewers) == 0 {
+		h.mu.RUnlock()
+		return
+	}
+	// Copy the viewer set under lock to avoid holding RLock during writes.
+	conns := make([]*wsConn, 0, len(viewers))
+	for wc := range viewers {
+		conns = append(conns, wc)
+	}
+	h.mu.RUnlock()
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		slog.Error("failed to marshal terminal WS message", "error", err)
+		return
+	}
+
+	for _, wc := range conns {
+		wc.mu.Lock()
+		wc.conn.WriteMessage(websocket.TextMessage, data)
+		wc.mu.Unlock()
 	}
 }
 
@@ -73,6 +106,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	wc := &wsConn{conn: conn}
 	boundSessions := make(map[string]bool)
+	boundTerminals := make(map[string]bool)
 
 	h.mu.Lock()
 	h.allConns[wc] = true
@@ -83,6 +117,14 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		delete(h.allConns, wc)
 		for sid := range boundSessions {
 			delete(h.conns, sid)
+		}
+		for tid := range boundTerminals {
+			if viewers, ok := h.termConns[tid]; ok {
+				delete(viewers, wc)
+				if len(viewers) == 0 {
+					delete(h.termConns, tid)
+				}
+			}
 		}
 		h.mu.Unlock()
 		conn.Close()
@@ -307,6 +349,178 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 				Decision: decision,
 				Reason:   req.Reason,
 			})
+
+		// --- Terminal messages ---
+
+		case "terminal_create":
+			var req struct {
+				TemplateID string `json:"templateId"`
+				Name       string `json:"name"`
+				Directory  string `json:"directory"`
+				Cols       uint16 `json:"cols"`
+				Rows       uint16 `json:"rows"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.TemplateID == "" {
+				sendWSError(wc, "templateId required")
+				continue
+			}
+
+			session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows)
+			if err != nil {
+				sendWSError(wc, err.Error())
+				continue
+			}
+
+			// Auto-join the creator and send terminal_created only to them.
+			h.joinTerminalConn(wc, session, boundTerminals)
+
+			resp := map[string]interface{}{
+				"type":       "terminal_created",
+				"terminalId": session.ID,
+				"templateId": session.TemplateID,
+				"name":       session.Name,
+				"directory":  session.Directory,
+			}
+			data, _ := json.Marshal(resp)
+			wc.mu.Lock()
+			wc.conn.WriteMessage(websocket.TextMessage, data)
+			wc.mu.Unlock()
+
+		case "join_terminal":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+			if req.TerminalID == "" {
+				continue
+			}
+
+			session, ok := h.terminals.Get(req.TerminalID)
+			if !ok {
+				sendWSError(wc, "terminal not found: "+req.TerminalID)
+				continue
+			}
+
+			h.joinTerminalConn(wc, session, boundTerminals)
+
+		case "leave_terminal":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.TerminalID != "" && boundTerminals[req.TerminalID] {
+				h.mu.Lock()
+				if viewers, ok := h.termConns[req.TerminalID]; ok {
+					delete(viewers, wc)
+					if len(viewers) == 0 {
+						delete(h.termConns, req.TerminalID)
+					}
+				}
+				h.mu.Unlock()
+				delete(boundTerminals, req.TerminalID)
+			}
+
+		case "terminal_input":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+				Data       string `json:"data"` // base64-encoded
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.TerminalID == "" {
+				continue
+			}
+
+			decoded, err := base64.StdEncoding.DecodeString(req.Data)
+			if err != nil {
+				sendWSError(wc, "invalid base64 data")
+				continue
+			}
+
+			if err := h.terminals.Write(req.TerminalID, decoded); err != nil {
+				sendWSError(wc, err.Error())
+			}
+
+		case "terminal_resize":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+				Cols       uint16 `json:"cols"`
+				Rows       uint16 `json:"rows"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.TerminalID == "" {
+				continue
+			}
+
+			if err := h.terminals.Resize(req.TerminalID, req.Cols, req.Rows); err != nil {
+				sendWSError(wc, err.Error())
+			}
+
+		case "terminal_close":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+
+			if req.TerminalID == "" {
+				continue
+			}
+
+			h.terminals.Close(req.TerminalID)
+
+			// Clean up viewer bindings.
+			h.mu.Lock()
+			delete(h.termConns, req.TerminalID)
+			h.mu.Unlock()
+			delete(boundTerminals, req.TerminalID)
+
+			h.Broadcast(map[string]interface{}{
+				"type":       "terminal_closed",
+				"terminalId": req.TerminalID,
+			})
+
+		case "terminal_list":
+			list := h.terminals.List()
+			resp := map[string]interface{}{
+				"type":      "terminal_list",
+				"terminals": list,
+			}
+			data, _ := json.Marshal(resp)
+			wc.mu.Lock()
+			wc.conn.WriteMessage(websocket.TextMessage, data)
+			wc.mu.Unlock()
+
+		case "terminal_reconnect":
+			var req struct {
+				TerminalID string `json:"terminalId"`
+			}
+			json.Unmarshal(msgBytes, &req)
+			if req.TerminalID == "" {
+				continue
+			}
+
+			session, ok := h.terminals.Get(req.TerminalID)
+			if !ok {
+				sendWSError(wc, "terminal not found: "+req.TerminalID)
+				continue
+			}
+
+			h.joinTerminalConn(wc, session, boundTerminals)
+
+		case "terminal_templates":
+			templates := h.terminals.ListTemplates()
+			resp := map[string]interface{}{
+				"type":      "terminal_templates",
+				"templates": templates,
+			}
+			data, _ := json.Marshal(resp)
+			wc.mu.Lock()
+			wc.conn.WriteMessage(websocket.TextMessage, data)
+			wc.mu.Unlock()
 		}
 	}
 }
@@ -326,6 +540,47 @@ func (h *WSHub) Broadcast(msg map[string]interface{}) {
 		c.mu.Lock()
 		c.conn.WriteMessage(websocket.TextMessage, data)
 		c.mu.Unlock()
+	}
+}
+
+// joinTerminalConn binds a WS connection to a terminal and sends the join response with scrollback.
+func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerminals map[string]bool) {
+	tid := session.ID
+	boundTerminals[tid] = true
+	h.mu.Lock()
+	if h.termConns[tid] == nil {
+		h.termConns[tid] = make(map[*wsConn]bool)
+	}
+	h.termConns[tid][wc] = true
+	h.mu.Unlock()
+
+	scrollback := session.ScrollbackBytes()
+	state, exitCode := session.Snapshot()
+	resp := map[string]interface{}{
+		"type":       "terminal_joined",
+		"terminalId": tid,
+		"templateId": session.TemplateID,
+		"name":       session.Name,
+		"directory":  session.Directory,
+		"state":      state,
+		"scrollback": base64.StdEncoding.EncodeToString(scrollback),
+	}
+	data, _ := json.Marshal(resp)
+	wc.mu.Lock()
+	wc.conn.WriteMessage(websocket.TextMessage, data)
+	wc.mu.Unlock()
+
+	// If the terminal already exited, send exit event.
+	if state == "stopped" {
+		exitMsg := map[string]interface{}{
+			"type":       "terminal_exit",
+			"terminalId": tid,
+			"exitCode":   exitCode,
+		}
+		exitData, _ := json.Marshal(exitMsg)
+		wc.mu.Lock()
+		wc.conn.WriteMessage(websocket.TextMessage, exitData)
+		wc.mu.Unlock()
 	}
 }
 

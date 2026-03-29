@@ -237,6 +237,142 @@ func RegisterModelRoutes(mux *http.ServeMux, lmStudioURL string) {
 	})
 }
 
+// --- Terminal Routes ---
+
+func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, terminals *TerminalManager) {
+	// Template CRUD.
+	mux.HandleFunc("/api/terminal/templates", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, 200, templates.List())
+
+		case http.MethodPost:
+			var body struct {
+				Name        string            `json:"name"`
+				Command     string            `json:"command"`
+				Args        []string          `json:"args"`
+				Env         map[string]string `json:"env"`
+				Description string            `json:"description"`
+				Icon        string            `json:"icon"`
+			}
+			if err := readJSON(r, &body); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+				return
+			}
+			tmpl, err := templates.Create(TerminalTemplate{
+				Name:        body.Name,
+				Command:     body.Command,
+				Args:        body.Args,
+				Env:         body.Env,
+				Description: body.Description,
+				Icon:        body.Icon,
+			})
+			if err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 201, tmpl)
+
+		default:
+			w.WriteHeader(405)
+		}
+	})
+
+	mux.HandleFunc("/api/terminal/templates/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/terminal/templates/")
+		if id == "" {
+			w.WriteHeader(404)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			tmpl, ok := templates.Get(id)
+			if !ok {
+				writeJSON(w, 404, map[string]string{"error": "template not found"})
+				return
+			}
+			writeJSON(w, 200, tmpl)
+
+		case http.MethodPut:
+			var updates map[string]interface{}
+			if err := readJSON(r, &updates); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+				return
+			}
+			tmpl, err := templates.Update(id, updates)
+			if err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 200, tmpl)
+
+		case http.MethodDelete:
+			if err := templates.Delete(id); err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]bool{"success": true})
+
+		default:
+			w.WriteHeader(405)
+		}
+	})
+
+	// Terminal instance CRUD.
+	mux.HandleFunc("/api/terminals", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, 200, terminals.List())
+
+		case http.MethodPost:
+			var body struct {
+				TemplateID string `json:"templateId"`
+				Name       string `json:"name"`
+				Directory  string `json:"directory"`
+				Cols       uint16 `json:"cols"`
+				Rows       uint16 `json:"rows"`
+			}
+			if err := readJSON(r, &body); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+				return
+			}
+			session, err := terminals.Create(body.TemplateID, body.Name, body.Directory, body.Cols, body.Rows)
+			if err != nil {
+				writeJSON(w, 400, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 201, map[string]interface{}{
+				"id":         session.ID,
+				"templateId": session.TemplateID,
+				"name":       session.Name,
+				"directory":  session.Directory,
+				"state":      session.State,
+			})
+
+		default:
+			w.WriteHeader(405)
+		}
+	})
+
+	mux.HandleFunc("/api/terminals/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/terminals/")
+		if id == "" {
+			w.WriteHeader(404)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodDelete:
+			terminals.Close(id)
+			writeJSON(w, 200, map[string]bool{"success": true})
+
+		default:
+			w.WriteHeader(405)
+		}
+	})
+}
+
 // --- Permission Routes ---
 
 func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {

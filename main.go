@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -46,9 +47,32 @@ func main() {
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(store, sessionStore, perms)
 
-	wsHub := NewWSHub(sessions, perms)
+	// Terminal subsystem.
+	templateStore := NewTemplateStore(filepath.Join(*dataDir, "terminals", "templates.json"))
+	if err := templateStore.Load(); err != nil {
+		slog.Error("failed to load terminal templates", "error", err)
+	}
+	terminalMgr := NewTerminalManager(templateStore)
+
+	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
 	perms.sink = wsHub
+
+	// Wire terminal I/O to WebSocket hub.
+	terminalMgr.SetOutputHandler(func(terminalID string, data []byte) {
+		wsHub.SendToTerminal(terminalID, map[string]interface{}{
+			"type":       "terminal_output",
+			"terminalId": terminalID,
+			"data":       base64.StdEncoding.EncodeToString(data),
+		})
+	})
+	terminalMgr.SetExitHandler(func(terminalID string, exitCode int) {
+		wsHub.SendToTerminal(terminalID, map[string]interface{}{
+			"type":       "terminal_exit",
+			"terminalId": terminalID,
+			"exitCode":   exitCode,
+		})
+	})
 
 	// Set the hook URL so providers know where to send permission requests.
 	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
@@ -59,6 +83,7 @@ func main() {
 	mux := http.NewServeMux()
 	RegisterProjectRoutes(mux, store, schedulerClient)
 	RegisterSessionRoutes(mux, sessions)
+	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)
 	RegisterModelRoutes(mux, *lmStudioURL)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
@@ -76,6 +101,7 @@ func main() {
 		slog.Info("shutting down")
 		schedulerWS.Close()
 		sessions.StopAll()
+		terminalMgr.StopAll()
 		os.Exit(0)
 	}()
 
