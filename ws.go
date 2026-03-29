@@ -118,15 +118,24 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		for sid := range boundSessions {
 			delete(h.conns, sid)
 		}
+		// Track terminals that lost their last viewer for idle timeout.
+		var orphaned []string
 		for tid := range boundTerminals {
 			if viewers, ok := h.termConns[tid]; ok {
 				delete(viewers, wc)
 				if len(viewers) == 0 {
 					delete(h.termConns, tid)
+					orphaned = append(orphaned, tid)
 				}
 			}
 		}
 		h.mu.Unlock()
+
+		// Start idle timers for terminals with no remaining viewers.
+		for _, tid := range orphaned {
+			h.terminals.NotifyViewerChange(tid, 0)
+		}
+
 		conn.Close()
 		slog.Info("websocket disconnected", "remote", r.RemoteAddr)
 	}()
@@ -552,7 +561,11 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 		h.termConns[tid] = make(map[*wsConn]bool)
 	}
 	h.termConns[tid][wc] = true
+	viewerCount := len(h.termConns[tid])
 	h.mu.Unlock()
+
+	// Cancel idle timer since a viewer connected.
+	h.terminals.NotifyViewerChange(tid, viewerCount)
 
 	scrollback := session.ScrollbackBytes()
 	state, exitCode := session.Snapshot()
