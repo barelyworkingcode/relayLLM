@@ -21,6 +21,7 @@ type TerminalTemplate struct {
 	Description string            `json:"description,omitempty"`
 	Icon        string            `json:"icon,omitempty"`
 	BuiltIn     bool              `json:"builtIn"`
+	IdleTimeout int               `json:"idleTimeout,omitempty"` // minutes, 0 = default (1440 = 24h)
 }
 
 // ResolveCommand returns the absolute path to the command, checking
