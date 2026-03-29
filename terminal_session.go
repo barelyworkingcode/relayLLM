@@ -182,6 +182,7 @@ func (s *TerminalSession) Close() {
 	}
 
 	s.alive.Store(false)
+	s.CancelIdleTimer()
 
 	if s.ptmx != nil {
 		s.ptmx.Close()
