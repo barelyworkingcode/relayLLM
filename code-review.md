@@ -1,5 +1,17 @@
 # Code Review Log
 
+## 2026-03-28 — Idle timeout review (exp branch)
+
+### Files reviewed
+terminal_session.go (idle timer), terminal_manager.go (NotifyViewerChange), ws.go (viewer count wiring)
+
+### No HIGH issues found
+
+### MEDIUM: `Close()` doesn't cancel pending idle timer
+**Bug**: If `Close()` is called directly (explicit `terminal_close`), the idle timer goroutine continues running for up to 24h until it fires, calls `onIdle` → `Close` on an already-removed terminal (no-op, but leaked goroutine).
+
+**Fix**: Added `s.CancelIdleTimer()` at start of `Close()`.
+
 ## 2026-03-28 — Terminal provider review, second pass (exp branch)
 
 ### Files reviewed
