@@ -50,16 +50,24 @@ func (m *TerminalManager) Create(templateID, name, directory string, cols, rows 
 		name = tmpl.Name
 	}
 
+	// Idle timeout: use template setting or default to 24 hours.
+	idleMinutes := tmpl.IdleTimeout
+	if idleMinutes <= 0 {
+		idleMinutes = 24 * 60 // 24 hours
+	}
+
 	session := &TerminalSession{
-		ID:         uuid.New().String(),
-		TemplateID: templateID,
-		Name:       name,
-		Directory:  directory,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		cols:       cols,
-		rows:       rows,
-		onOutput:   m.onOutput,
-		onExit:     m.onExit,
+		ID:          uuid.New().String(),
+		TemplateID:  templateID,
+		Name:        name,
+		Directory:   directory,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		cols:        cols,
+		rows:        rows,
+		idleTimeout: time.Duration(idleMinutes) * time.Minute,
+		onOutput:    m.onOutput,
+		onExit:      m.onExit,
+		onIdle:      func(id string) { m.Close(id) },
 	}
 
 	if err := session.Start(tmpl); err != nil {
@@ -138,6 +146,23 @@ func (m *TerminalManager) Close(id string) {
 
 	if ok {
 		s.Close()
+	}
+}
+
+// NotifyViewerChange is called when the viewer count for a terminal changes.
+// When count drops to 0, the idle timer starts. When it goes above 0, the timer is cancelled.
+func (m *TerminalManager) NotifyViewerChange(id string, viewers int) {
+	m.mu.RLock()
+	s, ok := m.terminals[id]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	if viewers == 0 {
+		s.StartIdleTimer()
+	} else {
+		s.CancelIdleTimer()
 	}
 }
 
