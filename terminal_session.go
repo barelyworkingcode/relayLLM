@@ -53,8 +53,9 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 	cmd := exec.Command(command, args...)
 	cmd.Dir = s.Directory
 	cmd.Env = ensurePath(os.Environ())
-	// Set TERM for color support — matches what node-pty used.
+	// Set TERM and COLORTERM for full 24-bit true color support.
 	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
+	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
 
 	// Merge template-specific env vars.
 	for k, v := range tmpl.Env {
