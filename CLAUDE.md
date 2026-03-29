@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, Gemini CLI, LM Studio HTTP), sessions, projects, and permissions. Runs independently or as a relay-managed service.
+Standalone LLM engine service. Manages providers (Claude CLI, Gemini CLI, LM Studio HTTP), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
 
 ## Architecture
 
@@ -65,6 +65,15 @@ Terminal messages:
 Client → Server: terminal_create, join_terminal, leave_terminal, terminal_input (base64), terminal_resize, terminal_close, terminal_list, terminal_reconnect, terminal_templates
 Server → Client: terminal_created, terminal_joined (with base64 scrollback), terminal_output (base64), terminal_exit, terminal_closed, terminal_list, terminal_templates
 ```
+
+## Terminal Sessions
+
+PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via WebSocket (base64-encoded). Terminals survive Eve restarts.
+
+- **Templates**: Built-in (Claude Code, OpenCode, Shell) + custom via API. `IdleTimeout` field (minutes, default 1440 = 24h).
+- **Idle timeout**: When all viewers disconnect, an idle timer starts. If no viewer reconnects before it fires, the terminal is auto-closed. Configurable per template.
+- **Color**: PTY spawned with `TERM=xterm-256color` and `COLORTERM=truecolor` for full 24-bit color.
+- **Scrollback**: 100KB ring buffer per terminal, replayed on reconnect.
 
 ## Data
 
