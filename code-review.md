@@ -1,5 +1,60 @@
 # Code Review Log
 
+## 2026-03-28 — Idle timeout review (exp branch)
+
+### Files reviewed
+terminal_session.go (idle timer), terminal_manager.go (NotifyViewerChange), ws.go (viewer count wiring)
+
+### No HIGH issues found
+
+### MEDIUM: `Close()` doesn't cancel pending idle timer
+**Bug**: If `Close()` is called directly (explicit `terminal_close`), the idle timer goroutine continues running for up to 24h until it fires, calls `onIdle` → `Close` on an already-removed terminal (no-op, but leaked goroutine).
+
+**Fix**: Added `s.CancelIdleTimer()` at start of `Close()`.
+
+## 2026-03-28 — Terminal provider review, second pass (exp branch)
+
+### Files reviewed
+All 6 terminal files (terminal_template.go, terminal_session.go, terminal_manager.go, ws.go terminal additions, api.go terminal routes, main.go wiring). Verified all prior HIGH fixes in place. No flip-flopping.
+
+### No HIGH issues found
+
+### MEDIUM: Dead code `GetScrollback` + encapsulation break
+- `TerminalManager.GetScrollback()` was never called — scrollback accessed directly via `session.ScrollbackBytes()` in `joinTerminalConn`.
+- `ws.go:515` reached through `h.terminals.templates.List()`, bypassing the manager's encapsulation.
+
+**Fix**: Replaced `GetScrollback` with `ListTemplates()` method. Updated `ws.go` to use it.
+
+## 2026-03-28 — Terminal provider review (exp branch)
+
+### Files reviewed
+terminal_template.go, terminal_session.go, terminal_manager.go, ws.go (terminal additions), api.go (terminal routes), main.go (terminal wiring)
+
+### HIGH: Data race on `TerminalSession.State` and `ExitCode`
+**Bug**: `waitForExit()` goroutine wrote `s.State` and `s.ExitCode` without holding `s.mu`. Read by `ws.go` (join_terminal, terminal_reconnect) and `terminal_manager.go` (List) concurrently. Same class of race fixed in prior review (ClaudeProvider.claudeSessionID).
+
+**Fix**: Protected writes in `waitForExit()` with `s.mu`. Added `Snapshot()` accessor method. Updated all read sites to use it.
+
+### HIGH: Broadcast `terminal_created` to all clients
+**Bug**: `terminal_create` broadcast `terminal_created` to all connected WS clients. Every open tab would open a terminal tab and try to join. Only the creating client should.
+
+**Fix**: Changed from `Broadcast()` to direct send to the creating `wsConn`. Other clients discover terminals via `terminal_list`.
+
+### HIGH (Eve): XSS via template name/description in picker
+**Bug**: `_showPickerUI` injected `t.name` and `t.description` into `innerHTML` without escaping. Custom templates (created via API) could inject HTML/JS. Same pattern fixed in prior Eve review (modal-manager.js pass 3).
+
+**Fix**: Replaced innerHTML template interpolation with DOM API (`createElement`/`textContent`).
+
+### DRY: `join_terminal` and `terminal_reconnect` duplicated
+30 lines of identical bind+scrollback+exit logic copy-pasted.
+
+**Fix**: Extracted `joinTerminalConn()` helper. Both handlers and `terminal_create` now call it.
+
+### Shell command resolution split across two files
+`ResolveCommand()` returned empty for shell template; `Start()` had a separate override.
+
+**Fix**: Added `case "shell"` to `ResolveCommand()`. Removed override from `Start()`.
+
 ## 2026-03-26 — Full codebase review (clean)
 
 **No HIGH priority issues found.** Reviewed all 18 Go source files. Verified uncommitted changes (6 bug fixes across `api.go`, `session.go`, `provider_claude.go`, `provider_lmstudio.go`) are correct. Traced event flow, lock ordering, double-emit edge cases, and collector lifecycle. Cross-referenced all prior review entries — no regressions or flip-flops. Build and vet pass.
