@@ -132,6 +132,9 @@ func (p *LMStudioProvider) SendMessage(text string, files []FileAttachment) erro
 	if len(p.settings.Integrations) > 0 {
 		body["integrations"] = p.settings.Integrations
 	}
+	if p.session.SystemPrompt != "" {
+		body["system_prompt"] = p.session.SystemPrompt
+	}
 
 	err := p.doSend(body)
 	if err != nil && p.responseID != "" && isResponseIDError(err) {

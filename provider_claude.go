@@ -84,6 +84,10 @@ func (p *ClaudeProvider) Start() error {
 		args = append(args, "--resume", p.claudeSessionID)
 	}
 
+	if p.session.SystemPrompt != "" {
+		args = append(args, "--append-system-prompt", p.session.SystemPrompt)
+	}
+
 	var settings struct {
 		Headless bool `json:"headless"`
 	}

@@ -10,12 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// ChatTemplate defines a reusable session preset for a project.
+type ChatTemplate struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Model          string          `json:"model"`
+	Mode           string          `json:"mode"`                            // "text" | "voice"
+	Voice          string          `json:"voice,omitempty"`                 // voice ID for voice mode
+	SystemPrompt   string          `json:"systemPrompt,omitempty"`
+	AppendClaudeMd bool            `json:"appendClaudeMd,omitempty"`        // inject CLAUDE.md into system prompt (non-Claude only)
+	Settings       json.RawMessage `json:"settings,omitempty"`              // provider-specific (temp, MCP tools, etc.)
+}
+
 type Project struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Path         string   `json:"path"`
-	AllowedTools []string `json:"allowedTools"`
-	CreatedAt    string   `json:"createdAt"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Path          string         `json:"path"`
+	AllowedTools  []string       `json:"allowedTools"`
+	ChatTemplates []ChatTemplate `json:"chatTemplates,omitempty"`
+	CreatedAt     string         `json:"createdAt"`
 }
 
 type projectFile struct {
@@ -118,12 +131,23 @@ func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Projec
 			if tools, ok := v.([]interface{}); ok {
 				strs := make([]string, 0, len(tools))
 				for _, t := range tools {
-					if s, ok := t.(string); ok {
-						strs = append(strs, s)
+					if str, ok := t.(string); ok {
+						strs = append(strs, str)
 					}
 				}
 				s.projects[i].AllowedTools = strs
 			}
+		}
+		if v, ok := updates["chatTemplates"]; ok {
+			raw, err := json.Marshal(v)
+			if err != nil {
+				return Project{}, fmt.Errorf("invalid chatTemplates: %w", err)
+			}
+			var templates []ChatTemplate
+			if err := json.Unmarshal(raw, &templates); err != nil {
+				return Project{}, fmt.Errorf("invalid chatTemplates: %w", err)
+			}
+			s.projects[i].ChatTemplates = templates
 		}
 		return s.projects[i], s.save()
 	}
