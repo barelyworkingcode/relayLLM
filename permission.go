@@ -33,6 +33,10 @@ func NewPermissionManager() *PermissionManager {
 	}
 }
 
+func (m *PermissionManager) SetEventSink(sink EventSink) {
+	m.sink = sink
+}
+
 // CreateRequest creates a pending permission request and returns the request
 // and a channel that will receive the decision.
 func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput string) (PermissionRequest, chan PermissionDecision) {

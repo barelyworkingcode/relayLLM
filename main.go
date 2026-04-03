@@ -56,7 +56,7 @@ func main() {
 
 	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
-	perms.sink = wsHub
+	perms.SetEventSink(wsHub)
 
 	// Wire terminal I/O to WebSocket hub.
 	terminalMgr.SetOutputHandler(func(terminalID string, data []byte) {

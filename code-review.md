@@ -1,5 +1,30 @@
 # Code Review Log
 
+## 2026-04-02 — DI + cyclomatic complexity scan (main)
+
+### Files reviewed
+All 18 Go source files + cmd/hook/main.go. Ran `gocyclo -over 5` for CC measurement. Cross-referenced prior review entries — no flip-flopping.
+
+### HIGH: `leave_terminal` doesn't start idle timer
+**Bug**: When a client explicitly sends `leave_terminal` and is the last viewer, `NotifyViewerChange` was never called. The idle timer wouldn't start, so the terminal process would run forever until the WS connection dropped. The `defer` cleanup on WS disconnect handled this correctly, but the explicit `leave_terminal` path did not.
+
+**Fix**: Track remaining viewer count after removal, call `h.terminals.NotifyViewerChange(tid, remaining)` in the `leave_terminal` handler.
+
+### HIGH (CC): `HandleUpgrade` CC 67 — all WS logic in one function
+**Problem**: 18 message types handled inline in a single 430-line function. Every handler shared scope with all others. Adding or debugging any message type required wading through the entire function.
+
+**Fix**: Extracted each message type into a named method on `WSHub` (18 handlers). `HandleUpgrade` is now a thin router (~40 lines, CC 29 — residual from 18 switch cases). Largest extracted handler is `handleJoinSession` at CC 9. Added `sendJSON` helper to DRY up the repeated marshal+write pattern (replaced 8 occurrences including `sendWSError`).
+
+### MEDIUM: `POST /api/terminals` reads `session.State` without lock
+**Bug**: `api.go` accessed `session.State` directly in the response for terminal creation. `State` is concurrently written by `waitForExit()`. Same class of race fixed in the 2026-03-28 terminal review.
+
+**Fix**: Use `session.Snapshot()` instead of direct field access.
+
+### MEDIUM (DI): `PermissionManager.sink` set via direct field assignment
+**Problem**: `main.go` set `perms.sink = wsHub` directly, while `SessionManager` uses `SetEventSink()`. Inconsistent wiring pattern.
+
+**Fix**: Added `SetEventSink` method to `PermissionManager`. Updated `main.go` to use it.
+
 ## 2026-03-28 — Idle timeout review (exp branch)
 
 ### Files reviewed
