@@ -26,7 +26,8 @@ type Session struct {
 	Stats         SessionStats    `json:"stats"`
 	ProviderState json.RawMessage `json:"providerState,omitempty"`
 
-	Headless bool `json:"headless,omitempty"`
+	SystemPrompt string `json:"systemPrompt,omitempty"`
+	Headless     bool   `json:"headless,omitempty"`
 
 	provider   Provider
 	processing bool
@@ -97,7 +98,7 @@ func (m *SessionManager) SetLMStudioURL(url string) {
 	m.lmStudioURL = url
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model string, settings json.RawMessage) (*Session, error) {
+func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, settings json.RawMessage) (*Session, error) {
 	var dir string
 
 	if projectID != "" {
@@ -123,6 +124,17 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string,
 
 	providerType := deriveProviderType(model)
 
+	// For non-Claude providers, prepend CLAUDE.md content to system prompt if requested.
+	if appendClaudeMd && providerType != "claude" && dir != "" {
+		if content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md")); err == nil {
+			if systemPrompt != "" {
+				systemPrompt = string(content) + "\n---\n" + systemPrompt
+			} else {
+				systemPrompt = string(content)
+			}
+		}
+	}
+
 	var parsedSettings struct {
 		Headless bool `json:"headless"`
 	}
@@ -138,6 +150,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model string,
 		Model:        model,
 		ProviderType: providerType,
 		Settings:     settings,
+		SystemPrompt: systemPrompt,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		Messages:     []Message{},
 		Stats:        SessionStats{},

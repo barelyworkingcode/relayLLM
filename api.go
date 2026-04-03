@@ -111,17 +111,19 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 		case http.MethodPost:
 			var body struct {
-				ProjectID string          `json:"projectId"`
-				Directory string          `json:"directory"`
-				Name      string          `json:"name"`
-				Model     string          `json:"model"`
-				Settings  json.RawMessage `json:"settings"`
+				ProjectID      string          `json:"projectId"`
+				Directory      string          `json:"directory"`
+				Name           string          `json:"name"`
+				Model          string          `json:"model"`
+				SystemPrompt   string          `json:"systemPrompt"`
+				AppendClaudeMd bool            `json:"appendClaudeMd"`
+				Settings       json.RawMessage `json:"settings"`
 			}
 			if err := readJSON(r, &body); err != nil {
 				writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 				return
 			}
-			session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.Settings)
+			session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.Settings)
 			if err != nil {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
