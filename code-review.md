@@ -25,6 +25,18 @@ All 18 Go source files + cmd/hook/main.go. Ran `gocyclo -over 5` for CC measurem
 
 **Fix**: Added `SetEventSink` method to `PermissionManager`. Updated `main.go` to use it.
 
+### Patterns & practices pass
+
+**Go 1.22 route patterns** — Replaced manual `strings.TrimPrefix` + `strings.SplitN` + `switch r.Method` in all route registration with Go 1.22 method patterns (`"GET /api/projects/{id}"`) and `r.PathValue()`. Eliminated all path parsing and method dispatch boilerplate. `RegisterSessionRoutes` CC 20→8, `RegisterTerminalRoutes` CC 19→9, `RegisterSchedulerProxyRoutes` CC 14→1. Routes are now self-documenting — method and path visible at registration, not buried in handler bodies.
+
+**Typed update structs** — Replaced `map[string]interface{}` + type assertions in `ProjectStore.Update` and `TemplateStore.Update` with `ProjectUpdate` and `TemplateUpdate` pointer-field structs. Eliminated `[]interface{}` → `[]string` conversion loops and `json.Marshal` → `json.Unmarshal` round-trips for nested types. `ProjectStore.Update` CC 14→9, `TemplateStore.Update` CC 17→13.
+
+**Graceful HTTP shutdown** — Replaced `os.Exit(0)` with `http.Server.Shutdown(ctx)` + 5s drain timeout. In-flight HTTP requests now complete before provider/terminal cleanup runs.
+
+**Panic recovery middleware** — Added `recoverMiddleware` wrapping the mux. Panics in any HTTP handler now return 500 + log instead of crashing the server.
+
+Net result: 5015 → 4908 LOC (−107 lines).
+
 ## 2026-03-28 — Idle timeout review (exp branch)
 
 ### Files reviewed

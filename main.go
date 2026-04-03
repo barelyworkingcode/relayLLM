@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -93,24 +94,34 @@ func main() {
 	schedulerWS := NewSchedulerWSForwarder(*schedulerURL, wsHub)
 	go schedulerWS.Run()
 
-	// Graceful shutdown.
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%s", *port),
+		Handler: recoverMiddleware(mux),
+	}
+
+	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		slog.Info("shutting down")
-		schedulerWS.Close()
-		sessions.StopAll()
-		terminalMgr.StopAll()
-		os.Exit(0)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
 	}()
 
-	addr := fmt.Sprintf(":%s", *port)
-	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	slog.Info("listening", "addr", server.Addr)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
+
+	// Server stopped — clean up background resources.
+	schedulerWS.Close()
+	sessions.StopAll()
+	terminalMgr.StopAll()
+	slog.Info("shutdown complete")
 }
 
 // killPortHolder checks if the port is already in use and kills the holding process.
