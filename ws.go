@@ -94,7 +94,7 @@ func (h *WSHub) SendToSession(sessionID string, msg map[string]interface{}) {
 	}
 }
 
-// HandleUpgrade handles WebSocket upgrade requests.
+// HandleUpgrade handles WebSocket upgrade requests and dispatches messages.
 func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -158,381 +158,409 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case "join_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-			if req.SessionID == "" {
-				continue
-			}
-
-			session, ok := h.sessions.GetSession(req.SessionID)
-			if !ok {
-				sendWSError(wc, "session not found: "+req.SessionID)
-				continue
-			}
-
-			// Add binding (keep existing bindings for other sessions).
-			boundSessions[req.SessionID] = true
-			h.mu.Lock()
-			h.conns[req.SessionID] = wc
-			h.mu.Unlock()
-
-			// Send session history.
-			// Try reading from Claude CLI's JSONL session file first (has both user + assistant).
-			var history []Message
-			var claudeSessionID string
-			if session.ProviderState != nil {
-				var ps struct {
-					ClaudeSessionID string `json:"claudeSessionId"`
-				}
-				json.Unmarshal(session.ProviderState, &ps)
-				claudeSessionID = ps.ClaudeSessionID
-			}
-			if claudeSessionID != "" {
-				if h, err := readClaudeHistory(session.Directory, claudeSessionID); err == nil && len(h) > 0 {
-					history = h
-				} else if err != nil {
-					slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
-				}
-			}
-			// Fall back to session.Messages (user-only) if Claude history unavailable.
-			if history == nil {
-				session.mu.Lock()
-				history = make([]Message, len(session.Messages))
-				copy(history, session.Messages)
-				session.mu.Unlock()
-			}
-			session.mu.Lock()
-			stats := session.Stats
-			session.mu.Unlock()
-
-			resp := map[string]interface{}{
-				"type":      "session_joined",
-				"sessionId": session.ID,
-				"projectId": session.ProjectID,
-				"directory": session.Directory,
-				"model":     session.Model,
-				"name":      session.Name,
-				"history":   history,
-				"stats":     stats,
-				"headless":  session.Headless,
-			}
-			data, _ := json.Marshal(resp)
-			wc.mu.Lock()
-			wc.conn.WriteMessage(websocket.TextMessage, data)
-			wc.mu.Unlock()
-
+			h.handleJoinSession(wc, msgBytes, boundSessions)
 		case "send_message":
-			var req struct {
-				SessionID string           `json:"sessionId"`
-				Text      string           `json:"text"`
-				Files     []FileAttachment `json:"files"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-
-			if err := h.sessions.SendMessage(sessionID, req.Text, req.Files); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleSendMessage(wc, msgBytes)
 		case "end_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-			h.sessions.EndSession(sessionID)
-
+			h.handleEndSession(wc, msgBytes)
 		case "rename_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-				Name      string `json:"name"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-			if err := h.sessions.RenameSession(sessionID, req.Name); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleRenameSession(wc, msgBytes)
 		case "delete_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-			h.sessions.DeleteSession(sessionID)
-			// Unbind if this was a bound session
-			if boundSessions[sessionID] {
-				h.mu.Lock()
-				delete(h.conns, sessionID)
-				h.mu.Unlock()
-				delete(boundSessions, sessionID)
-			}
-			// Notify the client
-			resp := map[string]interface{}{
-				"type":      "session_ended",
-				"sessionId": sessionID,
-			}
-			data, _ := json.Marshal(resp)
-			wc.mu.Lock()
-			wc.conn.WriteMessage(websocket.TextMessage, data)
-			wc.mu.Unlock()
-
+			h.handleDeleteSession(wc, msgBytes, boundSessions)
 		case "leave_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.SessionID != "" && boundSessions[req.SessionID] {
-				h.mu.Lock()
-				delete(h.conns, req.SessionID)
-				h.mu.Unlock()
-				delete(boundSessions, req.SessionID)
-			}
-
+			h.handleLeaveSession(msgBytes, boundSessions)
 		case "stop_generation":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-			if err := h.sessions.StopGeneration(sessionID); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleStopGeneration(wc, msgBytes)
 		case "clear_session":
-			var req struct {
-				SessionID string `json:"sessionId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			sessionID := req.SessionID
-			if sessionID == "" {
-				sendWSError(wc, "sessionId required")
-				continue
-			}
-			if err := h.sessions.ClearSession(sessionID); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleClearSession(wc, msgBytes)
 		case "permission_response":
-			var req struct {
-				PermissionID string `json:"permissionId"`
-				Approved     bool   `json:"approved"`
-				Reason       string `json:"reason"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			decision := "deny"
-			if req.Approved {
-				decision = "allow"
-			}
-			h.perms.Resolve(req.PermissionID, PermissionDecision{
-				Decision: decision,
-				Reason:   req.Reason,
-			})
-
-		// --- Terminal messages ---
-
+			h.handlePermissionResponse(msgBytes)
 		case "terminal_create":
-			var req struct {
-				TemplateID string `json:"templateId"`
-				Name       string `json:"name"`
-				Directory  string `json:"directory"`
-				Cols       uint16 `json:"cols"`
-				Rows       uint16 `json:"rows"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.TemplateID == "" {
-				sendWSError(wc, "templateId required")
-				continue
-			}
-
-			session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows)
-			if err != nil {
-				sendWSError(wc, err.Error())
-				continue
-			}
-
-			// Auto-join the creator and send terminal_created only to them.
-			h.joinTerminalConn(wc, session, boundTerminals)
-
-			resp := map[string]interface{}{
-				"type":       "terminal_created",
-				"terminalId": session.ID,
-				"templateId": session.TemplateID,
-				"name":       session.Name,
-				"directory":  session.Directory,
-			}
-			data, _ := json.Marshal(resp)
-			wc.mu.Lock()
-			wc.conn.WriteMessage(websocket.TextMessage, data)
-			wc.mu.Unlock()
-
+			h.handleTerminalCreate(wc, msgBytes, boundTerminals)
 		case "join_terminal":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-			if req.TerminalID == "" {
-				continue
-			}
-
-			session, ok := h.terminals.Get(req.TerminalID)
-			if !ok {
-				sendWSError(wc, "terminal not found: "+req.TerminalID)
-				continue
-			}
-
-			h.joinTerminalConn(wc, session, boundTerminals)
-
+			h.handleJoinTerminal(wc, msgBytes, boundTerminals)
 		case "leave_terminal":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.TerminalID != "" && boundTerminals[req.TerminalID] {
-				h.mu.Lock()
-				if viewers, ok := h.termConns[req.TerminalID]; ok {
-					delete(viewers, wc)
-					if len(viewers) == 0 {
-						delete(h.termConns, req.TerminalID)
-					}
-				}
-				h.mu.Unlock()
-				delete(boundTerminals, req.TerminalID)
-			}
-
+			h.handleLeaveTerminal(wc, msgBytes, boundTerminals)
 		case "terminal_input":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-				Data       string `json:"data"` // base64-encoded
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.TerminalID == "" {
-				continue
-			}
-
-			decoded, err := base64.StdEncoding.DecodeString(req.Data)
-			if err != nil {
-				sendWSError(wc, "invalid base64 data")
-				continue
-			}
-
-			if err := h.terminals.Write(req.TerminalID, decoded); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleTerminalInput(wc, msgBytes)
 		case "terminal_resize":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-				Cols       uint16 `json:"cols"`
-				Rows       uint16 `json:"rows"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.TerminalID == "" {
-				continue
-			}
-
-			if err := h.terminals.Resize(req.TerminalID, req.Cols, req.Rows); err != nil {
-				sendWSError(wc, err.Error())
-			}
-
+			h.handleTerminalResize(wc, msgBytes)
 		case "terminal_close":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-
-			if req.TerminalID == "" {
-				continue
-			}
-
-			h.terminals.Close(req.TerminalID)
-
-			// Clean up viewer bindings.
-			h.mu.Lock()
-			delete(h.termConns, req.TerminalID)
-			h.mu.Unlock()
-			delete(boundTerminals, req.TerminalID)
-
-			h.Broadcast(map[string]interface{}{
-				"type":       "terminal_closed",
-				"terminalId": req.TerminalID,
-			})
-
+			h.handleTerminalClose(msgBytes, boundTerminals)
 		case "terminal_list":
-			list := h.terminals.List()
-			resp := map[string]interface{}{
-				"type":      "terminal_list",
-				"terminals": list,
-			}
-			data, _ := json.Marshal(resp)
-			wc.mu.Lock()
-			wc.conn.WriteMessage(websocket.TextMessage, data)
-			wc.mu.Unlock()
-
+			h.handleTerminalList(wc)
 		case "terminal_reconnect":
-			var req struct {
-				TerminalID string `json:"terminalId"`
-			}
-			json.Unmarshal(msgBytes, &req)
-			if req.TerminalID == "" {
-				continue
-			}
-
-			session, ok := h.terminals.Get(req.TerminalID)
-			if !ok {
-				sendWSError(wc, "terminal not found: "+req.TerminalID)
-				continue
-			}
-
-			h.joinTerminalConn(wc, session, boundTerminals)
-
+			h.handleTerminalReconnect(wc, msgBytes, boundTerminals)
 		case "terminal_templates":
-			templates := h.terminals.ListTemplates()
-			resp := map[string]interface{}{
-				"type":      "terminal_templates",
-				"templates": templates,
-			}
-			data, _ := json.Marshal(resp)
-			wc.mu.Lock()
-			wc.conn.WriteMessage(websocket.TextMessage, data)
-			wc.mu.Unlock()
+			h.handleTerminalTemplates(wc)
 		}
 	}
 }
+
+// --- Session message handlers ---
+
+func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map[string]bool) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+	if req.SessionID == "" {
+		return
+	}
+
+	session, ok := h.sessions.GetSession(req.SessionID)
+	if !ok {
+		sendWSError(wc, "session not found: "+req.SessionID)
+		return
+	}
+
+	boundSessions[req.SessionID] = true
+	h.mu.Lock()
+	h.conns[req.SessionID] = wc
+	h.mu.Unlock()
+
+	// Try reading from Claude CLI's JSONL session file first (has both user + assistant).
+	var history []Message
+	var claudeSessionID string
+	if session.ProviderState != nil {
+		var ps struct {
+			ClaudeSessionID string `json:"claudeSessionId"`
+		}
+		json.Unmarshal(session.ProviderState, &ps)
+		claudeSessionID = ps.ClaudeSessionID
+	}
+	if claudeSessionID != "" {
+		if h, err := readClaudeHistory(session.Directory, claudeSessionID); err == nil && len(h) > 0 {
+			history = h
+		} else if err != nil {
+			slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
+		}
+	}
+	// Fall back to session.Messages if Claude history unavailable.
+	if history == nil {
+		session.mu.Lock()
+		history = make([]Message, len(session.Messages))
+		copy(history, session.Messages)
+		session.mu.Unlock()
+	}
+	session.mu.Lock()
+	stats := session.Stats
+	session.mu.Unlock()
+
+	sendJSON(wc, map[string]interface{}{
+		"type":      "session_joined",
+		"sessionId": session.ID,
+		"projectId": session.ProjectID,
+		"directory": session.Directory,
+		"model":     session.Model,
+		"name":      session.Name,
+		"history":   history,
+		"stats":     stats,
+		"headless":  session.Headless,
+	})
+}
+
+func (h *WSHub) handleSendMessage(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string           `json:"sessionId"`
+		Text      string           `json:"text"`
+		Files     []FileAttachment `json:"files"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	if err := h.sessions.SendMessage(req.SessionID, req.Text, req.Files); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleEndSession(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	h.sessions.EndSession(req.SessionID)
+}
+
+func (h *WSHub) handleRenameSession(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+		Name      string `json:"name"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	if err := h.sessions.RenameSession(req.SessionID, req.Name); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleDeleteSession(wc *wsConn, msgBytes []byte, boundSessions map[string]bool) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	h.sessions.DeleteSession(req.SessionID)
+
+	if boundSessions[req.SessionID] {
+		h.mu.Lock()
+		delete(h.conns, req.SessionID)
+		h.mu.Unlock()
+		delete(boundSessions, req.SessionID)
+	}
+
+	sendJSON(wc, map[string]interface{}{
+		"type":      "session_ended",
+		"sessionId": req.SessionID,
+	})
+}
+
+func (h *WSHub) handleLeaveSession(msgBytes []byte, boundSessions map[string]bool) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID != "" && boundSessions[req.SessionID] {
+		h.mu.Lock()
+		delete(h.conns, req.SessionID)
+		h.mu.Unlock()
+		delete(boundSessions, req.SessionID)
+	}
+}
+
+func (h *WSHub) handleStopGeneration(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	if err := h.sessions.StopGeneration(req.SessionID); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleClearSession(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	if err := h.sessions.ClearSession(req.SessionID); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handlePermissionResponse(msgBytes []byte) {
+	var req struct {
+		PermissionID string `json:"permissionId"`
+		Approved     bool   `json:"approved"`
+		Reason       string `json:"reason"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	decision := "deny"
+	if req.Approved {
+		decision = "allow"
+	}
+	h.perms.Resolve(req.PermissionID, PermissionDecision{
+		Decision: decision,
+		Reason:   req.Reason,
+	})
+}
+
+// --- Terminal message handlers ---
+
+func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
+	var req struct {
+		TemplateID string `json:"templateId"`
+		Name       string `json:"name"`
+		Directory  string `json:"directory"`
+		Cols       uint16 `json:"cols"`
+		Rows       uint16 `json:"rows"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.TemplateID == "" {
+		sendWSError(wc, "templateId required")
+		return
+	}
+
+	session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows)
+	if err != nil {
+		sendWSError(wc, err.Error())
+		return
+	}
+
+	h.joinTerminalConn(wc, session, boundTerminals)
+
+	sendJSON(wc, map[string]interface{}{
+		"type":       "terminal_created",
+		"terminalId": session.ID,
+		"templateId": session.TemplateID,
+		"name":       session.Name,
+		"directory":  session.Directory,
+	})
+}
+
+func (h *WSHub) handleJoinTerminal(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+	if req.TerminalID == "" {
+		return
+	}
+
+	session, ok := h.terminals.Get(req.TerminalID)
+	if !ok {
+		sendWSError(wc, "terminal not found: "+req.TerminalID)
+		return
+	}
+	h.joinTerminalConn(wc, session, boundTerminals)
+}
+
+func (h *WSHub) handleLeaveTerminal(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.TerminalID == "" || !boundTerminals[req.TerminalID] {
+		return
+	}
+
+	var remaining int
+	h.mu.Lock()
+	if viewers, ok := h.termConns[req.TerminalID]; ok {
+		delete(viewers, wc)
+		remaining = len(viewers)
+		if remaining == 0 {
+			delete(h.termConns, req.TerminalID)
+		}
+	}
+	h.mu.Unlock()
+	delete(boundTerminals, req.TerminalID)
+
+	h.terminals.NotifyViewerChange(req.TerminalID, remaining)
+}
+
+func (h *WSHub) handleTerminalInput(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+		Data       string `json:"data"` // base64-encoded
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.TerminalID == "" {
+		return
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(req.Data)
+	if err != nil {
+		sendWSError(wc, "invalid base64 data")
+		return
+	}
+	if err := h.terminals.Write(req.TerminalID, decoded); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleTerminalResize(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+		Cols       uint16 `json:"cols"`
+		Rows       uint16 `json:"rows"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.TerminalID == "" {
+		return
+	}
+	if err := h.terminals.Resize(req.TerminalID, req.Cols, req.Rows); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleTerminalClose(msgBytes []byte, boundTerminals map[string]bool) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.TerminalID == "" {
+		return
+	}
+
+	h.terminals.Close(req.TerminalID)
+
+	h.mu.Lock()
+	delete(h.termConns, req.TerminalID)
+	h.mu.Unlock()
+	delete(boundTerminals, req.TerminalID)
+
+	h.Broadcast(map[string]interface{}{
+		"type":       "terminal_closed",
+		"terminalId": req.TerminalID,
+	})
+}
+
+func (h *WSHub) handleTerminalList(wc *wsConn) {
+	sendJSON(wc, map[string]interface{}{
+		"type":      "terminal_list",
+		"terminals": h.terminals.List(),
+	})
+}
+
+func (h *WSHub) handleTerminalReconnect(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
+	var req struct {
+		TerminalID string `json:"terminalId"`
+	}
+	json.Unmarshal(msgBytes, &req)
+	if req.TerminalID == "" {
+		return
+	}
+
+	session, ok := h.terminals.Get(req.TerminalID)
+	if !ok {
+		sendWSError(wc, "terminal not found: "+req.TerminalID)
+		return
+	}
+	h.joinTerminalConn(wc, session, boundTerminals)
+}
+
+func (h *WSHub) handleTerminalTemplates(wc *wsConn) {
+	sendJSON(wc, map[string]interface{}{
+		"type":      "terminal_templates",
+		"templates": h.terminals.ListTemplates(),
+	})
+}
+
+// --- Shared helpers ---
 
 // Broadcast sends a message to all connected WebSocket clients,
 // including those not currently bound to a session.
@@ -569,7 +597,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 
 	scrollback := session.ScrollbackBytes()
 	state, exitCode := session.Snapshot()
-	resp := map[string]interface{}{
+	sendJSON(wc, map[string]interface{}{
 		"type":       "terminal_joined",
 		"terminalId": tid,
 		"templateId": session.TemplateID,
@@ -577,32 +605,27 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 		"directory":  session.Directory,
 		"state":      state,
 		"scrollback": base64.StdEncoding.EncodeToString(scrollback),
-	}
-	data, _ := json.Marshal(resp)
-	wc.mu.Lock()
-	wc.conn.WriteMessage(websocket.TextMessage, data)
-	wc.mu.Unlock()
+	})
 
-	// If the terminal already exited, send exit event.
 	if state == "stopped" {
-		exitMsg := map[string]interface{}{
+		sendJSON(wc, map[string]interface{}{
 			"type":       "terminal_exit",
 			"terminalId": tid,
 			"exitCode":   exitCode,
-		}
-		exitData, _ := json.Marshal(exitMsg)
-		wc.mu.Lock()
-		wc.conn.WriteMessage(websocket.TextMessage, exitData)
-		wc.mu.Unlock()
+		})
 	}
 }
 
-func sendWSError(wc *wsConn, msg string) {
-	data, _ := json.Marshal(map[string]string{
-		"type":    "error",
-		"message": msg,
-	})
+func sendJSON(wc *wsConn, msg map[string]interface{}) {
+	data, _ := json.Marshal(msg)
 	wc.mu.Lock()
 	wc.conn.WriteMessage(websocket.TextMessage, data)
 	wc.mu.Unlock()
+}
+
+func sendWSError(wc *wsConn, msg string) {
+	sendJSON(wc, map[string]interface{}{
+		"type":    "error",
+		"message": msg,
+	})
 }

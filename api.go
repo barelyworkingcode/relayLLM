@@ -344,12 +344,13 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return
 			}
+			state, _ := session.Snapshot()
 			writeJSON(w, 201, map[string]interface{}{
 				"id":         session.ID,
 				"templateId": session.TemplateID,
 				"name":       session.Name,
 				"directory":  session.Directory,
-				"state":      session.State,
+				"state":      state,
 			})
 
 		default:
