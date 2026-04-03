@@ -171,9 +171,18 @@ func (s *TemplateStore) Create(tmpl TerminalTemplate) (TerminalTemplate, error) 
 	return tmpl, s.save()
 }
 
+// TemplateUpdate holds optional fields for partial template updates.
+type TemplateUpdate struct {
+	Name        *string            `json:"name,omitempty"`
+	Command     *string            `json:"command,omitempty"`
+	Description *string            `json:"description,omitempty"`
+	Icon        *string            `json:"icon,omitempty"`
+	Args        *[]string          `json:"args,omitempty"`
+	Env         *map[string]string `json:"env,omitempty"`
+}
+
 // Update modifies an existing custom template.
-func (s *TemplateStore) Update(id string, updates map[string]interface{}) (TerminalTemplate, error) {
-	// Cannot update built-in templates.
+func (s *TemplateStore) Update(id string, u TemplateUpdate) (TerminalTemplate, error) {
 	for _, t := range builtinTemplates() {
 		if t.ID == id {
 			return TerminalTemplate{}, fmt.Errorf("cannot update built-in template: %s", id)
@@ -187,35 +196,23 @@ func (s *TemplateStore) Update(id string, updates map[string]interface{}) (Termi
 		if s.custom[i].ID != id {
 			continue
 		}
-		if v, ok := updates["name"].(string); ok && v != "" {
-			s.custom[i].Name = v
+		if u.Name != nil && *u.Name != "" {
+			s.custom[i].Name = *u.Name
 		}
-		if v, ok := updates["command"].(string); ok && v != "" {
-			s.custom[i].Command = v
+		if u.Command != nil && *u.Command != "" {
+			s.custom[i].Command = *u.Command
 		}
-		if v, ok := updates["description"].(string); ok {
-			s.custom[i].Description = v
+		if u.Description != nil {
+			s.custom[i].Description = *u.Description
 		}
-		if v, ok := updates["icon"].(string); ok {
-			s.custom[i].Icon = v
+		if u.Icon != nil {
+			s.custom[i].Icon = *u.Icon
 		}
-		if v, ok := updates["args"].([]interface{}); ok {
-			args := make([]string, 0, len(v))
-			for _, a := range v {
-				if str, ok := a.(string); ok {
-					args = append(args, str)
-				}
-			}
-			s.custom[i].Args = args
+		if u.Args != nil {
+			s.custom[i].Args = *u.Args
 		}
-		if v, ok := updates["env"].(map[string]interface{}); ok {
-			env := make(map[string]string, len(v))
-			for k, val := range v {
-				if str, ok := val.(string); ok {
-					env[k] = str
-				}
-			}
-			s.custom[i].Env = env
+		if u.Env != nil {
+			s.custom[i].Env = *u.Env
 		}
 		return s.custom[i], s.save()
 	}
