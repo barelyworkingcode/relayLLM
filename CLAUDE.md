@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, Gemini CLI, LM Studio HTTP), sessions, projects, and permissions. Runs independently or as a relay-managed service.
+Standalone LLM engine service. Manages providers (Claude CLI, Gemini CLI, LM Studio HTTP), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
 
 ## Architecture
 
@@ -14,8 +14,11 @@ provider_claude.go   Claude CLI provider (stream-json, persistent process)
 provider_lmstudio.go LM Studio HTTP provider (SSE streaming)
 provider_settings.go Per-provider settings schema for Eve UI
 response_collector.go  Headless response accumulation for HTTP clients
-api.go               HTTP routes (projects, sessions, permissions)
-ws.go                WebSocket server (streaming events to Eve)
+terminal_template.go Terminal template types + JSON file store (built-in + custom)
+terminal_session.go  Terminal session with PTY management (creack/pty)
+terminal_manager.go  Terminal CRUD + lifecycle management
+api.go               HTTP routes (projects, sessions, terminals, permissions)
+ws.go                WebSocket server (streaming events to Eve, terminal I/O)
 permission.go        Permission request/response tracking
 scheduler_client.go  HTTP client for relayScheduler
 scheduler_proxy.go   Task API proxy routes (GET/POST/PUT/DELETE /api/tasks/*)
@@ -41,6 +44,10 @@ GET            /api/models         — list available models (Claude + LM Studio
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session
+GET/POST       /api/terminal/templates     — list/create terminal templates
+GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
+GET/POST       /api/terminals              — list/create terminal instances
+DELETE         /api/terminals/:id          — close terminal
 POST           /api/permission     — hook binary posts here, held open until user decides
 GET/POST       /api/tasks          — list/create tasks (proxy to relayScheduler)
 GET/PUT/DELETE /api/tasks/:id      — get/update/delete task (proxy to relayScheduler)
@@ -53,13 +60,27 @@ GET            /api/tasks/project/:projectId — tasks by project (proxy to rela
 ```
 Client → Server: join_session, send_message, end_session, permission_response
 Server → Client: session_joined, llm_event, stats_update, message_complete, permission_request, task_started, task_completed, task_error, task_status, error
+
+Terminal messages:
+Client → Server: terminal_create, join_terminal, leave_terminal, terminal_input (base64), terminal_resize, terminal_close, terminal_list, terminal_reconnect, terminal_templates
+Server → Client: terminal_created, terminal_joined (with base64 scrollback), terminal_output (base64), terminal_exit, terminal_closed, terminal_list, terminal_templates
 ```
+
+## Terminal Sessions
+
+PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via WebSocket (base64-encoded). Terminals survive Eve restarts.
+
+- **Templates**: Built-in (Claude Code, OpenCode, Shell) + custom via API. `IdleTimeout` field (minutes, default 1440 = 24h).
+- **Idle timeout**: When all viewers disconnect, an idle timer starts. If no viewer reconnects before it fires, the terminal is auto-closed. Configurable per template.
+- **Color**: PTY spawned with `TERM=xterm-256color` and `COLORTERM=truecolor` for full 24-bit color.
+- **Scrollback**: 100KB ring buffer per terminal, replayed on reconnect.
 
 ## Data
 
 Default: `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
 - `projects.json` — project definitions
 - `sessions/` — per-session JSON files
+- `terminals/templates.json` — custom terminal templates
 
 ## Build
 
