@@ -3,79 +3,36 @@ package main
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 )
 
 // RegisterSchedulerProxyRoutes registers task API routes that proxy to relayScheduler.
 func RegisterSchedulerProxyRoutes(mux *http.ServeMux, sc *SchedulerClient) {
-	// GET/POST /api/tasks
-	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			proxyScheduler(w, r, sc, "GET", "/api/tasks", r.URL.RawQuery)
-		case http.MethodPost:
-			proxyScheduler(w, r, sc, "POST", "/api/tasks", "")
-		default:
-			w.WriteHeader(405)
-		}
+	mux.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "GET", "/api/tasks", r.URL.RawQuery)
+	})
+	mux.HandleFunc("POST /api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "POST", "/api/tasks", "")
 	})
 
-	// /api/tasks/* routes
-	mux.HandleFunc("/api/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
-		if path == "" {
-			w.WriteHeader(404)
-			return
-		}
+	mux.HandleFunc("GET /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "GET", "/api/tasks/"+r.PathValue("id"), "")
+	})
+	mux.HandleFunc("PUT /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "PUT", "/api/tasks/"+r.PathValue("id"), "")
+	})
+	mux.HandleFunc("DELETE /api/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "DELETE", "/api/tasks/"+r.PathValue("id"), "")
+	})
 
-		// DELETE /api/tasks/by-project/{pid}
-		if strings.HasPrefix(path, "by-project/") {
-			if r.Method != http.MethodDelete {
-				w.WriteHeader(405)
-				return
-			}
-			proxyScheduler(w, r, sc, "DELETE", r.URL.Path, "")
-			return
-		}
+	mux.HandleFunc("GET /api/tasks/{id}/history", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "GET", "/api/tasks/"+r.PathValue("id")+"/history", "")
+	})
+	mux.HandleFunc("POST /api/tasks/{id}/run", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "POST", "/api/tasks/"+r.PathValue("id")+"/run", "")
+	})
 
-		// path = "{id}" or "{id}/history" or "{id}/run"
-		parts := strings.SplitN(path, "/", 2)
-		taskID := parts[0]
-
-		if len(parts) == 1 {
-			// GET/PUT/DELETE /api/tasks/{id}
-			switch r.Method {
-			case http.MethodGet:
-				proxyScheduler(w, r, sc, "GET", "/api/tasks/"+taskID, "")
-			case http.MethodPut:
-				proxyScheduler(w, r, sc, "PUT", "/api/tasks/"+taskID, "")
-			case http.MethodDelete:
-				proxyScheduler(w, r, sc, "DELETE", "/api/tasks/"+taskID, "")
-			default:
-				w.WriteHeader(405)
-			}
-			return
-		}
-
-		sub := parts[1]
-		switch sub {
-		case "history":
-			if r.Method != http.MethodGet {
-				w.WriteHeader(405)
-				return
-			}
-			proxyScheduler(w, r, sc, "GET", "/api/tasks/"+taskID+"/history", "")
-
-		case "run":
-			if r.Method != http.MethodPost {
-				w.WriteHeader(405)
-				return
-			}
-			proxyScheduler(w, r, sc, "POST", "/api/tasks/"+taskID+"/run", "")
-
-		default:
-			w.WriteHeader(404)
-		}
+	mux.HandleFunc("DELETE /api/tasks/by-project/{pid}", func(w http.ResponseWriter, r *http.Request) {
+		proxyScheduler(w, r, sc, "DELETE", "/api/tasks/by-project/"+r.PathValue("pid"), "")
 	})
 }
 

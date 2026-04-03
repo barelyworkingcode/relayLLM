@@ -113,7 +113,16 @@ func (s *ProjectStore) Create(name, path string, allowedTools []string) (Project
 	return p, s.save()
 }
 
-func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Project, error) {
+// ProjectUpdate holds optional fields for partial project updates.
+// Pointer fields distinguish "not provided" from zero values.
+type ProjectUpdate struct {
+	Name          *string         `json:"name,omitempty"`
+	Path          *string         `json:"path,omitempty"`
+	AllowedTools  *[]string       `json:"allowedTools,omitempty"`
+	ChatTemplates *[]ChatTemplate `json:"chatTemplates,omitempty"`
+}
+
+func (s *ProjectStore) Update(id string, u ProjectUpdate) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -121,33 +130,17 @@ func (s *ProjectStore) Update(id string, updates map[string]interface{}) (Projec
 		if s.projects[i].ID != id {
 			continue
 		}
-		if v, ok := updates["name"].(string); ok && v != "" {
-			s.projects[i].Name = v
+		if u.Name != nil && *u.Name != "" {
+			s.projects[i].Name = *u.Name
 		}
-		if v, ok := updates["path"].(string); ok && v != "" {
-			s.projects[i].Path = v
+		if u.Path != nil && *u.Path != "" {
+			s.projects[i].Path = *u.Path
 		}
-		if v, ok := updates["allowedTools"]; ok {
-			if tools, ok := v.([]interface{}); ok {
-				strs := make([]string, 0, len(tools))
-				for _, t := range tools {
-					if str, ok := t.(string); ok {
-						strs = append(strs, str)
-					}
-				}
-				s.projects[i].AllowedTools = strs
-			}
+		if u.AllowedTools != nil {
+			s.projects[i].AllowedTools = *u.AllowedTools
 		}
-		if v, ok := updates["chatTemplates"]; ok {
-			raw, err := json.Marshal(v)
-			if err != nil {
-				return Project{}, fmt.Errorf("invalid chatTemplates: %w", err)
-			}
-			var templates []ChatTemplate
-			if err := json.Unmarshal(raw, &templates); err != nil {
-				return Project{}, fmt.Errorf("invalid chatTemplates: %w", err)
-			}
-			s.projects[i].ChatTemplates = templates
+		if u.ChatTemplates != nil {
+			s.projects[i].ChatTemplates = *u.ChatTemplates
 		}
 		return s.projects[i], s.save()
 	}
