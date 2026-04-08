@@ -36,6 +36,10 @@ type ClaudeProvider struct {
 	stopIdle     chan struct{} // signals idle watcher to stop
 	stopIdleOnce sync.Once    // prevents double-close of stopIdle
 	waitDone     chan struct{} // closed when cmd.Wait() returns
+
+	// Per-turn timing for TTFT / TPS metrics.
+	msgStartNano   atomic.Int64 // set in SendMessage
+	firstTokenNano atomic.Int64 // set on first content_block_delta
 }
 
 func NewClaudeProvider(session *Session, handler EventHandler, hookURL string) *ClaudeProvider {
@@ -211,6 +215,11 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 		return
 	}
 
+	// Record first-token time on the first content_block_delta.
+	if envelope.Type == "content_block_delta" {
+		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+	}
+
 	// Capture Claude session ID from system.init.
 	if envelope.Type == "system" && envelope.Subtype == "init" {
 		var init struct {
@@ -242,6 +251,18 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 				CacheCreationTokens: result.Usage.CacheCreationInputTokens,
 				CostUsd:             result.TotalCostUsd,
 			}
+
+			startNano := p.msgStartNano.Load()
+			firstNano := p.firstTokenNano.Load()
+			nowNano := time.Now().UnixNano()
+			if startNano > 0 && firstNano > 0 {
+				stats.TimeToFirstToken = float64(firstNano-startNano) / 1e9
+				genSecs := float64(nowNano-firstNano) / 1e9
+				if genSecs > 0 && stats.OutputTokens > 0 {
+					stats.TokensPerSecond = float64(stats.OutputTokens) / genSecs
+				}
+			}
+
 			statsData, _ := json.Marshal(stats)
 			p.handler("stats_update", statsData)
 		}
@@ -292,6 +313,10 @@ func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error 
 		return fmt.Errorf("marshal message: %w", err)
 	}
 	data = append(data, '\n')
+
+	// Record turn start for TTFT/TPS calculation.
+	p.msgStartNano.Store(time.Now().UnixNano())
+	p.firstTokenNano.Store(0)
 
 	if _, err := p.stdin.Write(data); err != nil {
 		return fmt.Errorf("write to stdin: %w", err)
