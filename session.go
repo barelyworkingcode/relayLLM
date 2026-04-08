@@ -72,8 +72,8 @@ type SessionManager struct {
 	sessionStore *SessionStore
 	perms        *PermissionManager
 	sink         EventSink
-	hookURL      string
-	lmStudioURL  string
+	hookURL   string
+	ollamaURL string
 }
 
 func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -94,11 +94,11 @@ func (m *SessionManager) SetHookURL(url string) {
 	m.hookURL = url
 }
 
-func (m *SessionManager) SetLMStudioURL(url string) {
-	m.lmStudioURL = url
+func (m *SessionManager) SetOllamaURL(url string) {
+	m.ollamaURL = url
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, settings json.RawMessage) (*Session, error) {
+func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
 	var dir string
 
 	if projectID != "" {
@@ -122,7 +122,9 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		name = "New Session"
 	}
 
-	providerType := deriveProviderType(model)
+	if providerType == "" {
+		providerType = deriveProviderType(model)
+	}
 
 	// For non-Claude providers, prepend CLAUDE.md content to system prompt if requested.
 	if appendClaudeMd && providerType != "claude" && dir != "" {
@@ -179,7 +181,7 @@ func deriveProviderType(model string) string {
 	case "haiku", "sonnet", "opus":
 		return "claude"
 	default:
-		return "lmstudio"
+		return "ollama"
 	}
 }
 
@@ -191,11 +193,8 @@ func (m *SessionManager) initProvider(session *Session) error {
 	var provider Provider
 
 	switch session.ProviderType {
-	case "lmstudio":
-		p := NewLMStudioProvider(session, handler, m.lmStudioURL, session.Settings)
-		if session.ProviderState != nil {
-			p.RestoreState(session.ProviderState)
-		}
+	case "ollama":
+		p := NewOllamaProvider(session, handler, m.ollamaURL, session.Settings)
 		provider = p
 
 	default: // "claude" or unset (backward compat)
@@ -310,6 +309,11 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.Stats.CacheReadTokens = stats.CacheReadTokens
 		session.Stats.CacheCreationTokens = stats.CacheCreationTokens
 		session.Stats.CostUsd = stats.CostUsd
+		session.Stats.TimeToFirstToken = stats.TimeToFirstToken
+		session.Stats.TokensPerSecond = stats.TokensPerSecond
+		session.Stats.PromptEvalCount = stats.PromptEvalCount
+		session.Stats.EvalDurationMs = stats.EvalDurationMs
+		session.Stats.PromptEvalDurationMs = stats.PromptEvalDurationMs
 		currentStats := session.Stats
 		session.mu.Unlock()
 
