@@ -20,7 +20,7 @@ import (
 func main() {
 	port := flag.String("port", envOrDefault("RELAY_LLM_PORT", "3001"), "HTTP/WebSocket listen port")
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
-	lmStudioURL := flag.String("lmstudio-url", envOrDefault("LM_STUDIO_URL", "http://localhost:1234"), "LM Studio base URL")
+	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
 	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
 	flag.Parse()
 
@@ -77,7 +77,7 @@ func main() {
 
 	// Set the hook URL so providers know where to send permission requests.
 	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
-	sessions.SetLMStudioURL(*lmStudioURL)
+	sessions.SetOllamaURL(*ollamaURL)
 
 	schedulerClient := NewSchedulerClient(*schedulerURL)
 
@@ -86,7 +86,7 @@ func main() {
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)
-	RegisterModelRoutes(mux, *lmStudioURL)
+	RegisterModelRoutes(mux, *ollamaURL)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
