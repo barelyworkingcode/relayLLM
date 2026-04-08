@@ -115,13 +115,14 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			Model          string          `json:"model"`
 			SystemPrompt   string          `json:"systemPrompt"`
 			AppendClaudeMd bool            `json:"appendClaudeMd"`
+			ProviderType   string          `json:"providerType"`
 			Settings       json.RawMessage `json:"settings"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.Settings)
+		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.ProviderType, body.Settings)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return
@@ -192,7 +193,7 @@ type ModelInfo struct {
 	Provider string `json:"provider"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, lmStudioURL string) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		models := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -200,9 +201,9 @@ func RegisterModelRoutes(mux *http.ServeMux, lmStudioURL string) {
 			{Label: "Claude Opus", Value: "opus", Group: "Claude", Provider: "claude"},
 		}
 
-		if lmStudioURL != "" {
-			if lmModels := fetchLMStudioModels(lmStudioURL); len(lmModels) > 0 {
-				models = append(models, lmModels...)
+		if ollamaURL != "" {
+			if ollamaModels := fetchOllamaModels(ollamaURL); len(ollamaModels) > 0 {
+				models = append(models, ollamaModels...)
 			}
 		}
 
