@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,8 +73,9 @@ type SessionManager struct {
 	sessionStore *SessionStore
 	perms        *PermissionManager
 	sink         EventSink
-	hookURL   string
-	ollamaURL string
+	hookURL      string
+	ollamaURL    string
+	openaiConfig *OpenAIConfig
 }
 
 func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -96,6 +98,12 @@ func (m *SessionManager) SetHookURL(url string) {
 
 func (m *SessionManager) SetOllamaURL(url string) {
 	m.ollamaURL = url
+}
+
+// SetOpenAIConfig injects the OpenAI-compatible endpoint config. Pass nil to
+// disable all OpenAI-compatible providers.
+func (m *SessionManager) SetOpenAIConfig(cfg *OpenAIConfig) {
+	m.openaiConfig = cfg
 }
 
 func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
@@ -123,7 +131,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	}
 
 	if providerType == "" {
-		providerType = deriveProviderType(model)
+		providerType = deriveProviderType(model, m.openaiConfig)
 	}
 
 	// For non-Claude providers, prepend CLAUDE.md content to system prompt if requested.
@@ -175,14 +183,23 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	return session, nil
 }
 
-// deriveProviderType returns "claude" for known Claude model names, "lmstudio" otherwise.
-func deriveProviderType(model string) string {
+// deriveProviderType picks a provider for the given model identifier.
+//
+// Claude model aliases (haiku/sonnet/opus) route to the Claude subprocess
+// provider. A model of the form "{endpoint}/{model-id}" where {endpoint} is
+// a configured OpenAI-compatible endpoint routes to the generic openai
+// provider. Everything else falls through to Ollama's native provider.
+func deriveProviderType(model string, openaiCfg *OpenAIConfig) string {
 	switch model {
 	case "haiku", "sonnet", "opus":
 		return "claude"
-	default:
-		return "ollama"
 	}
+	if idx := strings.Index(model, "/"); idx > 0 {
+		if openaiCfg.Find(model[:idx]) != nil {
+			return "openai"
+		}
+	}
+	return "ollama"
 }
 
 func (m *SessionManager) initProvider(session *Session) error {
@@ -194,8 +211,20 @@ func (m *SessionManager) initProvider(session *Session) error {
 
 	switch session.ProviderType {
 	case "ollama":
-		p := NewOllamaProvider(session, handler, m.ollamaURL, session.Settings)
-		provider = p
+		transport := NewOllamaChatTransport(m.ollamaURL, session.Model, session.Settings, nil)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings)
+
+	case "openai":
+		prefix, modelID, ok := strings.Cut(session.Model, "/")
+		if !ok || modelID == "" {
+			return fmt.Errorf("openai: model %q missing endpoint prefix", session.Model)
+		}
+		endpoint := m.openaiConfig.Find(prefix)
+		if endpoint == nil {
+			return fmt.Errorf("openai: unknown endpoint %q (model %q)", prefix, session.Model)
+		}
+		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings)
 
 	default: // "claude" or unset (backward compat)
 		if err := m.ensureHookConfig(session.Directory); err != nil {

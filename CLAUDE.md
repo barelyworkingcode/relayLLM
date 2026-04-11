@@ -76,10 +76,11 @@ PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via We
 
 ## Data
 
-Default: `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
+Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Support/relayLLM/`, on Linux `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
 - `projects.json` — project definitions
 - `sessions/` — per-session JSON files
 - `terminals/templates.json` — custom terminal templates
+- `openai_endpoints.json` — OpenAI-compatible endpoint config (override: `--openai-config` or `OPENAI_CONFIG`)
 
 ## Build
 
