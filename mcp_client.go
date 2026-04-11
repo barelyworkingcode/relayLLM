@@ -109,8 +109,10 @@ func (m *MCPManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// OllamaToolDefs converts discovered tools into the Ollama tools[] format.
-func (m *MCPManager) OllamaToolDefs() []map[string]interface{} {
+// ChatToolDefs converts discovered tools into the {type:"function",
+// function:{name, description, parameters}} shape accepted by both Ollama's
+// /api/chat and the OpenAI /chat/completions protocol.
+func (m *MCPManager) ChatToolDefs() []map[string]interface{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

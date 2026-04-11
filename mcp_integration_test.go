@@ -160,7 +160,7 @@ func TestIntegration_MCPToolDiscovery(t *testing.T) {
 		t.Fatal("expected at least one tool to be discovered")
 	}
 
-	defs := mgr.OllamaToolDefs()
+	defs := mgr.ChatToolDefs()
 	t.Logf("Discovered %d tools:", len(defs))
 	for _, def := range defs {
 		fn, _ := def["function"].(map[string]interface{})

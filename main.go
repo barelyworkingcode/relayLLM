@@ -21,6 +21,7 @@ func main() {
 	port := flag.String("port", envOrDefault("RELAY_LLM_PORT", "3001"), "HTTP/WebSocket listen port")
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
+	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
 	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
 	flag.Parse()
 
@@ -79,6 +80,23 @@ func main() {
 	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
 	sessions.SetOllamaURL(*ollamaURL)
 
+	// Load OpenAI-compatible endpoints. Default to {dataDir}/openai_endpoints.json.
+	// Falls back to OPENAI_BASE_URL / OPENAI_API_KEY env vars if the file is absent.
+	openaiPath := *openaiConfigPath
+	if openaiPath == "" {
+		openaiPath = filepath.Join(*dataDir, "openai_endpoints.json")
+	}
+	openaiCfg, err := LoadOpenAIConfig(openaiPath)
+	if err != nil {
+		slog.Error("failed to load openai config", "path", openaiPath, "error", err)
+		os.Exit(1)
+	}
+	if len(openaiCfg.Endpoints) > 0 {
+		names := openaiCfg.Names()
+		slog.Info("openai endpoints loaded", "count", len(openaiCfg.Endpoints), "names", names)
+	}
+	sessions.SetOpenAIConfig(openaiCfg)
+
 	schedulerClient := NewSchedulerClient(*schedulerURL)
 
 	mux := http.NewServeMux()
@@ -86,7 +104,7 @@ func main() {
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)
-	RegisterModelRoutes(mux, *ollamaURL)
+	RegisterModelRoutes(mux, *ollamaURL, openaiCfg)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
