@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -151,9 +152,11 @@ type BaseChatProvider struct {
 	transport  ChatTransport
 	mcpManager *MCPManager
 
-	mu       sync.Mutex
-	started  atomic.Bool
-	cancelFn context.CancelFunc
+	mu         sync.Mutex
+	started    atomic.Bool
+	cancelFn   context.CancelFunc
+	activeBody io.Closer     // resp.Body of the in-flight stream; closed on stop
+	generation atomic.Uint64 // incremented on send/stop to discard stale goroutine events
 }
 
 // NewBaseChatProvider constructs a provider around a transport. The mcpManager
@@ -187,8 +190,13 @@ func (p *BaseChatProvider) Start() error {
 		}
 	}
 
+	toolCount := 0
+	if p.mcpManager != nil && p.mcpManager.HasTools() {
+		toolCount = len(p.mcpManager.tools)
+	}
 	slog.Info("chat provider started",
-		"transport", p.transport.Name(), "session", p.session.ID, "model", p.session.Model)
+		"transport", p.transport.Name(), "session", p.session.ID,
+		"model", p.session.Model, "tools", toolCount)
 	return nil
 }
 
@@ -204,14 +212,19 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancelFn = cancel
+	gen := p.generation.Add(1)
 
-	resp, err := p.transport.PostChat(ctx, messages, p.toolDefs())
+	tools := p.toolDefs()
+	slog.Debug("chat: sending message", "transport", p.transport.Name(),
+		"session", p.session.ID, "tools", len(tools))
+
+	resp, err := p.transport.PostChat(ctx, messages, tools)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("%s: %w", p.transport.Name(), err)
 	}
 
-	go p.runToolLoop(ctx, cancel, resp, messages, time.Now())
+	go p.runToolLoop(ctx, cancel, resp, messages, time.Now(), gen)
 	return nil
 }
 
@@ -241,8 +254,30 @@ func (p *BaseChatProvider) toolDefs() []map[string]any {
 // message list until the model stops calling tools (or we hit the iteration
 // cap). Runs in a goroutine — the session layer only observes streaming
 // events and eventually message_complete.
-func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.CancelFunc, resp *http.Response, messages []map[string]any, startTime time.Time) {
+func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.CancelFunc, resp *http.Response, messages []map[string]any, startTime time.Time, gen uint64) {
 	defer cancel()
+
+	// Guarded emit: silently discards events if a newer generation has started
+	// (i.e. StopGeneration or a new SendMessage was called).
+	stale := func() bool { return p.generation.Load() != gen }
+	guardedHandler := func(eventType string, data json.RawMessage) {
+		if stale() {
+			return
+		}
+		p.handler(eventType, data)
+	}
+	guardedTextDelta := func(text string) {
+		if stale() {
+			return
+		}
+		p.emitTextDelta(text)
+	}
+	guardedAssistantStart := func() {
+		if stale() {
+			return
+		}
+		p.emitAssistantStart()
+	}
 
 	const maxIterations = 10
 	const maxToolResultLen = 8192
@@ -251,13 +286,18 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 	var toolMessages []Message // session-history tool messages accumulated across iterations
 
 	for iteration := 0; iteration <= maxIterations; iteration++ {
+		// Register the response body so StopGeneration can close it immediately.
+		p.mu.Lock()
+		p.activeBody = resp.Body
+		p.mu.Unlock()
+
 		// Emit the assistant-start event exactly once, on the first delta
 		// that arrives from the transport. This keeps the transport oblivious
 		// to the start event while still firing it in the right order.
 		var startOnce sync.Once
-		tracker := &thinkBlockTracker{emit: p.emitTextDelta}
+		tracker := &thinkBlockTracker{emit: guardedTextDelta}
 		result := p.transport.StreamChunks(resp, startTime, func(d ChatDelta) {
-			startOnce.Do(p.emitAssistantStart)
+			startOnce.Do(guardedAssistantStart)
 			switch {
 			case d.Thinking != "":
 				tracker.thinking(d.Thinking)
@@ -266,18 +306,31 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			}
 		})
 		tracker.close()
+
+		p.mu.Lock()
+		p.activeBody = nil
+		p.mu.Unlock()
+
+		// If the context was cancelled (stop requested), exit silently.
+		// The session layer emits its own message_complete on stop.
+		if ctx.Err() != nil {
+			slog.Debug("chat: stream cancelled, exiting tool loop",
+				"transport", p.transport.Name(), "session", p.session.ID)
+			return
+		}
+
 		allText.WriteString(result.FullText)
 
 		if result.Err != nil {
 			slog.Error("chat: stream error", "transport", p.transport.Name(), "session", p.session.ID, "error", result.Err)
-			p.emitError(result.Err.Error())
+			guardedHandler("error", mustJSON(map[string]string{"error": result.Err.Error()}))
 			return
 		}
 
 		// Terminal condition: no more tool calls, MCP unavailable, or cap hit.
 		if len(result.ToolCalls) == 0 || p.mcpManager == nil || iteration == maxIterations {
 			statsData, _ := json.Marshal(result.Stats)
-			p.handler("stats_update", statsData)
+			guardedHandler("stats_update", statsData)
 
 			if len(toolMessages) > 0 {
 				p.session.mu.Lock()
@@ -286,7 +339,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			}
 
 			completeData, _ := json.Marshal(map[string]string{"text": allText.String()})
-			p.handler("message_complete", completeData)
+			guardedHandler("message_complete", completeData)
 			return
 		}
 
@@ -303,10 +356,16 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 
 		// Execute each tool and append its result.
 		for _, tc := range result.ToolCalls {
-			p.emitTextDelta(fmt.Sprintf("\n**[Calling: %s]**\n", tc.Name))
+			if ctx.Err() != nil {
+				return
+			}
+			guardedTextDelta(fmt.Sprintf("\n**[Calling: %s]**\n", tc.Name))
 
 			toolResult, err := p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				toolResult = fmt.Sprintf("Error: %s", err.Error())
 				slog.Warn("chat: tool call failed", "transport", p.transport.Name(), "tool", tc.Name, "error", err)
 			}
@@ -318,7 +377,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			if len(preview) > 200 {
 				preview = preview[:200] + "..."
 			}
-			p.emitTextDelta(fmt.Sprintf("**[Result: %s]**\n\n", preview))
+			guardedTextDelta(fmt.Sprintf("**[Result: %s]**\n\n", preview))
 
 			resultContent, _ := json.Marshal(toolResult)
 			toolMessages = append(toolMessages, Message{
@@ -334,7 +393,10 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		var err error
 		resp, err = p.transport.PostChat(ctx, messages, p.toolDefs())
 		if err != nil {
-			p.emitError(err.Error())
+			if ctx.Err() != nil {
+				return
+			}
+			guardedHandler("error", mustJSON(map[string]string{"error": err.Error()}))
 			return
 		}
 	}
@@ -344,7 +406,19 @@ func (p *BaseChatProvider) StopGeneration() {
 	p.mu.Lock()
 	cancel := p.cancelFn
 	p.cancelFn = nil
+	body := p.activeBody
+	p.activeBody = nil
 	p.mu.Unlock()
+
+	// Increment generation first — any events the old goroutine emits after
+	// this point are silently discarded by the guarded handler.
+	p.generation.Add(1)
+
+	// Close the response body to immediately break the scanner mid-read.
+	// This is faster than waiting for context cancellation to propagate.
+	if body != nil {
+		body.Close()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -400,6 +474,11 @@ func (p *BaseChatProvider) emitAssistantStart() {
 
 func timeNow() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func mustJSON(v any) json.RawMessage {
+	data, _ := json.Marshal(v)
+	return data
 }
 
 // decodeNormalizedToolCalls unmarshals a persisted tool_calls JSON blob into
