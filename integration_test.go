@@ -32,6 +32,11 @@ func newTestServer(t *testing.T) *testServer {
 	sessionStore := NewSessionStore(dataDir + "/sessions")
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(store, sessionStore, perms)
+	sessions.SetOpenAIConfig(&OpenAIConfig{
+		Endpoints: []OpenAIEndpoint{
+			{Name: "omlx", BaseURL: integOMLXURL, APIKey: integOMLXKey},
+		},
+	})
 
 	templateStore := NewTemplateStore(dataDir + "/terminals/templates.json")
 	terminalMgr := NewTerminalManager(templateStore)
@@ -134,7 +139,7 @@ func createTestSession(t *testing.T, ts *testServer, projectID string) string {
 	}
 	resp := doJSON(t, "POST", ts.Server.URL+"/api/sessions", map[string]interface{}{
 		"projectId": projectID,
-		"model":     "haiku",
+		"model":     "omlx/gemma-4-31b-it-mxfp8",
 	}, &session)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create session: expected 201, got %d", resp.StatusCode)
@@ -264,8 +269,9 @@ func TestIntegration_ProjectCRUD(t *testing.T) {
 
 func TestIntegration_HelloWorld(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping integration test (requires claude CLI + API key)")
+		t.Skip("skipping integration test (requires local LLM)")
 	}
+	skipIfOMLXUnavailable(t)
 
 	ts := newTestServer(t)
 	projectID := createTestProject(t, ts)
@@ -286,17 +292,14 @@ func TestIntegration_HelloWorld(t *testing.T) {
 	if stats.OutputTokens == 0 {
 		t.Error("expected non-zero OutputTokens")
 	}
-	if stats.CostUsd <= 0 {
-		t.Errorf("expected CostUsd > 0, got %f", stats.CostUsd)
-	}
-
 	endSession(t, ts, sessionID)
 }
 
 func TestIntegration_SessionResume(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping integration test (requires claude CLI + API key)")
+		t.Skip("skipping integration test (requires local LLM)")
 	}
+	skipIfOMLXUnavailable(t)
 
 	ts := newTestServer(t)
 	projectID := createTestProject(t, ts)
@@ -310,7 +313,7 @@ func TestIntegration_SessionResume(t *testing.T) {
 	}
 	t.Logf("first response: %s", response1)
 
-	// End session (persists ProviderState with claudeSessionId).
+	// End session (persists ProviderState and message history).
 	endSession(t, ts, sessionID)
 
 	// Send follow-up message — session will be lazy-loaded from disk.
@@ -330,8 +333,9 @@ func TestIntegration_SessionResume(t *testing.T) {
 
 func TestIntegration_MultipleMessages(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping integration test (requires claude CLI + API key)")
+		t.Skip("skipping integration test (requires local LLM)")
 	}
+	skipIfOMLXUnavailable(t)
 
 	ts := newTestServer(t)
 	projectID := createTestProject(t, ts)

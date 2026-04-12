@@ -220,6 +220,10 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
+		// Explicitly set tool_choice to "auto" so OpenAI-compatible servers
+		// (LM Studio, Ollama /v1, oMLX) know the model may call tools.
+		// OpenAI proper defaults to "auto", but compat servers may not.
+		body["tool_choice"] = "auto"
 	}
 	return body
 }
