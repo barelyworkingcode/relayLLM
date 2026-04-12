@@ -23,6 +23,8 @@ func main() {
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
 	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
 	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
+	apiToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every HTTP request and WS upgrade. Empty = dev mode (NO AUTH).")
+	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Optional Unix domain socket path. When set, relayLLM serves the same HTTP/WS handler from this socket (mode 0600) in addition to the TCP listener.")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -35,6 +37,18 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0700); err != nil {
 		slog.Error("failed to create data directory", "path", *dataDir, "error", err)
 		os.Exit(1)
+	}
+
+	// Fail-closed startup validation for the relay channel.
+	// See eve/plans/cozy-honking-toast.md Section B for the threat model.
+	if *socketPath != "" && *apiToken == "" {
+		slog.Error("RELAY_LLM_SOCKET is set but RELAY_LLM_TOKEN is missing — refusing to start")
+		os.Exit(1)
+	}
+	if *apiToken == "" {
+		slog.Warn("RELAY_LLM_TOKEN is not set — running with NO AUTH on the relay channel. Safe only for local dev on loopback. Set RELAY_LLM_TOKEN to enable authentication.")
+	} else {
+		slog.Info("relay channel: bearer token enabled")
 	}
 
 	killPortHolder(*port)
@@ -77,7 +91,12 @@ func main() {
 	})
 
 	// Set the hook URL so providers know where to send permission requests.
+	// The hook binary runs inside the LLM provider's child process and POSTs
+	// to /api/permission. When auth is enabled, the hook needs the same
+	// bearer token relayLLM uses to validate inbound calls — we plumb it
+	// through SessionManager → ClaudeProvider → child env.
 	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
+	sessions.SetHookToken(*apiToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
 	// Load OpenAI-compatible endpoints. Default to {dataDir}/openai_endpoints.json.
@@ -112,9 +131,47 @@ func main() {
 	schedulerWS := NewSchedulerWSForwarder(*schedulerURL, wsHub)
 	go schedulerWS.Run()
 
+	// Build the handler chain. recoverMiddleware sits closest to the mux so it
+	// catches panics from real handlers; bearerAuth sits in front so unauth
+	// requests never reach a real handler (and never allocate a WS session).
+	handler := bearerAuth(*apiToken, recoverMiddleware(mux))
+
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", *port),
-		Handler: recoverMiddleware(mux),
+		Handler: handler,
+	}
+
+	// Optional Unix domain socket listener — preferred transport when running
+	// under the relay orchestrator. Same handler, same auth chain. Kernel file
+	// permissions (0600) anchor authorization; the bearer token is defense-
+	// in-depth.
+	var unixListener net.Listener
+	if *socketPath != "" {
+		// Ensure the parent dir exists with restrictive perms.
+		if err := os.MkdirAll(filepath.Dir(*socketPath), 0o700); err != nil {
+			slog.Error("failed to create socket parent dir", "path", *socketPath, "error", err)
+			os.Exit(1)
+		}
+		// Remove any stale socket file from a previous crashed run.
+		_ = os.Remove(*socketPath)
+		ln, err := net.Listen("unix", *socketPath)
+		if err != nil {
+			slog.Error("failed to listen on unix socket", "path", *socketPath, "error", err)
+			os.Exit(1)
+		}
+		// Tighten perms before serving — most umasks already give 0600 for
+		// sockets but be explicit.
+		if err := os.Chmod(*socketPath, 0o600); err != nil {
+			slog.Warn("failed to chmod unix socket", "path", *socketPath, "error", err)
+		}
+		unixListener = ln
+		slog.Info("relay unix socket listening", "path", *socketPath)
+
+		go func() {
+			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+				slog.Error("unix socket serve error", "error", err)
+			}
+		}()
 	}
 
 	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
@@ -127,6 +184,10 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)
+		if unixListener != nil {
+			_ = unixListener.Close()
+			_ = os.Remove(*socketPath)
+		}
 	}()
 
 	slog.Info("listening", "addr", server.Addr)
@@ -136,6 +197,7 @@ func main() {
 	}
 
 	// Server stopped — clean up background resources.
+	// (Unix socket is already unlinked by the shutdown goroutine above.)
 	schedulerWS.Close()
 	sessions.StopAll()
 	terminalMgr.StopAll()

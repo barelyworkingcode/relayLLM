@@ -97,3 +97,22 @@ relayLLM is the LLM engine for the Relay ecosystem. It proxies task API and WebS
 - `../eve/` -- Browser-based LLM frontend. Single-backend client to relayLLM for all operations including tasks.
 - `../relayScheduler/` -- Task scheduler. Runs LLM prompts on schedule. relayLLM proxies its task API and forwards its WebSocket events.
 - `../relayTelegram/` -- Telegram bot. Bridges messages to relayLLM sessions.
+
+## Eve ↔ relayLLM Channel Security
+
+relayLLM authenticates every inbound connection (HTTP and WebSocket) with a bearer token and optionally serves through a `0600` Unix domain socket. This ensures Eve is the only client that can reach relayLLM:
+
+**New listener (Unix socket mode — preferred).** When `RELAY_LLM_SOCKET` is set in the environment (injected by the `relay` orchestrator at spawn time), relayLLM binds a Unix domain socket at that path with mode `0600` in addition to (or instead of) its TCP listener. Both HTTP routes and the `/ws` WebSocket upgrade are served from this socket. The orchestrator unlinks the socket on graceful shutdown.
+
+**Bearer token.** `RELAY_LLM_TOKEN` is read from the environment at startup and compared (constant-time) against the `Authorization: Bearer <token>` header on **every** HTTP request and on the WebSocket upgrade. Missing or mismatched tokens return `401` and the WS upgrade is rejected before protocol-switching — no half-open session allocation. This validation runs in both socket mode (as defense-in-depth on top of FS permissions) and TCP mode.
+
+**TCP mode** (split-host fallback only): the TCP listener must be wrapped in TLS (operator provides cert + key), and the same bearer-token check applies. Plain `http://` off loopback must be refused at startup with a clear error.
+
+**Scope.** `RELAY_LLM_TOKEN` is **not** the same token as `RELAY_MCP_TOKEN`. The MCP bridge socket (`relay.sock`) and the Eve↔relayLLM channel are separate trust boundaries and must not share credentials — multiplexing them means leaking either token grants access to both.
+
+**Implementation:**
+- `auth.go` — `bearerAuth(token, next)` middleware uses `crypto/subtle.ConstantTimeCompare`. No-op pass-through when token is empty (dev mode, with a startup warning).
+- `main.go` — reads `--token` / `RELAY_LLM_TOKEN` and `--socket` / `RELAY_LLM_SOCKET`. Wraps the mux with `bearerAuth(recoverMiddleware(mux))` so HTTP and the `/ws` upgrade share the same auth check (unauthenticated WS upgrades are rejected with 401 before protocol-switching). When `RELAY_LLM_SOCKET` is set, creates the parent directory `0o700`, binds `net.Listen("unix", path)`, `os.Chmod(path, 0o600)`, and serves via `server.Serve(ln)` alongside the TCP listener. Socket is unlinked on SIGTERM/SIGINT and post-`ListenAndServe`.
+- `session.go`, `provider_claude.go`, `cmd/hook/main.go` — token is plumbed through `SessionManager` → `ClaudeProvider` → hook child env as `RELAY_LLM_HOOK_TOKEN`. The hook binary reads it and adds `Authorization: Bearer <token>` to its `/api/permission` POST.
+
+See `../relay/CLAUDE.md` ("Eve ↔ relayLLM internal channel") for the orchestrator side of the contract and `../eve/plans/cozy-honking-toast.md` for the full design rationale and end-to-end verification results.

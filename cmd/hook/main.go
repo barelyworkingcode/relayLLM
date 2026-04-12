@@ -25,6 +25,7 @@ func main() {
 	hookURL := os.Getenv("RELAY_LLM_HOOK_URL")
 	sessionID := os.Getenv("RELAY_LLM_SESSION_ID")
 	headless := os.Getenv("RELAY_LLM_HEADLESS")
+	hookToken := os.Getenv("RELAY_LLM_HOOK_TOKEN")
 
 	logDebug("hook invoked: hookURL=%q sessionID=%q headless=%q", hookURL, sessionID, headless)
 
@@ -79,11 +80,18 @@ func main() {
 	})
 
 	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Post(
+	req, err := http.NewRequest("POST",
 		fmt.Sprintf("%s/api/permission", hookURL),
-		"application/json",
 		bytes.NewReader(payload),
 	)
+	if err != nil {
+		os.Exit(0)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if hookToken != "" {
+		req.Header.Set("Authorization", "Bearer "+hookToken)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		// Network error — fail-open.
 		os.Exit(0)
