@@ -476,6 +476,16 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	})
 	session.mu.Unlock()
 
+	// Broadcast user message to all viewers so passive windows can render it
+	// and transition to the "generating" UI state before the first LLM token.
+	if m.sink != nil {
+		m.sink.SendToSession(session.ID, map[string]interface{}{
+			"type":      "user_message",
+			"sessionId": session.ID,
+			"text":      text,
+		})
+	}
+
 	if err := provider.SendMessage(text, files); err != nil {
 		session.mu.Lock()
 		session.processing = false
@@ -499,11 +509,11 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 		provider.StopGeneration()
 	}
 
-	session.mu.Lock()
-	session.processing = false
-	session.mu.Unlock()
-
-	m.saveSession(session)
+	// Emit message_complete so clients know the turn is definitively over.
+	// provider.StopGeneration() already incremented the generation counter,
+	// so the old goroutine's events (including its own message_complete)
+	// are silently discarded — no double-delivery.
+	m.handleProviderEvent(session, "message_complete", nil)
 	return nil
 }
 
