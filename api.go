@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -193,18 +194,46 @@ type ModelInfo struct {
 	Provider string `json:"provider"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
-		models := []ModelInfo{
+		claude := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
 			{Label: "Claude Sonnet", Value: "sonnet", Group: "Claude", Provider: "claude"},
 			{Label: "Claude Opus", Value: "opus", Group: "Claude", Provider: "claude"},
 		}
 
+		// Fan out discovery calls concurrently so one slow endpoint doesn't
+		// block the others. Each goroutine writes to a distinct result slot,
+		// so wg.Wait() is sufficient synchronization.
+		var (
+			wg     sync.WaitGroup
+			ollama []ModelInfo
+			openai [][]ModelInfo
+		)
+
 		if ollamaURL != "" {
-			if ollamaModels := fetchOllamaModels(ollamaURL); len(ollamaModels) > 0 {
-				models = append(models, ollamaModels...)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ollama = fetchOllamaModels(ollamaURL)
+			}()
+		}
+
+		if openaiCfg != nil {
+			openai = make([][]ModelInfo, len(openaiCfg.Endpoints))
+			for i, endpoint := range openaiCfg.Endpoints {
+				wg.Add(1)
+				go func(i int, ep OpenAIEndpoint) {
+					defer wg.Done()
+					openai[i] = FetchOpenAIModels(ep)
+				}(i, endpoint)
 			}
+		}
+		wg.Wait()
+
+		models := append(claude, ollama...)
+		for _, ms := range openai {
+			models = append(models, ms...)
 		}
 
 		writeJSON(w, 200, map[string]interface{}{
