@@ -31,6 +31,7 @@ type ClaudeProvider struct {
 	model           string
 	directory       string
 	hookURL         string // URL for permission hook binary
+	hookToken       string // bearer token the hook will send when calling /api/permission
 
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
@@ -42,13 +43,14 @@ type ClaudeProvider struct {
 	firstTokenNano atomic.Int64 // set on first content_block_delta
 }
 
-func NewClaudeProvider(session *Session, handler EventHandler, hookURL string) *ClaudeProvider {
+func NewClaudeProvider(session *Session, handler EventHandler, hookURL, hookToken string) *ClaudeProvider {
 	return &ClaudeProvider{
 		session:   session,
 		handler:   handler,
 		model:     session.Model,
 		directory: session.Directory,
 		hookURL:   hookURL,
+		hookToken: hookToken,
 	}
 }
 
@@ -110,6 +112,9 @@ func (p *ClaudeProvider) Start() error {
 		fmt.Sprintf("RELAY_LLM_HOOK_URL=%s", p.hookURL),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
 	)
+	if p.hookToken != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("RELAY_LLM_HOOK_TOKEN=%s", p.hookToken))
+	}
 
 	if settings.Headless {
 		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")

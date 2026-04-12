@@ -74,6 +74,7 @@ type SessionManager struct {
 	perms        *PermissionManager
 	sink         EventSink
 	hookURL      string
+	hookToken    string
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
 }
@@ -94,6 +95,13 @@ func (m *SessionManager) SetEventSink(sink EventSink) {
 
 func (m *SessionManager) SetHookURL(url string) {
 	m.hookURL = url
+}
+
+// SetHookToken sets the bearer token the permission hook binary will send
+// when POSTing to /api/permission. Must match the relayLLM API token so the
+// hook can authenticate against its own parent server.
+func (m *SessionManager) SetHookToken(token string) {
+	m.hookToken = token
 }
 
 func (m *SessionManager) SetOllamaURL(url string) {
@@ -230,7 +238,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if err := m.ensureHookConfig(session.Directory); err != nil {
 			slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 		}
-		p := NewClaudeProvider(session, handler, m.hookURL)
+		p := NewClaudeProvider(session, handler, m.hookURL, m.hookToken)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
