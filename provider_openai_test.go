@@ -405,3 +405,85 @@ data: [DONE]
 		t.Errorf("body.stream = %v", gotBody["stream"])
 	}
 }
+
+// TestOpenAIChatTransport_RoundtripWithTools verifies that tool definitions
+// are included in the request body and tool_choice is set to "auto".
+func TestOpenAIChatTransport_RoundtripWithTools(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			io.WriteString(w, `{"data":[{"id":"test-model"}]}`)
+		case "/chat/completions":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"I'll use a tool"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	endpoint := OpenAIEndpoint{Name: "test", BaseURL: srv.URL}
+	transport := NewOpenAIChatTransport(endpoint, "test-model", nil, srv.Client())
+
+	msgs := transport.BuildMessages("", []Message{
+		{Role: "user", Content: json.RawMessage(`"search for foo"`)},
+	})
+
+	tools := []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "search",
+				"description": "Search for things",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string"},
+					},
+					"required": []any{"query"},
+				},
+			},
+		},
+	}
+
+	resp, err := transport.PostChat(context.Background(), msgs, tools)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	transport.StreamChunks(resp, time.Now(), func(ChatDelta) {})
+
+	// Verify tools are present in the request body.
+	gotTools, ok := gotBody["tools"].([]any)
+	if !ok || len(gotTools) == 0 {
+		t.Fatalf("body.tools missing or empty: %v", gotBody["tools"])
+	}
+	toolObj := gotTools[0].(map[string]any)
+	if toolObj["type"] != "function" {
+		t.Errorf("tool type = %v, want function", toolObj["type"])
+	}
+	fn := toolObj["function"].(map[string]any)
+	if fn["name"] != "search" {
+		t.Errorf("tool name = %v, want search", fn["name"])
+	}
+	params, ok := fn["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool parameters missing")
+	}
+	if params["type"] != "object" {
+		t.Errorf("parameters.type = %v, want object", params["type"])
+	}
+
+	// Verify tool_choice is set to "auto".
+	if gotBody["tool_choice"] != "auto" {
+		t.Errorf("body.tool_choice = %v, want \"auto\"", gotBody["tool_choice"])
+	}
+}
