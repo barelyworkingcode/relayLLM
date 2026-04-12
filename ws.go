@@ -17,7 +17,7 @@ var upgrader = websocket.Upgrader{
 // WSHub manages WebSocket connections and routes events to them.
 type WSHub struct {
 	mu        sync.RWMutex
-	conns     map[string]*wsConn          // sessionID → connection
+	conns     map[string]map[*wsConn]bool // sessionID → set of viewer connections
 	termConns map[string]map[*wsConn]bool // terminalID → set of viewer connections
 	allConns  map[*wsConn]bool            // all connected clients (for broadcast)
 	sessions  *SessionManager
@@ -32,7 +32,7 @@ type wsConn struct {
 
 func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *TerminalManager) *WSHub {
 	return &WSHub{
-		conns:     make(map[string]*wsConn),
+		conns:     make(map[string]map[*wsConn]bool),
 		termConns: make(map[string]map[*wsConn]bool),
 		allConns:  make(map[*wsConn]bool),
 		sessions:  sessions,
@@ -69,15 +69,19 @@ func (h *WSHub) SendToTerminal(terminalID string, msg map[string]interface{}) {
 	}
 }
 
-// SendToSession implements EventSink.
+// SendToSession implements EventSink — broadcasts to all connections viewing this session.
 func (h *WSHub) SendToSession(sessionID string, msg map[string]interface{}) {
 	h.mu.RLock()
-	c, ok := h.conns[sessionID]
-	h.mu.RUnlock()
-
-	if !ok {
+	viewers, ok := h.conns[sessionID]
+	if !ok || len(viewers) == 0 {
+		h.mu.RUnlock()
 		return
 	}
+	conns := make([]*wsConn, 0, len(viewers))
+	for wc := range viewers {
+		conns = append(conns, wc)
+	}
+	h.mu.RUnlock()
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -85,12 +89,10 @@ func (h *WSHub) SendToSession(sessionID string, msg map[string]interface{}) {
 		return
 	}
 
-	c.mu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, data)
-	c.mu.Unlock()
-
-	if err != nil {
-		slog.Error("failed to write WS message", "session", sessionID, "error", err)
+	for _, wc := range conns {
+		wc.mu.Lock()
+		wc.conn.WriteMessage(websocket.TextMessage, data)
+		wc.mu.Unlock()
 	}
 }
 
@@ -116,17 +118,13 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		delete(h.allConns, wc)
 		for sid := range boundSessions {
-			delete(h.conns, sid)
+			removeViewer(h.conns, sid, wc)
 		}
 		// Track terminals that lost their last viewer for idle timeout.
 		var orphaned []string
 		for tid := range boundTerminals {
-			if viewers, ok := h.termConns[tid]; ok {
-				delete(viewers, wc)
-				if len(viewers) == 0 {
-					delete(h.termConns, tid)
-					orphaned = append(orphaned, tid)
-				}
+			if removeViewer(h.termConns, tid, wc) == 0 {
+				orphaned = append(orphaned, tid)
 			}
 		}
 		h.mu.Unlock()
@@ -168,7 +166,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		case "delete_session":
 			h.handleDeleteSession(wc, msgBytes, boundSessions)
 		case "leave_session":
-			h.handleLeaveSession(msgBytes, boundSessions)
+			h.handleLeaveSession(wc, msgBytes, boundSessions)
 		case "stop_generation":
 			h.handleStopGeneration(wc, msgBytes)
 		case "clear_session":
@@ -216,7 +214,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 
 	boundSessions[req.SessionID] = true
 	h.mu.Lock()
-	h.conns[req.SessionID] = wc
+	addViewer(h.conns, req.SessionID, wc)
 	h.mu.Unlock()
 
 	// Try reading from Claude CLI's JSONL session file first (has both user + assistant).
@@ -320,18 +318,23 @@ func (h *WSHub) handleDeleteSession(wc *wsConn, msgBytes []byte, boundSessions m
 
 	if boundSessions[req.SessionID] {
 		h.mu.Lock()
-		delete(h.conns, req.SessionID)
+		removeViewer(h.conns, req.SessionID, wc)
 		h.mu.Unlock()
 		delete(boundSessions, req.SessionID)
 	}
 
+	// Notify all remaining viewers that the session was deleted.
+	h.SendToSession(req.SessionID, map[string]interface{}{
+		"type":      "session_ended",
+		"sessionId": req.SessionID,
+	})
 	sendJSON(wc, map[string]interface{}{
 		"type":      "session_ended",
 		"sessionId": req.SessionID,
 	})
 }
 
-func (h *WSHub) handleLeaveSession(msgBytes []byte, boundSessions map[string]bool) {
+func (h *WSHub) handleLeaveSession(wc *wsConn, msgBytes []byte, boundSessions map[string]bool) {
 	var req struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -339,7 +342,7 @@ func (h *WSHub) handleLeaveSession(msgBytes []byte, boundSessions map[string]boo
 
 	if req.SessionID != "" && boundSessions[req.SessionID] {
 		h.mu.Lock()
-		delete(h.conns, req.SessionID)
+		removeViewer(h.conns, req.SessionID, wc)
 		h.mu.Unlock()
 		delete(boundSessions, req.SessionID)
 	}
@@ -454,15 +457,8 @@ func (h *WSHub) handleLeaveTerminal(wc *wsConn, msgBytes []byte, boundTerminals 
 		return
 	}
 
-	var remaining int
 	h.mu.Lock()
-	if viewers, ok := h.termConns[req.TerminalID]; ok {
-		delete(viewers, wc)
-		remaining = len(viewers)
-		if remaining == 0 {
-			delete(h.termConns, req.TerminalID)
-		}
-	}
+	remaining := removeViewer(h.termConns, req.TerminalID, wc)
 	h.mu.Unlock()
 	delete(boundTerminals, req.TerminalID)
 
@@ -585,10 +581,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 	tid := session.ID
 	boundTerminals[tid] = true
 	h.mu.Lock()
-	if h.termConns[tid] == nil {
-		h.termConns[tid] = make(map[*wsConn]bool)
-	}
-	h.termConns[tid][wc] = true
+	addViewer(h.termConns, tid, wc)
 	viewerCount := len(h.termConns[tid])
 	h.mu.Unlock()
 
@@ -614,6 +607,30 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 			"exitCode":   exitCode,
 		})
 	}
+}
+
+// addViewer adds wc to a viewer set, initializing the set if needed.
+// Caller must hold h.mu.
+func addViewer(sets map[string]map[*wsConn]bool, id string, wc *wsConn) {
+	if sets[id] == nil {
+		sets[id] = make(map[*wsConn]bool)
+	}
+	sets[id][wc] = true
+}
+
+// removeViewer removes wc from a viewer set, cleaning up the set if empty.
+// Returns the number of remaining viewers. Caller must hold h.mu.
+func removeViewer(sets map[string]map[*wsConn]bool, id string, wc *wsConn) int {
+	viewers, ok := sets[id]
+	if !ok {
+		return 0
+	}
+	delete(viewers, wc)
+	if len(viewers) == 0 {
+		delete(sets, id)
+		return 0
+	}
+	return len(viewers)
 }
 
 func sendJSON(wc *wsConn, msg map[string]interface{}) {
