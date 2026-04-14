@@ -350,12 +350,8 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 			if tcd.ID != "" {
 				acc.id = tcd.ID
 			}
-			// Announce the tool inline exactly once — when the name first
-			// becomes known (which may or may not be in the same delta as
-			// the accumulator's creation).
 			if tcd.Function.Name != "" && acc.name == "" {
 				acc.name = tcd.Function.Name
-				emit(ChatDelta{Text: fmt.Sprintf("\n[Tool: %s]\n", tcd.Function.Name)})
 			}
 			if tcd.Function.Arguments != "" {
 				acc.args.WriteString(tcd.Function.Arguments)
