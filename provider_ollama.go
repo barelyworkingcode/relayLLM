@@ -279,11 +279,6 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 		}
 
 		for _, tc := range chunk.Message.ToolCalls {
-			// Surface the tool call inline so the user sees what's about to run.
-			emit(ChatDelta{Text: fmt.Sprintf("\n[Tool: %s]\n", tc.Function.Name)})
-			if len(tc.Function.Arguments) > 0 {
-				emit(ChatDelta{Text: string(tc.Function.Arguments) + "\n"})
-			}
 			toolCalls = append(toolCalls, NormalizedToolCall{
 				Name:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
