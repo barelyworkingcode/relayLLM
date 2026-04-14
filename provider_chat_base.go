@@ -359,7 +359,16 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			if ctx.Err() != nil {
 				return
 			}
-			guardedTextDelta(fmt.Sprintf("\n**[Calling: %s]**\n", tc.Name))
+
+			// Emit a content_block tool_use event so the UI shows the
+			// tool indicator pill (matches the shape Claude emits natively).
+			guardedHandler("llm_event", mustJSON(map[string]any{
+				"type": "assistant",
+				"content_block": map[string]any{
+					"type": "tool_use",
+					"name": tc.Name,
+				},
+			}))
 
 			toolResult, err := p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
 			if err != nil {
@@ -377,7 +386,15 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			if len(preview) > 200 {
 				preview = preview[:200] + "..."
 			}
-			guardedTextDelta(fmt.Sprintf("**[Result: %s]**\n\n", preview))
+
+			// Emit a structured result event so the UI can mark the tool
+			// complete — routed as llm_event so the session manager forwards it.
+			guardedHandler("llm_event", mustJSON(map[string]any{
+				"type":      "result",
+				"subtype":   "tool_result",
+				"tool_name": tc.Name,
+				"preview":   preview,
+			}))
 
 			resultContent, _ := json.Marshal(toolResult)
 			toolMessages = append(toolMessages, Message{
