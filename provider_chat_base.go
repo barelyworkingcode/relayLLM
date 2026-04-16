@@ -382,18 +382,13 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 				toolResult = toolResult[:maxToolResultLen] + "\n...(truncated)"
 			}
 
-			preview := toolResult
-			if len(preview) > 200 {
-				preview = preview[:200] + "..."
-			}
-
 			// Emit a structured result event so the UI can mark the tool
 			// complete — routed as llm_event so the session manager forwards it.
 			guardedHandler("llm_event", mustJSON(map[string]any{
 				"type":      "result",
 				"subtype":   "tool_result",
 				"tool_name": tc.Name,
-				"preview":   preview,
+				"content":   toolResult,
 			}))
 
 			resultContent, _ := json.Marshal(toolResult)
