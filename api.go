@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -385,4 +386,31 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {
 			writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "timeout"})
 		}
 	})
+}
+
+// RegisterGeneratedImageRoutes serves generated images (from ComfyUI) out of
+// {dataDir}/generated/. Filenames are validated to prevent path traversal.
+func RegisterGeneratedImageRoutes(mux *http.ServeMux, dataDir string) {
+	generatedDir := filepath.Join(dataDir, "generated")
+	mux.HandleFunc("GET /api/generated/{filename}", func(w http.ResponseWriter, r *http.Request) {
+		filename := r.PathValue("filename")
+		if !isValidGeneratedFilename(filename) {
+			http.Error(w, "invalid filename", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeFile(w, r, filepath.Join(generatedDir, filename))
+	})
+}
+
+func isValidGeneratedFilename(name string) bool {
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

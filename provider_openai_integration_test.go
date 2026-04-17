@@ -146,7 +146,7 @@ func runChatRoundtrip(t *testing.T, endpoint OpenAIEndpoint, modelFilter string)
 
 	cap := newCapturingHandler()
 	transport := NewOpenAIChatTransport(endpoint, modelID, nil, nil)
-	provider := NewBaseChatProvider(session, cap.handle, transport, nil)
+	provider := NewBaseChatProvider(session, cap.handle, transport, nil, nil)
 
 	if err := provider.Start(); err != nil {
 		t.Fatalf("%s: provider start: %v", endpoint.Name, err)

@@ -180,7 +180,7 @@ func newStopTestProvider(t *testing.T, prompt string) (*BaseChatProvider, *stopC
 
 	cap := newStopCapture()
 	transport := NewOpenAIChatTransport(stopTestEndpoint, stopTestModel, nil, nil)
-	provider := NewBaseChatProvider(session, cap.handle, transport, nil)
+	provider := NewBaseChatProvider(session, cap.handle, transport, nil, nil)
 
 	if err := provider.Start(); err != nil {
 		t.Fatalf("provider start: %v", err)
@@ -267,7 +267,7 @@ func TestStopGeneration_NoBleed(t *testing.T) {
 
 	cap := newStopCapture()
 	transport := NewOpenAIChatTransport(stopTestEndpoint, stopTestModel, nil, nil)
-	provider := NewBaseChatProvider(session, cap.handle, transport, nil)
+	provider := NewBaseChatProvider(session, cap.handle, transport, nil, nil)
 	if err := provider.Start(); err != nil {
 		t.Fatalf("provider start: %v", err)
 	}

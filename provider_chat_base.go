@@ -147,10 +147,11 @@ func buildMCPManagerFromSettings(s BaseChatSettings) *MCPManager {
 // format-specific work to a ChatTransport. It owns the provider lifecycle,
 // the tool-calling loop, event emission, and MCP orchestration.
 type BaseChatProvider struct {
-	session    *Session
-	handler    EventHandler
-	transport  ChatTransport
-	mcpManager *MCPManager
+	session      *Session
+	handler      EventHandler
+	transport    ChatTransport
+	mcpManager   *MCPManager
+	builtinTools *BuiltinToolRegistry
 
 	mu         sync.Mutex
 	started    atomic.Bool
@@ -161,13 +162,14 @@ type BaseChatProvider struct {
 
 // NewBaseChatProvider constructs a provider around a transport. The mcpManager
 // is derived from the session's raw settings JSON; pass nil to disable MCP
-// entirely regardless of settings.
-func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatTransport, settings json.RawMessage) *BaseChatProvider {
+// entirely regardless of settings. builtinTools may be nil.
+func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatTransport, settings json.RawMessage, builtinTools *BuiltinToolRegistry) *BaseChatProvider {
 	return &BaseChatProvider{
-		session:    session,
-		handler:    handler,
-		transport:  transport,
-		mcpManager: buildMCPManagerFromSettings(parseBaseSettings(settings)),
+		session:      session,
+		handler:      handler,
+		transport:    transport,
+		mcpManager:   buildMCPManagerFromSettings(parseBaseSettings(settings)),
+		builtinTools: builtinTools,
 	}
 }
 
@@ -239,14 +241,21 @@ func (p *BaseChatProvider) copyHistory() []Message {
 	return msgs
 }
 
-// toolDefs returns the MCP tool definitions in the shared chat shape
-// ({type:"function", function:{...}}), or nil if MCP is not configured.
+// toolDefs returns built-in + MCP tool definitions in the shared chat shape
+// ({type:"function", function:{...}}), or nil if no tools are available.
 // Both Ollama and OpenAI accept this shape.
 func (p *BaseChatProvider) toolDefs() []map[string]any {
-	if p.mcpManager == nil || !p.mcpManager.HasTools() {
+	var defs []map[string]any
+	if p.builtinTools != nil {
+		defs = append(defs, p.builtinTools.ChatToolDefs()...)
+	}
+	if p.mcpManager != nil && p.mcpManager.HasTools() {
+		defs = append(defs, p.mcpManager.ChatToolDefs()...)
+	}
+	if len(defs) == 0 {
 		return nil
 	}
-	return p.mcpManager.ChatToolDefs()
+	return defs
 }
 
 // runToolLoop drives the conversation: stream the first response, and if the
@@ -327,8 +336,8 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			return
 		}
 
-		// Terminal condition: no more tool calls, MCP unavailable, or cap hit.
-		if len(result.ToolCalls) == 0 || p.mcpManager == nil || iteration == maxIterations {
+		// Terminal condition: no more tool calls, no tool handlers, or cap hit.
+		if len(result.ToolCalls) == 0 || (p.mcpManager == nil && p.builtinTools == nil) || iteration == maxIterations {
 			statsData, _ := json.Marshal(result.Stats)
 			guardedHandler("stats_update", statsData)
 
@@ -370,13 +379,21 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 				},
 			}))
 
-			toolResult, err := p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
-			if err != nil {
+			var toolResult string
+			var toolErr error
+			if p.builtinTools != nil && p.builtinTools.Has(tc.Name) {
+				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, guardedHandler)
+			} else if p.mcpManager != nil {
+				toolResult, toolErr = p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
+			} else {
+				toolErr = fmt.Errorf("no handler for tool %q", tc.Name)
+			}
+			if toolErr != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				toolResult = fmt.Sprintf("Error: %s", err.Error())
-				slog.Warn("chat: tool call failed", "transport", p.transport.Name(), "tool", tc.Name, "error", err)
+				toolResult = fmt.Sprintf("Error: %s", toolErr.Error())
+				slog.Warn("chat: tool call failed", "transport", p.transport.Name(), "tool", tc.Name, "error", toolErr)
 			}
 			if len(toolResult) > maxToolResultLen {
 				toolResult = toolResult[:maxToolResultLen] + "\n...(truncated)"

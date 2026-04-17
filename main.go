@@ -25,6 +25,7 @@ func main() {
 	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
 	apiToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every HTTP request and WS upgrade. Empty = dev mode (NO AUTH).")
 	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Optional Unix domain socket path. When set, relayLLM serves the same HTTP/WS handler from this socket (mode 0600) in addition to the TCP listener.")
+	comfyuiURL := flag.String("comfyui-url", envOrDefault("COMFYUI_URL", ""), "ComfyUI base URL for image generation (empty to disable)")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -116,6 +117,30 @@ func main() {
 	}
 	sessions.SetOpenAIConfig(openaiCfg)
 
+	// Image generation via ComfyUI (optional).
+	if *comfyuiURL != "" {
+		comfyui := NewComfyUIClient(*comfyuiURL, *dataDir)
+
+		// Discover available models (best-effort — empty lists if ComfyUI is down).
+		var checkpoints, loras []string
+		{
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := comfyui.Ping(ctx); err != nil {
+				slog.Warn("ComfyUI not reachable at startup (image generation will fail until it's available)", "url", *comfyuiURL, "error", err)
+			} else {
+				slog.Info("ComfyUI connected", "url", *comfyuiURL)
+				checkpoints, _ = comfyui.ListCheckpoints(ctx)
+				loras, _ = comfyui.ListLoRAs(ctx)
+				slog.Info("ComfyUI models discovered", "checkpoints", len(checkpoints), "loras", len(loras))
+			}
+			cancel()
+		}
+
+		builtinTools := NewBuiltinToolRegistry()
+		RegisterImageGenTool(builtinTools, comfyui, "/api/generated", checkpoints, loras)
+		sessions.SetBuiltinTools(builtinTools)
+	}
+
 	schedulerClient := NewSchedulerClient(*schedulerURL)
 
 	mux := http.NewServeMux()
@@ -125,6 +150,7 @@ func main() {
 	RegisterPermissionRoutes(mux, perms)
 	RegisterModelRoutes(mux, *ollamaURL, openaiCfg)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
+	RegisterGeneratedImageRoutes(mux, *dataDir)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Forward scheduler WebSocket events to all connected clients.
