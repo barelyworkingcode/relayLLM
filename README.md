@@ -34,6 +34,7 @@ This builds both binaries and registers the service with Relay (`relay service r
 | `--lmstudio-url` | `LM_STUDIO_URL` | `http://localhost:1234` | LM Studio base URL |
 | *(none)* | `LM_STUDIO_API_TOKEN` | *(none)* | Bearer token for LM Studio API auth |
 | `--scheduler-url` | `RELAY_SCHEDULER_URL` | `http://localhost:3002` | relayScheduler URL for task proxy |
+| `--comfyui-url` | `COMFYUI_URL` | *(empty, disabled)* | ComfyUI base URL for image generation |
 
 ## HTTP API
 
