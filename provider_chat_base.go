@@ -156,8 +156,9 @@ type BaseChatProvider struct {
 	mu         sync.Mutex
 	started    atomic.Bool
 	cancelFn   context.CancelFunc
-	activeBody io.Closer     // resp.Body of the in-flight stream; closed on stop
-	generation atomic.Uint64 // incremented on send/stop to discard stale goroutine events
+	activeBody io.Closer          // resp.Body of the in-flight stream; closed on stop
+	generation atomic.Uint64      // incremented on send/stop to discard stale goroutine events
+	lastFiles  []FileAttachment   // files from the most recent user message, available to built-in tools
 }
 
 // NewBaseChatProvider constructs a provider around a transport. The mcpManager
@@ -210,6 +211,7 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 		return fmt.Errorf("%s: provider not started", p.transport.Name())
 	}
 
+	p.lastFiles = files
 	messages := p.transport.BuildMessages(p.session.SystemPrompt, p.copyHistory())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -382,7 +384,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			var toolResult string
 			var toolErr error
 			if p.builtinTools != nil && p.builtinTools.Has(tc.Name) {
-				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, guardedHandler)
+				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, p.lastFiles, guardedHandler)
 			} else if p.mcpManager != nil {
 				toolResult, toolErr = p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
 			} else {

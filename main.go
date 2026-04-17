@@ -121,19 +121,27 @@ func main() {
 	if *comfyuiURL != "" {
 		comfyui := NewComfyUIClient(*comfyuiURL, *dataDir)
 
-		// Discover available models (best-effort — empty lists if ComfyUI is down).
+		// Discover available models. Retry for up to 30s to handle the case
+		// where ComfyUI starts slower than relayLLM (common on cold boot).
 		var checkpoints, loras []string
 		{
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := comfyui.Ping(ctx); err != nil {
-				slog.Warn("ComfyUI not reachable at startup (image generation will fail until it's available)", "url", *comfyuiURL, "error", err)
-			} else {
-				slog.Info("ComfyUI connected", "url", *comfyuiURL)
-				checkpoints, _ = comfyui.ListCheckpoints(ctx)
-				loras, _ = comfyui.ListLoRAs(ctx)
-				slog.Info("ComfyUI models discovered", "checkpoints", len(checkpoints), "loras", len(loras))
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := comfyui.Ping(ctx); err == nil {
+					slog.Info("ComfyUI connected", "url", *comfyuiURL)
+					checkpoints, _ = comfyui.ListCheckpoints(ctx)
+					loras, _ = comfyui.ListLoRAs(ctx)
+					slog.Info("ComfyUI models discovered", "checkpoints", len(checkpoints), "loras", len(loras))
+					cancel()
+					break
+				}
+				cancel()
+				time.Sleep(2 * time.Second)
 			}
-			cancel()
+			if len(checkpoints) == 0 {
+				slog.Warn("ComfyUI not reachable after 30s — image generation tool registered without model discovery", "url", *comfyuiURL)
+			}
 		}
 
 		builtinTools := NewBuiltinToolRegistry()
