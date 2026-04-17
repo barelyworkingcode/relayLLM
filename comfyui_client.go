@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,6 +46,8 @@ type ImageGenParams struct {
 	LoraStrength   float64 `json:"lora_strength,omitempty"`
 	Sampler        string  `json:"sampler,omitempty"`
 	Scheduler      string  `json:"scheduler,omitempty"`
+	UseInputImage  bool    `json:"use_input_image,omitempty"`
+	Denoise        float64 `json:"denoise,omitempty"`
 }
 
 func (p *ImageGenParams) applyDefaults() {
@@ -289,6 +292,48 @@ func (c *ComfyUIClient) FetchImage(ctx context.Context, filename, subfolder stri
 	return io.ReadAll(resp.Body)
 }
 
+// UploadImage sends an image to ComfyUI's input directory via POST /upload/image.
+// Returns the filename ComfyUI assigned to the uploaded file.
+func (c *ComfyUIClient) UploadImage(ctx context.Context, filename string, data []byte) (string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("image", filename)
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("write form data: %w", err)
+	}
+	_ = w.WriteField("type", "input")
+	_ = w.WriteField("overwrite", "true")
+	w.Close()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/upload/image", &buf)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("upload image: HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse upload response: %w", err)
+	}
+	return result.Name, nil
+}
+
 // SaveOutput writes image/video bytes to the generated output directory and
 // returns the filename (UUID-based, no path separators).
 func (c *ComfyUIClient) SaveOutput(data []byte, ext string) (string, error) {
@@ -381,6 +426,121 @@ func (c *ComfyUIClient) BuildTextToImageWorkflow(params ImageGenParams) map[stri
 			"sampler_name": params.Sampler,
 			"scheduler":    params.Scheduler,
 			"denoise":      1.0,
+		},
+	}
+	workflow["6"] = map[string]any{
+		"class_type": "VAEDecode",
+		"inputs": map[string]any{
+			"samples": []any{"5", 0},
+			"vae":     []any{"1", 2},
+		},
+	}
+	workflow["7"] = map[string]any{
+		"class_type": "SaveImage",
+		"inputs": map[string]any{
+			"images":          []any{"6", 0},
+			"filename_prefix": "relay",
+		},
+	}
+
+	return workflow
+}
+
+// BuildImageToImageWorkflow builds a ComfyUI workflow that uses an uploaded
+// image as the starting point instead of an empty latent. The inputImage is
+// the filename returned by UploadImage. Denoise controls how much of the
+// original image to preserve (0.0 = keep original, 1.0 = fully regenerate).
+func (c *ComfyUIClient) BuildImageToImageWorkflow(params ImageGenParams, inputImage string) map[string]any {
+	params.applyDefaults()
+	if params.Denoise == 0 {
+		params.Denoise = 0.7
+	}
+
+	ckptName := params.Checkpoint
+	if ckptName == "" {
+		ckptName = "sd_xl_base_1.0.safetensors"
+	}
+
+	modelSource := []any{"1", 0}
+	clipSource := []any{"1", 1}
+
+	workflow := map[string]any{
+		"1": map[string]any{
+			"class_type": "CheckpointLoaderSimple",
+			"inputs": map[string]any{
+				"ckpt_name": ckptName,
+			},
+		},
+		// LoadImage replaces EmptyLatentImage for img2img.
+		"9": map[string]any{
+			"class_type": "LoadImage",
+			"inputs": map[string]any{
+				"image": inputImage,
+			},
+		},
+		// Resize input image to target dimensions to avoid MPS tensor size limits.
+		"11": map[string]any{
+			"class_type": "ImageScale",
+			"inputs": map[string]any{
+				"image":     []any{"9", 0},
+				"width":     params.Width,
+				"height":    params.Height,
+				"upscale_method": "bilinear",
+				"crop":      "center",
+			},
+		},
+		// Encode the resized image into latent space.
+		"10": map[string]any{
+			"class_type": "VAEEncode",
+			"inputs": map[string]any{
+				"pixels": []any{"11", 0},
+				"vae":    []any{"1", 2},
+			},
+		},
+	}
+
+	if params.Lora != "" {
+		workflow["8"] = map[string]any{
+			"class_type": "LoraLoader",
+			"inputs": map[string]any{
+				"model":          []any{"1", 0},
+				"clip":           []any{"1", 1},
+				"lora_name":      params.Lora,
+				"strength_model": params.LoraStrength,
+				"strength_clip":  params.LoraStrength,
+			},
+		}
+		modelSource = []any{"8", 0}
+		clipSource = []any{"8", 1}
+	}
+
+	workflow["2"] = map[string]any{
+		"class_type": "CLIPTextEncode",
+		"inputs": map[string]any{
+			"text": params.Prompt,
+			"clip": clipSource,
+		},
+	}
+	workflow["3"] = map[string]any{
+		"class_type": "CLIPTextEncode",
+		"inputs": map[string]any{
+			"text": params.NegativePrompt,
+			"clip": clipSource,
+		},
+	}
+	workflow["5"] = map[string]any{
+		"class_type": "KSampler",
+		"inputs": map[string]any{
+			"model":        modelSource,
+			"positive":     []any{"2", 0},
+			"negative":     []any{"3", 0},
+			"latent_image": []any{"10", 0}, // VAEEncode output (not EmptyLatentImage)
+			"seed":         params.Seed,
+			"steps":        params.Steps,
+			"cfg":          params.CfgScale,
+			"sampler_name": params.Sampler,
+			"scheduler":    params.Scheduler,
+			"denoise":      params.Denoise,
 		},
 	}
 	workflow["6"] = map[string]any{
