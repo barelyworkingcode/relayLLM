@@ -15,6 +15,8 @@ OPENAI_CONFIG_PATH="$HOME/Library/Application Support/relayLLM/openai_endpoints.
   --command "$(pwd)/relayllm" \
   --args "--openai-config" \
   --args "$OPENAI_CONFIG_PATH" \
+  --args "--comfyui-url" \
+  --args "http://localhost:8188" \
   --autostart
 echo ""
 echo "Registered with Relay."
