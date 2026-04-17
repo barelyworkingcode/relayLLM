@@ -235,6 +235,7 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 	}
 
 	emitProgress("Queuing image generation...")
+	genStart := time.Now()
 	promptID, err := comfyui.QueuePrompt(ctx, workflow)
 	if err != nil {
 		slog.Error("comfyui: queue failed", "error", err)
@@ -271,16 +272,19 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 	}
 
 	imageURL := fmt.Sprintf("%s/%s", imageBaseURL, filename)
-	slog.Info("comfyui: image generated", "filename", filename, "size", len(imageData), "prompt", params.Prompt)
+	genDuration := time.Since(genStart).Seconds()
+	slog.Info("comfyui: image generated", "filename", filename, "size", len(imageData),
+		"duration", fmt.Sprintf("%.1fs", genDuration), "prompt", params.Prompt)
 
 	result, _ := json.Marshal(map[string]any{
-		"status":    "success",
-		"image_url": imageURL,
-		"filename":  filename,
-		"prompt":    params.Prompt,
-		"width":     params.Width,
-		"height":    params.Height,
-		"seed":      params.Seed,
+		"status":          "success",
+		"image_url":       imageURL,
+		"filename":        filename,
+		"prompt":          params.Prompt,
+		"width":           params.Width,
+		"height":          params.Height,
+		"seed":            params.Seed,
+		"generation_time": fmt.Sprintf("%.1fs", genDuration),
 	})
 	return string(result), nil
 }
