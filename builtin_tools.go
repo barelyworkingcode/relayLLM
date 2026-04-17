@@ -2,17 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
-// BuiltinToolHandler executes a built-in tool. The emit callback lets the
-// handler send progress events back to the client during long-running
-// operations (e.g., image generation polling). The emit function signature
-// matches the guardedHandler used in runToolLoop.
+// BuiltinToolHandler executes a built-in tool. files contains the user's
+// message attachments (may be nil). The emit callback lets the handler send
+// progress events back to the client during long-running operations.
 type BuiltinToolHandler func(ctx context.Context, args json.RawMessage,
+	files []FileAttachment,
 	emit func(eventType string, data json.RawMessage)) (string, error)
 
 // BuiltinToolDef is the static definition of a built-in tool, used both for
@@ -53,14 +55,15 @@ func (r *BuiltinToolRegistry) Has(name string) bool {
 	return ok
 }
 
-// Call executes a built-in tool by name.
+// Call executes a built-in tool by name. files are the user's message
+// attachments from the current conversation turn.
 func (r *BuiltinToolRegistry) Call(ctx context.Context, name string, args json.RawMessage,
-	emit func(eventType string, data json.RawMessage)) (string, error) {
+	files []FileAttachment, emit func(eventType string, data json.RawMessage)) (string, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
 		return "", fmt.Errorf("unknown built-in tool: %s", name)
 	}
-	return handler(ctx, args, emit)
+	return handler(ctx, args, files, emit)
 }
 
 // ChatToolDefs returns tool definitions in the OpenAI/Ollama compatible
@@ -93,8 +96,8 @@ func RegisterImageGenTool(registry *BuiltinToolRegistry, comfyui *ComfyUIClient,
 			Description: "Generate an image from a text description using a local Stable Diffusion model. Returns a URL to the generated image.",
 			Parameters:  schema,
 		},
-		func(ctx context.Context, args json.RawMessage, emit func(string, json.RawMessage)) (string, error) {
-			return handleGenerateImage(ctx, args, emit, comfyui, imageBaseURL)
+		func(ctx context.Context, args json.RawMessage, files []FileAttachment, emit func(string, json.RawMessage)) (string, error) {
+			return handleGenerateImage(ctx, args, files, emit, comfyui, imageBaseURL)
 		},
 	)
 }
@@ -161,6 +164,16 @@ func buildImageGenSchema(checkpoints, loras []string) json.RawMessage {
 		}
 	}
 
+	// Image-to-image support.
+	props["use_input_image"] = map[string]any{
+		"type":        "boolean",
+		"description": "Set to true to use the user's attached image as a starting point. The image will be modified according to the prompt.",
+	}
+	props["denoise"] = map[string]any{
+		"type":        "number",
+		"description": "How much to change the input image (0.0 = keep original, 1.0 = fully regenerate). Default 0.7 for img2img, 1.0 for text-to-image.",
+	}
+
 	schema, _ := json.Marshal(map[string]any{
 		"type":       "object",
 		"properties": props,
@@ -174,7 +187,7 @@ func imageGenError(msg string) string {
 	return string(result)
 }
 
-func handleGenerateImage(ctx context.Context, args json.RawMessage,
+func handleGenerateImage(ctx context.Context, args json.RawMessage, files []FileAttachment,
 	emit func(string, json.RawMessage), comfyui *ComfyUIClient, imageBaseURL string) (string, error) {
 
 	var params ImageGenParams
@@ -196,10 +209,32 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage,
 		emit("llm_event", data)
 	}
 
-	emitProgress("Queuing image generation...")
+	// Determine workflow: img2img if user requested and image is attached.
+	var workflow map[string]any
+	if params.UseInputImage {
+		inputFile := findImageAttachment(files)
+		if inputFile == nil {
+			return imageGenError("No image attached. Please attach an image to use as a reference."), nil
+		}
+		emitProgress("Uploading reference image...")
+		imageBytes, err := decodeFileAttachment(inputFile)
+		if err != nil {
+			return imageGenError("Failed to decode attached image: " + err.Error()), nil
+		}
+		uploadedName, err := comfyui.UploadImage(ctx, inputFile.Name, imageBytes)
+		if err != nil {
+			slog.Error("comfyui: upload failed", "error", err)
+			return imageGenError("Failed to upload image to ComfyUI: " + err.Error()), nil
+		}
+		if params.Denoise == 0 {
+			params.Denoise = 0.7
+		}
+		workflow = comfyui.BuildImageToImageWorkflow(params, uploadedName)
+	} else {
+		workflow = comfyui.BuildTextToImageWorkflow(params)
+	}
 
-	// Build and submit workflow.
-	workflow := comfyui.BuildTextToImageWorkflow(params)
+	emitProgress("Queuing image generation...")
 	promptID, err := comfyui.QueuePrompt(ctx, workflow)
 	if err != nil {
 		slog.Error("comfyui: queue failed", "error", err)
@@ -209,7 +244,7 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage,
 	emitProgress("Generating image...")
 
 	// Poll for completion.
-	outputs, err := comfyui.PollHistory(ctx, promptID, 120*time.Second, emitProgress)
+	outputs, err := comfyui.PollHistory(ctx, promptID, 5*time.Minute, emitProgress)
 	if err != nil {
 		slog.Error("comfyui: generation failed", "error", err, "promptID", promptID)
 		return imageGenError("Image generation failed: " + err.Error()), nil
@@ -248,4 +283,24 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage,
 		"seed":      params.Seed,
 	})
 	return string(result), nil
+}
+
+// findImageAttachment returns the first image file from the user's attachments.
+func findImageAttachment(files []FileAttachment) *FileAttachment {
+	for i := range files {
+		if strings.HasPrefix(files[i].MimeType, "image/") {
+			return &files[i]
+		}
+	}
+	return nil
+}
+
+// decodeFileAttachment extracts raw bytes from a FileAttachment. The Data
+// field may be a bare base64 string or a data URL (data:image/png;base64,...).
+func decodeFileAttachment(f *FileAttachment) ([]byte, error) {
+	data := f.Data
+	if idx := strings.Index(data, ";base64,"); idx >= 0 {
+		data = data[idx+8:]
+	}
+	return base64.StdEncoding.DecodeString(data)
 }
