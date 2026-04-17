@@ -77,6 +77,7 @@ type SessionManager struct {
 	hookToken    string
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
+	builtinTools *BuiltinToolRegistry
 }
 
 func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -112,6 +113,12 @@ func (m *SessionManager) SetOllamaURL(url string) {
 // disable all OpenAI-compatible providers.
 func (m *SessionManager) SetOpenAIConfig(cfg *OpenAIConfig) {
 	m.openaiConfig = cfg
+}
+
+// SetBuiltinTools injects the registry of built-in tools (e.g. generate_image)
+// that will be available to all Ollama/OpenAI sessions alongside MCP tools.
+func (m *SessionManager) SetBuiltinTools(r *BuiltinToolRegistry) {
+	m.builtinTools = r
 }
 
 func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
@@ -220,7 +227,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 	switch session.ProviderType {
 	case "ollama":
 		transport := NewOllamaChatTransport(m.ollamaURL, session.Model, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
 
 	case "openai":
 		prefix, modelID, ok := strings.Cut(session.Model, "/")
@@ -232,7 +239,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("openai: unknown endpoint %q (model %q)", prefix, session.Model)
 		}
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
 
 	default: // "claude" or unset (backward compat)
 		if err := m.ensureHookConfig(session.Directory); err != nil {
