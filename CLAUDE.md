@@ -12,12 +12,16 @@ session_store.go     Session persistence to disk
 provider.go          Provider interface + shared types + extractTextContent
 provider_claude.go   Claude CLI provider (stream-json, persistent process)
 provider_ollama.go   Ollama HTTP provider (NDJSON streaming)
+provider_openai.go   OpenAI-compatible HTTP provider (SSE streaming)
+provider_chat_base.go  Base provider: tool-calling loop, MCP + built-in tool dispatch
 provider_settings.go Per-provider settings schema for Eve UI
 response_collector.go  Headless response accumulation for HTTP clients
+comfyui_client.go    ComfyUI HTTP client (queue, poll, fetch, workflow builder)
+builtin_tools.go     Built-in tool registry (generate_image) + dynamic schema
 terminal_template.go Terminal template types + JSON file store (built-in + custom)
 terminal_session.go  Terminal session with PTY management (creack/pty)
 terminal_manager.go  Terminal CRUD + lifecycle management
-api.go               HTTP routes (projects, sessions, terminals, permissions)
+api.go               HTTP routes (projects, sessions, terminals, permissions, generated images)
 ws.go                WebSocket server (streaming events to Eve, terminal I/O)
 permission.go        Permission request/response tracking
 scheduler_client.go  HTTP client for relayScheduler
@@ -30,6 +34,15 @@ cmd/hook/            Compiled PreToolUse hook binary
 
 - **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves).
 - **Ollama**: HTTP client with NDJSON streaming. Base URL via `--ollama-url` / `OLLAMA_URL` (default `http://localhost:11434`). Sends full conversation history per request; relies on Ollama's automatic KV cache prefix reuse. Per-session settings: `temperature`, `top_p`, `top_k`, `min_p`, `think` (bool), `num_ctx`. Explicitly sends `think: false` to suppress built-in reasoning on thinking models (e.g. Gemma 4). Supports image attachments via base64.
+- **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `openai_endpoints.json` or `OPENAI_BASE_URL`/`OPENAI_API_KEY`. Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
+
+## Built-in Tools
+
+Built-in tools coexist with MCP tools in the `BaseChatProvider` tool loop (`provider_chat_base.go`). Unlike MCP tools, built-in tool handlers receive an `emit` callback for progress events during long-running operations.
+
+Tool dispatch order in `runToolLoop()`: built-in tools are checked first (`builtinTools.Has()`), then MCP (`mcpManager.CallTool()`). Tool definitions from both sources are merged into a single list sent to the LLM.
+
+- **`generate_image`**: Text-to-image via ComfyUI (`--comfyui-url` / `COMFYUI_URL`). Queues a workflow, polls for completion with progress events, fetches the output image, saves to `{dataDir}/generated/`, returns a URL. Supports checkpoint selection, LoRA style adapters, and sampler/scheduler tuning. Available checkpoints and LoRAs are discovered from ComfyUI at startup and exposed as `enum` values in the tool schema. Only available to Ollama/OpenAI sessions (Claude provider has its own tool mechanism).
 
 ## API
 
@@ -48,6 +61,7 @@ GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
 GET/POST       /api/terminals              — list/create terminal instances
 DELETE         /api/terminals/:id          — close terminal
 POST           /api/permission     — hook binary posts here, held open until user decides
+GET            /api/generated/:filename — serve generated images (ComfyUI output)
 GET/POST       /api/tasks          — list/create tasks (proxy to relayScheduler)
 GET/PUT/DELETE /api/tasks/:id      — get/update/delete task (proxy to relayScheduler)
 POST           /api/tasks/:id/run  — trigger task execution (proxy to relayScheduler)
@@ -81,6 +95,7 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
 - `sessions/` — per-session JSON files
 - `terminals/templates.json` — custom terminal templates
 - `openai_endpoints.json` — OpenAI-compatible endpoint config (override: `--openai-config` or `OPENAI_CONFIG`)
+- `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
 
 ## Build
 
@@ -97,6 +112,7 @@ relayLLM is the LLM engine for the Relay ecosystem. It proxies task API and WebS
 - `../eve/` -- Browser-based LLM frontend. Single-backend client to relayLLM for all operations including tasks.
 - `../relayScheduler/` -- Task scheduler. Runs LLM prompts on schedule. relayLLM proxies its task API and forwards its WebSocket events.
 - `../relayTelegram/` -- Telegram bot. Bridges messages to relayLLM sessions.
+- `../relayComfy/` -- ComfyUI service. Manages ComfyUI as a subprocess for image/video generation. relayLLM talks to its HTTP API on port 8188.
 
 ## Eve ↔ relayLLM Channel Security
 
