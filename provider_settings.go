@@ -112,6 +112,41 @@ func ProviderSettings() map[string][]SettingField {
 			Hint:  "Limits token selection to top K candidates. Non-standard OpenAI extension; ignored by servers that don't support it.",
 		},
 		{
+			Key:   "min_p",
+			Label: "Min P",
+			Type:  "number",
+			Min:   ptr(0),
+			Max:   ptr(1),
+			Step:  ptr(0.01),
+			Hint:  "Minimum probability threshold relative to the top token.",
+		},
+		{
+			Key:   "repetition_penalty",
+			Label: "Repetition Penalty",
+			Type:  "number",
+			Min:   ptr(0),
+			Step:  ptr(0.01),
+			Hint:  "Penalize repeated tokens. 1.0 = no penalty.",
+		},
+		{
+			Key:     "presence_penalty",
+			Label:   "Presence Penalty",
+			Type:    "number",
+			Default: 0,
+			Min:     ptr(-2),
+			Max:     ptr(2),
+			Step:    ptr(0.1),
+			Hint:    "Penalize tokens that already appear in the conversation. Encourages topic diversity.",
+		},
+		{
+			Key:   "max_tokens",
+			Label: "Max Tokens",
+			Type:  "number",
+			Min:   ptr(1),
+			Step:  ptr(1),
+			Hint:  "Maximum number of tokens to generate. Leave empty for model default.",
+		},
+		{
 			Key:     "useRelayTools",
 			Label:   "Use Relay Tools",
 			Type:    "boolean",
@@ -130,5 +165,6 @@ func ProviderSettings() map[string][]SettingField {
 		"claude": {},
 		"ollama": ollamaFields,
 		"openai": openaiFields,
+		"llama":  openaiFields,
 	}
 }

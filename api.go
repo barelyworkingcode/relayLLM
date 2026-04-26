@@ -195,7 +195,7 @@ type ModelInfo struct {
 	Provider string `json:"provider"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -235,6 +235,9 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		models := append(claude, ollama...)
 		for _, ms := range openai {
 			models = append(models, ms...)
+		}
+		if llamaMgr != nil {
+			models = append(models, llamaMgr.ListModels()...)
 		}
 
 		writeJSON(w, 200, map[string]interface{}{
