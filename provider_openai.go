@@ -218,6 +218,18 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 		// accept it as an extension. Harmless on servers that ignore it.
 		body["top_k"] = *t.settings.TopK
 	}
+	if t.settings.MinP != nil {
+		body["min_p"] = *t.settings.MinP
+	}
+	if t.settings.RepetitionPenalty != nil {
+		body["repetition_penalty"] = *t.settings.RepetitionPenalty
+	}
+	if t.settings.PresencePenalty != nil {
+		body["presence_penalty"] = *t.settings.PresencePenalty
+	}
+	if t.settings.MaxTokens != nil {
+		body["max_tokens"] = *t.settings.MaxTokens
+	}
 	if len(tools) > 0 {
 		body["tools"] = tools
 		// Explicitly set tool_choice to "auto" so OpenAI-compatible servers

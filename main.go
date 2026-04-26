@@ -26,6 +26,8 @@ func main() {
 	apiToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every HTTP request and WS upgrade. Empty = dev mode (NO AUTH).")
 	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Optional Unix domain socket path. When set, relayLLM serves the same HTTP/WS handler from this socket (mode 0600) in addition to the TCP listener.")
 	comfyuiURL := flag.String("comfyui-url", envOrDefault("COMFYUI_URL", ""), "ComfyUI base URL for image generation (empty to disable)")
+	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
+	llamaProxyPort := flag.String("llama-proxy-port", envOrDefault("LLAMA_PROXY_PORT", ""), "Port for OpenAI-compatible llama proxy (empty to disable)")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -100,22 +102,30 @@ func main() {
 	sessions.SetHookToken(*apiToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
-	// Load OpenAI-compatible endpoints. Default to {dataDir}/openai_endpoints.json.
-	// Falls back to OPENAI_BASE_URL / OPENAI_API_KEY env vars if the file is absent.
-	openaiPath := *openaiConfigPath
-	if openaiPath == "" {
-		openaiPath = filepath.Join(*dataDir, "openai_endpoints.json")
-	}
-	openaiCfg, err := LoadOpenAIConfig(openaiPath)
+	// Load provider config. Prefers {dataDir}/config.json (unified), falls back
+	// to separate openai_endpoints.json + llama_models.json, then env vars.
+	openaiCfg, llamaCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
 	if err != nil {
-		slog.Error("failed to load openai config", "path", openaiPath, "error", err)
+		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 	if len(openaiCfg.Endpoints) > 0 {
-		names := openaiCfg.Names()
-		slog.Info("openai endpoints loaded", "count", len(openaiCfg.Endpoints), "names", names)
+		slog.Info("openai endpoints loaded", "count", len(openaiCfg.Endpoints), "names", openaiCfg.Names())
 	}
 	sessions.SetOpenAIConfig(openaiCfg)
+	var llamaManager *LlamaServerManager
+	if len(llamaCfg.Models) > 0 {
+		llamaManager = NewLlamaServerManager(llamaCfg, *llamaServerPath)
+		slog.Info("llama models configured", "count", len(llamaCfg.Models), "binary", llamaManager.binaryPath)
+	}
+	sessions.SetLlamaManager(llamaManager)
+
+	// Optional OpenAI-compatible proxy for llama models.
+	var llamaProxyAddr string
+	if *llamaProxyPort != "" && llamaManager != nil {
+		llamaProxyAddr = ":" + *llamaProxyPort
+	}
+	llamaProxy := StartLlamaProxy(llamaProxyAddr, llamaManager)
 
 	// Image generation via ComfyUI (optional).
 	if *comfyuiURL != "" {
@@ -156,7 +166,7 @@ func main() {
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)
-	RegisterModelRoutes(mux, *ollamaURL, openaiCfg)
+	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
@@ -234,6 +244,12 @@ func main() {
 	// (Unix socket is already unlinked by the shutdown goroutine above.)
 	schedulerWS.Close()
 	sessions.StopAll()
+	if llamaProxy != nil {
+		llamaProxy.Close()
+	}
+	if llamaManager != nil {
+		llamaManager.StopAll()
+	}
 	terminalMgr.StopAll()
 	slog.Info("shutdown complete")
 }
