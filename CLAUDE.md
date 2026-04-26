@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, Ollama HTTP), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
+Standalone LLM engine service. Manages providers (Claude CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
 
 ## Architecture
 
@@ -16,6 +16,9 @@ provider_openai.go   OpenAI-compatible HTTP provider (SSE streaming)
 provider_chat_base.go  Base provider: tool-calling loop, MCP + built-in tool dispatch
 provider_settings.go Per-provider settings schema for Eve UI
 response_collector.go  Headless response accumulation for HTTP clients
+config.go            Unified config loader (config.json → OpenAI + llama-server configs)
+llama_manager.go     llama-server process manager (launch, health check, port allocation)
+llama_proxy.go       OpenAI-compatible reverse proxy routing to llama-server instances
 comfyui_client.go    ComfyUI HTTP client (queue, poll, fetch, workflow builder)
 builtin_tools.go     Built-in tool registry (generate_image) + dynamic schema
 terminal_template.go Terminal template types + JSON file store (built-in + custom)
@@ -34,7 +37,9 @@ cmd/hook/            Compiled PreToolUse hook binary
 
 - **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves).
 - **Ollama**: HTTP client with NDJSON streaming. Base URL via `--ollama-url` / `OLLAMA_URL` (default `http://localhost:11434`). Sends full conversation history per request; relies on Ollama's automatic KV cache prefix reuse. Per-session settings: `temperature`, `top_p`, `top_k`, `min_p`, `think` (bool), `num_ctx`. Explicitly sends `think: false` to suppress built-in reasoning on thinking models (e.g. Gemma 4). Supports image attachments via base64.
-- **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `openai_endpoints.json` or `OPENAI_BASE_URL`/`OPENAI_API_KEY`. Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
+- **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `config.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
+- **llama.cpp**: Managed llama-server processes via `LlamaServerManager`. Configured via `config.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances across sessions. Communicates via OpenAI-compatible API (reuses `OpenAIChatTransport`). Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias` which is the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel. Per-session settings: same as OpenAI (temperature, top_p, top_k, min_p, etc.) — override server-level defaults set in the config.
+  - **Proxy** (`llama_proxy.go`): Optional OpenAI-compatible reverse proxy (`--llama-proxy-port` / `LLAMA_PROXY_PORT`). Listens on a single port, reads the `model` field from the request body, launches/reuses the right llama-server via `GetOrLaunch()`, and proxies the full request with `httputil.ReverseProxy` (SSE streaming via `FlushInterval: -1`). Endpoints: `GET /v1/models` (list configured aliases), `GET /health`, all other requests routed by model name. External clients use the alias directly (e.g. `"model": "qwen3-8b"`) without the `llama/` prefix.
 
 ## Built-in Tools
 
@@ -52,7 +57,7 @@ HTTP on `--port` (default 3001). WebSocket at `/ws`.
 ```
 GET/POST       /api/projects       — list/create projects
 GET/PUT/DELETE /api/projects/:id   — get/update/delete project
-GET            /api/models         — list available models (Claude + Ollama)
+GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp)
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session
@@ -94,7 +99,30 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
 - `projects.json` — project definitions
 - `sessions/` — per-session JSON files
 - `terminals/templates.json` — custom terminal templates
-- `openai_endpoints.json` — OpenAI-compatible endpoint config (override: `--openai-config` or `OPENAI_CONFIG`)
+- `config.json` — unified provider config (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
+  ```json
+  {
+    "openai": {
+      "endpoints": [
+        {"name": "lmstudio", "baseURL": "http://localhost:1234/v1", "group": "LM Studio"}
+      ]
+    },
+    "llama-server": {
+      "binaryPath": "/usr/local/bin/llama-server",
+      "modelDir": "~/models/",
+      "basePort": 8090,
+      "models": [{
+        "alias": "qwen3-8b",
+        "model": "/models/Qwen3-8B-Q4_K_M.gguf",
+        "ctx-size": 131072, "n-gpu-layers": -1, "threads": 8,
+        "flash-attn": true, "kv-unified": true,
+        "cache-type-k": "q8_0", "cache-type-v": "q8_0",
+        "temp": 0.6, "top-p": 0.95, "top-k": 20, "min-p": 0.0
+      }]
+    }
+  }
+  ```
+  Each llama-server model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths. `--openai-config` flag overrides the `openai` section.
 - `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
 
 ## Build

@@ -75,12 +75,15 @@ type ChatDelta struct {
 // BaseChatSettings holds the common knobs shared between Ollama and OpenAI.
 // Transport-specific settings (Ollama's think/num_ctx) embed this.
 type BaseChatSettings struct {
-	Temperature   *float64                   `json:"temperature,omitempty"`
-	TopP          *float64                   `json:"top_p,omitempty"`
-	TopK          *int                       `json:"top_k,omitempty"`
-	MinP          *float64                   `json:"min_p,omitempty"`
-	UseRelayTools *bool                      `json:"useRelayTools,omitempty"`
-	MCPServers    map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	Temperature       *float64                   `json:"temperature,omitempty"`
+	TopP              *float64                   `json:"top_p,omitempty"`
+	TopK              *int                       `json:"top_k,omitempty"`
+	MinP              *float64                   `json:"min_p,omitempty"`
+	RepetitionPenalty *float64                   `json:"repetition_penalty,omitempty"`
+	PresencePenalty   *float64                   `json:"presence_penalty,omitempty"`
+	MaxTokens         *int                       `json:"max_tokens,omitempty"`
+	UseRelayTools     *bool                      `json:"useRelayTools,omitempty"`
+	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 }
 
 // parseBaseSettings extracts BaseChatSettings from a raw JSON blob. See

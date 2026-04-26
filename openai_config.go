@@ -1,12 +1,5 @@
 package main
 
-import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"strings"
-)
-
 // OpenAIEndpoint describes a single OpenAI-compatible chat completions server.
 // Multiple endpoints can be configured side-by-side (Ollama's /v1, LM Studio,
 // OMLX, OpenAI proper, etc.). The Name field is used as a routing prefix on
@@ -50,59 +43,4 @@ func (c *OpenAIConfig) Names() []string {
 		names[i] = e.Name
 	}
 	return names
-}
-
-// LoadOpenAIConfig reads the JSON config file at path. If the file does not
-// exist, it falls back to the OPENAI_BASE_URL / OPENAI_API_KEY env vars; if
-// those are also unset, it returns an empty (but non-nil) config.
-//
-// Parse errors on an existing file are returned to the caller — a malformed
-// config file should be surfaced loudly, not silently fall back to env vars.
-func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
-	if path != "" {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var cfg OpenAIConfig
-			if err := json.Unmarshal(data, &cfg); err != nil {
-				return nil, fmt.Errorf("parse %s: %w", path, err)
-			}
-			normalize(&cfg)
-			return &cfg, nil
-		}
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		// File does not exist → fall through to env var fallback.
-	}
-
-	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		name := os.Getenv("OPENAI_ENDPOINT_NAME")
-		if name == "" {
-			name = "openai"
-		}
-		cfg := &OpenAIConfig{
-			Endpoints: []OpenAIEndpoint{
-				{
-					Name:    name,
-					BaseURL: baseURL,
-					APIKey:  os.Getenv("OPENAI_API_KEY"),
-					Group:   "OpenAI",
-				},
-			},
-		}
-		normalize(cfg)
-		return cfg, nil
-	}
-
-	return &OpenAIConfig{}, nil
-}
-
-// normalize trims trailing slashes from base URLs and defaults Group to Name.
-func normalize(cfg *OpenAIConfig) {
-	for i := range cfg.Endpoints {
-		cfg.Endpoints[i].BaseURL = strings.TrimRight(cfg.Endpoints[i].BaseURL, "/")
-		if cfg.Endpoints[i].Group == "" {
-			cfg.Endpoints[i].Group = cfg.Endpoints[i].Name
-		}
-	}
 }
