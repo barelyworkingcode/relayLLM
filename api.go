@@ -39,67 +39,42 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- Project Routes ---
+// --- Project Routes (proxy to relay bridge) ---
 
-func RegisterProjectRoutes(mux *http.ServeMux, store *ProjectStore, sc *SchedulerClient) {
+func RegisterProjectRoutes(mux *http.ServeMux, bridgeClient BridgeProjectClient) {
 	mux.HandleFunc("GET /api/projects", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, store.List())
-	})
-
-	mux.HandleFunc("POST /api/projects", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Name         string   `json:"name"`
-			Path         string   `json:"path"`
-			AllowedTools []string `json:"allowedTools"`
-		}
-		if err := readJSON(r, &body); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-		p, err := store.Create(body.Name, body.Path, body.AllowedTools)
+		data, err := bridgeClient.ListProjects()
 		if err != nil {
-			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			slog.Error("bridge ListProjects failed", "error", err)
+			writeJSON(w, 502, map[string]string{"error": "failed to fetch projects from relay"})
 			return
 		}
-		writeJSON(w, 201, p)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write(data)
 	})
 
 	mux.HandleFunc("GET /api/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
-		p, ok := store.Get(r.PathValue("id"))
-		if !ok {
-			writeJSON(w, 404, map[string]string{"error": "project not found"})
-			return
-		}
-		writeJSON(w, 200, p)
-	})
-
-	mux.HandleFunc("PUT /api/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
-		var updates ProjectUpdate
-		if err := readJSON(r, &updates); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-		p, err := store.Update(r.PathValue("id"), updates)
+		data, err := bridgeClient.GetProject(r.PathValue("id"))
 		if err != nil {
-			writeJSON(w, 404, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, 200, p)
-	})
-
-	mux.HandleFunc("DELETE /api/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if sc != nil {
-			if _, _, err := sc.Proxy("DELETE", "/api/tasks/by-project/"+id, "", nil); err != nil {
-				slog.Warn("scheduler cascade delete failed", "project", id, "error", err)
+			if strings.Contains(err.Error(), "not found") {
+				writeJSON(w, 404, map[string]string{"error": "project not found"})
+				return
 			}
-		}
-		if err := store.Delete(id); err != nil {
-			writeJSON(w, 404, map[string]string{"error": err.Error()})
+			slog.Error("bridge GetProject failed", "error", err)
+			writeJSON(w, 502, map[string]string{"error": "failed to fetch project from relay"})
 			return
 		}
-		writeJSON(w, 200, map[string]bool{"success": true})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write(data)
 	})
+}
+
+// BridgeProjectClient abstracts the bridge connection for project queries.
+type BridgeProjectClient interface {
+	ListProjects() (json.RawMessage, error)
+	GetProject(id string) (json.RawMessage, error)
 }
 
 // --- Session Routes ---
@@ -118,13 +93,14 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			SystemPrompt   string          `json:"systemPrompt"`
 			AppendClaudeMd bool            `json:"appendClaudeMd"`
 			ProviderType   string          `json:"providerType"`
+			McpToken       string          `json:"mcpToken"`
 			Settings       json.RawMessage `json:"settings"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.ProviderType, body.Settings)
+		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.ProviderType, body.Settings, body.McpToken)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return

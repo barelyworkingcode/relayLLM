@@ -11,10 +11,19 @@ import (
 	"testing"
 )
 
+// mockBridgeClient returns empty project data for tests.
+type mockBridgeClient struct{}
+
+func (m *mockBridgeClient) ListProjects() (json.RawMessage, error) {
+	return json.RawMessage(`[]`), nil
+}
+func (m *mockBridgeClient) GetProject(id string) (json.RawMessage, error) {
+	return nil, fmt.Errorf("project not found: %s", id)
+}
+
 // testServer wires up the full relayLLM stack in-process for integration testing.
 type testServer struct {
 	Server       *httptest.Server
-	ProjectStore *ProjectStore
 	SessionStore *SessionStore
 	Sessions     *SessionManager
 	Perms        *PermissionManager
@@ -24,14 +33,9 @@ func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dataDir := t.TempDir()
 
-	store := NewProjectStore(dataDir + "/projects.json")
-	if err := store.Load(); err != nil {
-		t.Fatalf("load project store: %v", err)
-	}
-
 	sessionStore := NewSessionStore(dataDir + "/sessions")
 	perms := NewPermissionManager()
-	sessions := NewSessionManager(store, sessionStore, perms)
+	sessions := NewSessionManager(sessionStore, perms)
 	sessions.SetOpenAIConfig(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{
 			{Name: "omlx", BaseURL: integOMLXURL, APIKey: integOMLXKey},
@@ -45,7 +49,7 @@ func newTestServer(t *testing.T) *testServer {
 	perms.sink = wsHub
 
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, store, nil)
+	RegisterProjectRoutes(mux, &mockBridgeClient{})
 	RegisterSessionRoutes(mux, sessions)
 	RegisterPermissionRoutes(mux, perms)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
@@ -62,7 +66,6 @@ func newTestServer(t *testing.T) *testServer {
 
 	return &testServer{
 		Server:       server,
-		ProjectStore: store,
 		SessionStore: sessionStore,
 		Sessions:     sessions,
 		Perms:        perms,
@@ -178,94 +181,8 @@ func endSession(t *testing.T, ts *testServer, sessionID string) {
 
 // --- Tests ---
 
-func TestIntegration_ProjectCRUD(t *testing.T) {
-	ts := newTestServer(t)
-
-	// Create.
-	var created struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Path string `json:"path"`
-	}
-	resp := doJSON(t, "POST", ts.Server.URL+"/api/projects", map[string]interface{}{
-		"name": "test-project",
-		"path": t.TempDir(),
-	}, &created)
-	if resp.StatusCode != 201 {
-		t.Fatalf("create: expected 201, got %d", resp.StatusCode)
-	}
-	if created.ID == "" {
-		t.Fatal("create: empty ID")
-	}
-
-	// List.
-	var projects []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	resp = doJSON(t, "GET", ts.Server.URL+"/api/projects", nil, &projects)
-	if resp.StatusCode != 200 {
-		t.Fatalf("list: expected 200, got %d", resp.StatusCode)
-	}
-	if len(projects) != 1 {
-		t.Fatalf("list: expected 1 project, got %d", len(projects))
-	}
-	if projects[0].ID != created.ID {
-		t.Fatalf("list: expected ID %s, got %s", created.ID, projects[0].ID)
-	}
-
-	// Get by ID.
-	var got struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	resp = doJSON(t, "GET", ts.Server.URL+"/api/projects/"+created.ID, nil, &got)
-	if resp.StatusCode != 200 {
-		t.Fatalf("get: expected 200, got %d", resp.StatusCode)
-	}
-	if got.Name != "test-project" {
-		t.Fatalf("get: expected name 'test-project', got %q", got.Name)
-	}
-
-	// Update.
-	var updated struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	resp = doJSON(t, "PUT", ts.Server.URL+"/api/projects/"+created.ID, map[string]string{
-		"name": "renamed-project",
-	}, &updated)
-	if resp.StatusCode != 200 {
-		t.Fatalf("update: expected 200, got %d", resp.StatusCode)
-	}
-	if updated.Name != "renamed-project" {
-		t.Fatalf("update: expected name 'renamed-project', got %q", updated.Name)
-	}
-
-	// Verify update.
-	resp = doJSON(t, "GET", ts.Server.URL+"/api/projects/"+created.ID, nil, &got)
-	if resp.StatusCode != 200 {
-		t.Fatalf("get after update: expected 200, got %d", resp.StatusCode)
-	}
-	if got.Name != "renamed-project" {
-		t.Fatalf("get after update: expected 'renamed-project', got %q", got.Name)
-	}
-
-	// Delete.
-	resp = doJSON(t, "DELETE", ts.Server.URL+"/api/projects/"+created.ID, nil, nil)
-	if resp.StatusCode != 200 {
-		t.Fatalf("delete: expected 200, got %d", resp.StatusCode)
-	}
-
-	// Verify deleted.
-	resp = doJSON(t, "GET", ts.Server.URL+"/api/projects", nil, &projects)
-	if resp.StatusCode != 200 {
-		t.Fatalf("list after delete: expected 200, got %d", resp.StatusCode)
-	}
-	if len(projects) != 0 {
-		t.Fatalf("list after delete: expected 0 projects, got %d", len(projects))
-	}
-}
+// TestIntegration_ProjectCRUD removed — project CRUD now lives in relay.
+// relayLLM proxies read-only project data from the bridge.
 
 func TestIntegration_HelloWorld(t *testing.T) {
 	if testing.Short() {

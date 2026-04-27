@@ -68,7 +68,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 		"", t.TempDir(), "mcp-test",
 		model,
 		"You are a helpful assistant with access to tools. When asked about emails, use the available tools to fetch them. Always use tools when they are relevant to the request.",
-		false, "ollama", settingsJSON,
+		false, "ollama", settingsJSON, "",
 	)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
