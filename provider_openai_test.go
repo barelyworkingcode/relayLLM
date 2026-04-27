@@ -330,7 +330,7 @@ func TestDeriveProviderType_OpenAIPrefix(t *testing.T) {
 		{"/leading", "ollama"}, // malformed
 	}
 	for _, tc := range cases {
-		got := deriveProviderType(tc.model, cfg)
+		got := deriveProviderType(tc.model, cfg, nil)
 		if got != tc.want {
 			t.Errorf("deriveProviderType(%q) = %q, want %q", tc.model, got, tc.want)
 		}

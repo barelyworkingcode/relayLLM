@@ -120,21 +120,26 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 }
 
 // buildMCPManagerFromSettings constructs an MCPManager for the given base
-// settings, honoring the useRelayTools flag by auto-injecting a "relay"
-// server config from RELAY_MCP_COMMAND / RELAY_MCP_TOKEN env vars.
+// settings. If useRelayTools is enabled, injects a "relay" MCP server using
+// RELAY_MCP_COMMAND and the session's mcpToken (project-scoped) or
+// RELAY_MCP_TOKEN (service-level fallback).
 //
 // Returns nil if no MCP servers are configured (tool calling disabled).
-func buildMCPManagerFromSettings(s BaseChatSettings) *MCPManager {
+func buildMCPManagerFromSettings(s BaseChatSettings, mcpToken string) *MCPManager {
 	servers := s.MCPServers
 	if s.UseRelayTools != nil && *s.UseRelayTools {
 		if cmd := os.Getenv("RELAY_MCP_COMMAND"); cmd != "" {
+			token := mcpToken
+			if token == "" {
+				token = os.Getenv("RELAY_MCP_TOKEN")
+			}
 			if servers == nil {
 				servers = make(map[string]MCPServerConfig)
 			}
 			servers["relay"] = MCPServerConfig{
 				Command: cmd,
 				Args:    []string{"mcp"},
-				Env:     map[string]string{"RELAY_TOKEN": os.Getenv("RELAY_MCP_TOKEN")},
+				Env:     map[string]string{"RELAY_TOKEN": token},
 			}
 		} else {
 			slog.Warn("useRelayTools enabled but RELAY_MCP_COMMAND not set")
@@ -172,7 +177,7 @@ func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatT
 		session:      session,
 		handler:      handler,
 		transport:    transport,
-		mcpManager:   buildMCPManagerFromSettings(parseBaseSettings(settings)),
+		mcpManager:   buildMCPManagerFromSettings(parseBaseSettings(settings), session.McpToken),
 		builtinTools: builtinTools,
 	}
 }

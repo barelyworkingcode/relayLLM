@@ -29,6 +29,7 @@ type Session struct {
 
 	SystemPrompt string `json:"systemPrompt,omitempty"`
 	Headless     bool   `json:"headless,omitempty"`
+	McpToken     string `json:"-"` // project-scoped MCP token, not serialized
 
 	provider   Provider
 	processing bool
@@ -69,7 +70,6 @@ type SessionManager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
 	collectors   map[string]*ResponseCollector // sessionID → active collector
-	projectStore *ProjectStore
 	sessionStore *SessionStore
 	perms        *PermissionManager
 	sink         EventSink
@@ -81,11 +81,10 @@ type SessionManager struct {
 	builtinTools *BuiltinToolRegistry
 }
 
-func NewSessionManager(projects *ProjectStore, sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
+func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
 	return &SessionManager{
 		sessions:     make(map[string]*Session),
 		collectors:   make(map[string]*ResponseCollector),
-		projectStore: projects,
 		sessionStore: sessionStore,
 		perms:        perms,
 	}
@@ -137,22 +136,11 @@ func (m *SessionManager) llamaConfig() *LlamaConfig {
 	return m.llamaManager.config
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
-	var dir string
-
-	if projectID != "" {
-		project, ok := m.projectStore.Get(projectID)
-		if !ok {
-			return nil, fmt.Errorf("project not found: %s", projectID)
-		}
-		dir = project.Path
-	} else {
-		// Ungrouped session - directory is required
-		if directory == "" {
-			return nil, fmt.Errorf("directory is required for sessions without a project")
-		}
-		dir = directory
+func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage, mcpToken string) (*Session, error) {
+	if directory == "" {
+		return nil, fmt.Errorf("directory is required")
 	}
+	dir := directory
 
 	if model == "" {
 		model = "sonnet"
@@ -192,6 +180,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		ProviderType: providerType,
 		Settings:     settings,
 		SystemPrompt: systemPrompt,
+		McpToken:     mcpToken,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		Messages:     []Message{},
 		Stats:        SessionStats{},
