@@ -57,14 +57,12 @@ func main() {
 	killPortHolder(*port)
 	slog.Info("starting relayLLM", "port", *port, "dataDir", *dataDir)
 
-	store := NewProjectStore(filepath.Join(*dataDir, "projects.json"))
-	if err := store.Load(); err != nil {
-		slog.Error("failed to load projects", "error", err)
-	}
+	// Bridge client for proxying project queries to relay.
+	bridgeClient := newBridgeClient(os.Getenv("RELAY_MCP_TOKEN"))
 
 	sessionStore := NewSessionStore(filepath.Join(*dataDir, "sessions"))
 	perms := NewPermissionManager()
-	sessions := NewSessionManager(store, sessionStore, perms)
+	sessions := NewSessionManager(sessionStore, perms)
 
 	// Terminal subsystem.
 	templateStore := NewTemplateStore(filepath.Join(*dataDir, "terminals", "templates.json"))
@@ -162,7 +160,7 @@ func main() {
 	schedulerClient := NewSchedulerClient(*schedulerURL)
 
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, store, schedulerClient)
+	RegisterProjectRoutes(mux, bridgeClient)
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)

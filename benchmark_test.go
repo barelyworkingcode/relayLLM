@@ -115,7 +115,7 @@ func TestBenchmark_OllamaProvider(t *testing.T) {
 
 			session, err := ts.Sessions.CreateSession(
 				"", t.TempDir(), "bench-"+tc.name,
-				tc.model, tc.systemPrompt, false, tc.provider, settingsJSON,
+				tc.model, tc.systemPrompt, false, tc.provider, settingsJSON, "",
 			)
 			if err != nil {
 				t.Fatalf("create session: %v", err)
