@@ -39,44 +39,6 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// --- Project Routes (proxy to relay bridge) ---
-
-func RegisterProjectRoutes(mux *http.ServeMux, bridgeClient BridgeProjectClient) {
-	mux.HandleFunc("GET /api/projects", func(w http.ResponseWriter, r *http.Request) {
-		data, err := bridgeClient.ListProjects()
-		if err != nil {
-			slog.Error("bridge ListProjects failed", "error", err)
-			writeJSON(w, 502, map[string]string{"error": "failed to fetch projects from relay"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write(data)
-	})
-
-	mux.HandleFunc("GET /api/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
-		data, err := bridgeClient.GetProject(r.PathValue("id"))
-		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				writeJSON(w, 404, map[string]string{"error": "project not found"})
-				return
-			}
-			slog.Error("bridge GetProject failed", "error", err)
-			writeJSON(w, 502, map[string]string{"error": "failed to fetch project from relay"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write(data)
-	})
-}
-
-// BridgeProjectClient abstracts the bridge connection for project queries.
-type BridgeProjectClient interface {
-	ListProjects() (json.RawMessage, error)
-	GetProject(id string) (json.RawMessage, error)
-}
-
 // --- Session Routes ---
 
 func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {

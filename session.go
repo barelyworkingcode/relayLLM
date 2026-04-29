@@ -73,7 +73,7 @@ type SessionManager struct {
 	sessionStore *SessionStore
 	perms        *PermissionManager
 	sink         EventSink
-	hookURL      string
+	hookSocket   string
 	hookToken    string
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
@@ -94,13 +94,12 @@ func (m *SessionManager) SetEventSink(sink EventSink) {
 	m.sink = sink
 }
 
-func (m *SessionManager) SetHookURL(url string) {
-	m.hookURL = url
+// SetHookSocket sets the Unix socket the hook subprocess dials for
+// /api/permission. Same uid + 0600 perms + token authenticate the call.
+func (m *SessionManager) SetHookSocket(socketPath string) {
+	m.hookSocket = socketPath
 }
 
-// SetHookToken sets the bearer token the permission hook binary will send
-// when POSTing to /api/permission. Must match the relayLLM API token so the
-// hook can authenticate against its own parent server.
 func (m *SessionManager) SetHookToken(token string) {
 	m.hookToken = token
 }
@@ -269,7 +268,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if err := m.ensureHookConfig(session.Directory); err != nil {
 			slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 		}
-		p := NewClaudeProvider(session, handler, m.hookURL, m.hookToken)
+		p := NewClaudeProvider(session, handler, m.hookSocket, m.hookToken)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}

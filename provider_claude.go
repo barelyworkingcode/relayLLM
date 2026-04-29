@@ -30,7 +30,7 @@ type ClaudeProvider struct {
 	claudeSessionID string
 	model           string
 	directory       string
-	hookURL         string // URL for permission hook binary
+	hookSocket      string // Unix socket path the hook subprocess dials for /api/permission
 	hookToken       string // bearer token the hook will send when calling /api/permission
 
 	lastActivity atomic.Int64  // unix timestamp of last activity
@@ -43,14 +43,14 @@ type ClaudeProvider struct {
 	firstTokenNano atomic.Int64 // set on first content_block_delta
 }
 
-func NewClaudeProvider(session *Session, handler EventHandler, hookURL, hookToken string) *ClaudeProvider {
+func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string) *ClaudeProvider {
 	return &ClaudeProvider{
-		session:   session,
-		handler:   handler,
-		model:     session.Model,
-		directory: session.Directory,
-		hookURL:   hookURL,
-		hookToken: hookToken,
+		session:    session,
+		handler:    handler,
+		model:      session.Model,
+		directory:  session.Directory,
+		hookSocket: hookSocket,
+		hookToken:  hookToken,
 	}
 }
 
@@ -109,7 +109,7 @@ func (p *ClaudeProvider) Start() error {
 	cmd.Dir = p.directory
 	cmd.Env = ensurePath(os.Environ())
 	cmd.Env = append(cmd.Env,
-		fmt.Sprintf("RELAY_LLM_HOOK_URL=%s", p.hookURL),
+		fmt.Sprintf("RELAY_LLM_HOOK_SOCKET=%s", p.hookSocket),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
 	)
 	if p.hookToken != "" {
