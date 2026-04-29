@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -22,16 +24,16 @@ func logDebug(format string, args ...interface{}) {
 }
 
 func main() {
-	hookURL := os.Getenv("RELAY_LLM_HOOK_URL")
+	hookSocket := os.Getenv("RELAY_LLM_HOOK_SOCKET")
 	sessionID := os.Getenv("RELAY_LLM_SESSION_ID")
 	headless := os.Getenv("RELAY_LLM_HEADLESS")
 	hookToken := os.Getenv("RELAY_LLM_HOOK_TOKEN")
 
-	logDebug("hook invoked: hookURL=%q sessionID=%q headless=%q", hookURL, sessionID, headless)
+	logDebug("hook invoked: socket=%q sessionID=%q headless=%q", hookSocket, sessionID, headless)
 
 	// No-op when not running under relayLLM.
-	if hookURL == "" {
-		logDebug("no hookURL, exiting 0")
+	if hookSocket == "" {
+		logDebug("no hook socket, exiting 0")
 		os.Exit(0)
 	}
 
@@ -79,9 +81,17 @@ func main() {
 		"toolUseId": data.ToolUseID,
 	})
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	// Dial relayLLM's internal Unix socket. The HTTP transport rewrites the
+	// dialer so the synthetic host in the URL is irrelevant.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", hookSocket)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 120 * time.Second}
+
 	req, err := http.NewRequest("POST",
-		fmt.Sprintf("%s/api/permission", hookURL),
+		"http://relay-llm.localsocket/api/permission",
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -94,6 +104,7 @@ func main() {
 	resp, err := client.Do(req)
 	if err != nil {
 		// Network error — fail-open.
+		logDebug("hook upstream error: %v", err)
 		os.Exit(0)
 	}
 	defer resp.Body.Close()

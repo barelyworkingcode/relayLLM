@@ -4,27 +4,23 @@ import (
 	"context"
 	"encoding/base64"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
-	port := flag.String("port", envOrDefault("RELAY_LLM_PORT", "3001"), "HTTP/WebSocket listen port")
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
 	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
 	schedulerURL := flag.String("scheduler-url", envOrDefault("RELAY_SCHEDULER_URL", "http://localhost:3002"), "relayScheduler base URL")
-	apiToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every HTTP request and WS upgrade. Empty = dev mode (NO AUTH).")
-	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Optional Unix domain socket path. When set, relayLLM serves the same HTTP/WS handler from this socket (mode 0600) in addition to the TCP listener.")
+	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_INTERNAL_SOCKET", ""), "Internal Unix domain socket path. relay binds the front-door socket; this socket only accepts traffic from relay.")
+	internalToken := flag.String("token", envOrDefault("RELAY_LLM_INTERNAL_TOKEN", ""), "Internal bearer token. Validated on every request as defense-in-depth on top of the socket's 0600 permissions. Empty = trust filesystem perms only.")
 	comfyuiURL := flag.String("comfyui-url", envOrDefault("COMFYUI_URL", ""), "ComfyUI base URL for image generation (empty to disable)")
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
 	llamaProxyPort := flag.String("llama-proxy-port", envOrDefault("LLAMA_PROXY_PORT", ""), "Port for OpenAI-compatible llama proxy (empty to disable)")
@@ -42,23 +38,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Fail-closed startup validation for the relay channel.
-	// See eve/plans/cozy-honking-toast.md Section B for the threat model.
-	if *socketPath != "" && *apiToken == "" {
-		slog.Error("RELAY_LLM_SOCKET is set but RELAY_LLM_TOKEN is missing — refusing to start")
+	// Fail loudly: a misconfigured launch should not silently come up unreachable.
+	if *socketPath == "" {
+		slog.Error("RELAY_LLM_INTERNAL_SOCKET is required")
 		os.Exit(1)
 	}
-	if *apiToken == "" {
-		slog.Warn("RELAY_LLM_TOKEN is not set — running with NO AUTH on the relay channel. Safe only for local dev on loopback. Set RELAY_LLM_TOKEN to enable authentication.")
-	} else {
-		slog.Info("relay channel: bearer token enabled")
+	if *internalToken == "" {
+		slog.Warn("RELAY_LLM_INTERNAL_TOKEN unset — relying on 0600 filesystem perms only")
 	}
 
-	killPortHolder(*port)
-	slog.Info("starting relayLLM", "port", *port, "dataDir", *dataDir)
-
-	// Bridge client for proxying project queries to relay.
-	bridgeClient := newBridgeClient(os.Getenv("RELAY_MCP_TOKEN"))
+	slog.Info("starting relayLLM", "socket", *socketPath, "dataDir", *dataDir)
 
 	sessionStore := NewSessionStore(filepath.Join(*dataDir, "sessions"))
 	perms := NewPermissionManager()
@@ -91,13 +80,10 @@ func main() {
 		})
 	})
 
-	// Set the hook URL so providers know where to send permission requests.
-	// The hook binary runs inside the LLM provider's child process and POSTs
-	// to /api/permission. When auth is enabled, the hook needs the same
-	// bearer token relayLLM uses to validate inbound calls — we plumb it
-	// through SessionManager → ClaudeProvider → child env.
-	sessions.SetHookURL(fmt.Sprintf("http://localhost:%s", *port))
-	sessions.SetHookToken(*apiToken)
+	// The Claude CLI hook subprocess (runs as the user) dials our Unix
+	// socket and authenticates with the internal token.
+	sessions.SetHookSocket(*socketPath)
+	sessions.SetHookToken(*internalToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
 	// Load provider config. Prefers {dataDir}/config.json (unified), falls back
@@ -118,7 +104,8 @@ func main() {
 	}
 	sessions.SetLlamaManager(llamaManager)
 
-	// Optional OpenAI-compatible proxy for llama models.
+	// Separate TCP surface called by relayLLM's own provider code, not by
+	// external clients — keep it.
 	var llamaProxyAddr string
 	if *llamaProxyPort != "" && llamaManager != nil {
 		llamaProxyAddr = ":" + *llamaProxyPort
@@ -160,7 +147,6 @@ func main() {
 	schedulerClient := NewSchedulerClient(*schedulerURL)
 
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, bridgeClient)
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms)
@@ -176,44 +162,23 @@ func main() {
 	// Build the handler chain. recoverMiddleware sits closest to the mux so it
 	// catches panics from real handlers; bearerAuth sits in front so unauth
 	// requests never reach a real handler (and never allocate a WS session).
-	handler := bearerAuth(*apiToken, recoverMiddleware(mux))
+	handler := bearerAuth(*internalToken, recoverMiddleware(mux))
 
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%s", *port),
-		Handler: handler,
+	server := &http.Server{Handler: handler}
+
+	if err := os.MkdirAll(filepath.Dir(*socketPath), 0o700); err != nil {
+		slog.Error("failed to create socket parent dir", "path", *socketPath, "error", err)
+		os.Exit(1)
 	}
-
-	// Optional Unix domain socket listener — preferred transport when running
-	// under the relay orchestrator. Same handler, same auth chain. Kernel file
-	// permissions (0600) anchor authorization; the bearer token is defense-
-	// in-depth.
-	var unixListener net.Listener
-	if *socketPath != "" {
-		// Ensure the parent dir exists with restrictive perms.
-		if err := os.MkdirAll(filepath.Dir(*socketPath), 0o700); err != nil {
-			slog.Error("failed to create socket parent dir", "path", *socketPath, "error", err)
-			os.Exit(1)
-		}
-		// Remove any stale socket file from a previous crashed run.
-		_ = os.Remove(*socketPath)
-		ln, err := net.Listen("unix", *socketPath)
-		if err != nil {
-			slog.Error("failed to listen on unix socket", "path", *socketPath, "error", err)
-			os.Exit(1)
-		}
-		// Tighten perms before serving — most umasks already give 0600 for
-		// sockets but be explicit.
-		if err := os.Chmod(*socketPath, 0o600); err != nil {
-			slog.Warn("failed to chmod unix socket", "path", *socketPath, "error", err)
-		}
-		unixListener = ln
-		slog.Info("relay unix socket listening", "path", *socketPath)
-
-		go func() {
-			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
-				slog.Error("unix socket serve error", "error", err)
-			}
-		}()
+	// Remove any stale socket file from a previous crashed run.
+	_ = os.Remove(*socketPath)
+	listener, err := net.Listen("unix", *socketPath)
+	if err != nil {
+		slog.Error("failed to listen on internal socket", "path", *socketPath, "error", err)
+		os.Exit(1)
+	}
+	if err := os.Chmod(*socketPath, 0o600); err != nil {
+		slog.Warn("failed to chmod internal socket", "path", *socketPath, "error", err)
 	}
 
 	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
@@ -225,21 +190,18 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(ctx)
-		if unixListener != nil {
-			_ = unixListener.Close()
-			_ = os.Remove(*socketPath)
-		}
+		_ = server.Shutdown(ctx)
+		_ = listener.Close()
+		_ = os.Remove(*socketPath)
 	}()
 
-	slog.Info("listening", "addr", server.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	slog.Info("internal socket listening", "path", *socketPath)
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
 
 	// Server stopped — clean up background resources.
-	// (Unix socket is already unlinked by the shutdown goroutine above.)
 	schedulerWS.Close()
 	sessions.StopAll()
 	if llamaProxy != nil {
@@ -252,43 +214,10 @@ func main() {
 	slog.Info("shutdown complete")
 }
 
-// killPortHolder checks if the port is already in use and kills the holding process.
-func killPortHolder(port string) {
-	ln, err := net.Listen("tcp", ":"+port)
-	if err == nil {
-		ln.Close()
-		return // port is free
-	}
-
-	// Port is occupied. Find and kill the holder via lsof.
-	out, err := exec.Command("lsof", "-ti", ":"+port).Output()
-	if err != nil || len(out) == 0 {
-		return
-	}
-	for _, pidStr := range strings.Fields(strings.TrimSpace(string(out))) {
-		var pid int
-		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil || pid == os.Getpid() {
-			continue
-		}
-		slog.Info("killing stale process on port", "port", port, "pid", pid)
-		syscall.Kill(pid, syscall.SIGTERM)
-	}
-
-	// Brief wait for the port to free up.
-	for i := 0; i < 10; i++ {
-		time.Sleep(100 * time.Millisecond)
-		ln, err := net.Listen("tcp", ":"+port)
-		if err == nil {
-			ln.Close()
-			return
-		}
-	}
-	slog.Warn("port still occupied after killing stale process", "port", port)
-}
-
 func envOrDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
 }
+
