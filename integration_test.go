@@ -11,16 +11,6 @@ import (
 	"testing"
 )
 
-// mockBridgeClient returns empty project data for tests.
-type mockBridgeClient struct{}
-
-func (m *mockBridgeClient) ListProjects() (json.RawMessage, error) {
-	return json.RawMessage(`[]`), nil
-}
-func (m *mockBridgeClient) GetProject(id string) (json.RawMessage, error) {
-	return nil, fmt.Errorf("project not found: %s", id)
-}
-
 // testServer wires up the full relayLLM stack in-process for integration testing.
 type testServer struct {
 	Server       *httptest.Server
@@ -49,15 +39,14 @@ func newTestServer(t *testing.T) *testServer {
 	perms.sink = wsHub
 
 	mux := http.NewServeMux()
-	RegisterProjectRoutes(mux, &mockBridgeClient{})
 	RegisterSessionRoutes(mux, sessions)
 	RegisterPermissionRoutes(mux, perms)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	server := httptest.NewServer(mux)
 
-	// Point the hook URL at our test server so providers can reach the permission endpoint.
-	sessions.SetHookURL(server.URL)
+	// Tests don't exercise the hook subprocess; empty socket is fine.
+	sessions.SetHookSocket("")
 
 	t.Cleanup(func() {
 		sessions.StopAll()
