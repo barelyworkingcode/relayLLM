@@ -46,6 +46,7 @@ type Message struct {
 	Content   json.RawMessage `json:"content"`
 	Files     []FileAttachment `json:"files,omitempty"`
 	ToolName  string          `json:"toolName,omitempty"`  // set when Role="tool"
+	ToolUseID string          `json:"toolUseId,omitempty"` // set when Role="tool" so the client can pair the result back to its tool_use block
 	ToolCalls json.RawMessage `json:"toolCalls,omitempty"` // set on assistant msgs that invoked tools
 }
 

@@ -57,8 +57,10 @@ data: [DONE]
 	if result.FullText != "Hello world" {
 		t.Errorf("FullText = %q, want %q", result.FullText, "Hello world")
 	}
-	if len(result.ToolCalls) != 0 {
-		t.Errorf("ToolCalls = %v, want none", result.ToolCalls)
+	for _, d := range deltas {
+		if d.ToolStart != nil || d.ToolArgs != nil {
+			t.Errorf("unexpected tool delta in text-only stream: %+v", d)
+		}
 	}
 	if result.Stats.InputTokens != 12 || result.Stats.OutputTokens != 2 {
 		t.Errorf("Stats tokens = in=%d out=%d, want in=12 out=2",
@@ -85,25 +87,30 @@ data: [DONE]
 
 `
 	transport := &OpenAIChatTransport{}
-	result := transport.StreamChunks(sseResponse(t, payload), time.Now(), func(ChatDelta) {})
+	var starts []ToolStartEvent
+	var argFragments strings.Builder
+	result := transport.StreamChunks(sseResponse(t, payload), time.Now(), func(d ChatDelta) {
+		if d.ToolStart != nil {
+			starts = append(starts, *d.ToolStart)
+		}
+		if d.ToolArgs != nil {
+			argFragments.WriteString(d.ToolArgs.Partial)
+		}
+	})
 
 	if result.Err != nil {
 		t.Fatalf("unexpected err: %v", result.Err)
 	}
-	if len(result.ToolCalls) != 1 {
-		t.Fatalf("ToolCalls = %d, want 1", len(result.ToolCalls))
+	if len(starts) != 1 {
+		t.Fatalf("ToolStart events = %d, want 1", len(starts))
 	}
-	tc := result.ToolCalls[0]
-	if tc.ID != "call_abc" {
-		t.Errorf("ID = %q, want call_abc", tc.ID)
+	if starts[0].ID != "call_abc" || starts[0].Name != "search" {
+		t.Errorf("start = %+v, want id=call_abc name=search", starts[0])
 	}
-	if tc.Name != "search" {
-		t.Errorf("Name = %q, want search", tc.Name)
-	}
-	// Arguments should be the reconstructed JSON string.
+	// Argument fragments concatenate into valid JSON.
 	var args map[string]string
-	if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-		t.Fatalf("args not valid JSON: %v (raw: %s)", err, string(tc.Arguments))
+	if err := json.Unmarshal([]byte(argFragments.String()), &args); err != nil {
+		t.Fatalf("args not valid JSON: %v (raw: %s)", err, argFragments.String())
 	}
 	if args["query"] != "foo" {
 		t.Errorf("args[query] = %q, want foo", args["query"])
