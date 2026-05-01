@@ -305,9 +305,9 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {
 			return
 		}
 
-		slog.Info("permission request", "session", body.SessionID, "tool", body.ToolName)
+		slog.Info("permission request", "session", body.SessionID, "tool", body.ToolName, "toolUseId", body.ToolUseID)
 
-		req, ch := perms.CreateRequest(body.SessionID, body.ToolName, body.ToolInput)
+		req, ch := perms.CreateRequest(body.SessionID, body.ToolName, body.ToolInput, body.ToolUseID)
 
 		if perms.sink != nil {
 			perms.sink.SendToSession(body.SessionID, map[string]interface{}{
@@ -316,6 +316,7 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {
 				"permissionId": req.ID,
 				"toolName":     body.ToolName,
 				"toolInput":    body.ToolInput,
+				"toolUseId":    body.ToolUseID,
 			})
 		}
 
