@@ -13,11 +13,14 @@ type PermissionDecision struct {
 }
 
 // PermissionRequest represents a pending permission request from the hook binary.
+// ToolUseID lets clients (Eve) correlate the request back to the specific
+// tool_use block in the rendered chat history.
 type PermissionRequest struct {
 	ID        string `json:"permissionId"`
 	SessionID string `json:"sessionId"`
 	ToolName  string `json:"toolName"`
 	ToolInput string `json:"toolInput"`
+	ToolUseID string `json:"toolUseId"`
 }
 
 // PermissionManager tracks pending permission requests.
@@ -38,8 +41,9 @@ func (m *PermissionManager) SetEventSink(sink EventSink) {
 }
 
 // CreateRequest creates a pending permission request and returns the request
-// and a channel that will receive the decision.
-func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput string) (PermissionRequest, chan PermissionDecision) {
+// and a channel that will receive the decision. toolUseID may be empty for
+// callers that don't track it.
+func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput, toolUseID string) (PermissionRequest, chan PermissionDecision) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -52,6 +56,7 @@ func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput string)
 		SessionID: sessionID,
 		ToolName:  toolName,
 		ToolInput: toolInput,
+		ToolUseID: toolUseID,
 	}, ch
 }
 

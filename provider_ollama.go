@@ -246,8 +246,12 @@ type ollamaChatChunk struct {
 	EvalDuration       int64  `json:"eval_duration"`
 }
 
-// StreamChunks reads Ollama's NDJSON response, emits text/thinking deltas
-// through the provided callback, and returns the accumulated result.
+// StreamChunks reads Ollama's NDJSON response, emits text/thinking/tool
+// deltas through the provided callback, and returns the accumulated result.
+//
+// Ollama returns each tool call whole in one chunk (not streamed), so for
+// each one the transport emits ToolStart + a single ToolArgs carrying the
+// full JSON. BaseChatProvider's stream state machine handles the rest.
 func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.Time, emit func(ChatDelta)) NormalizedStreamResult {
 	defer resp.Body.Close()
 
@@ -255,8 +259,8 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	var fullText strings.Builder
-	var toolCalls []NormalizedToolCall
 	var stats SessionStats
+	toolIdx := 0 // monotonic index across the whole stream
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -279,10 +283,15 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 		}
 
 		for _, tc := range chunk.Message.ToolCalls {
-			toolCalls = append(toolCalls, NormalizedToolCall{
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			})
+			emit(ChatDelta{ToolStart: &ToolStartEvent{
+				Index: toolIdx,
+				Name:  tc.Function.Name,
+			}})
+			emit(ChatDelta{ToolArgs: &ToolArgsEvent{
+				Index:   toolIdx,
+				Partial: string(tc.Function.Arguments),
+			}})
+			toolIdx++
 		}
 
 		if chunk.Done {
@@ -303,14 +312,14 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 				EvalDurationMs:       float64(chunk.EvalDuration) / 1e6,
 				PromptEvalDurationMs: float64(chunk.PromptEvalDuration) / 1e6,
 			}
-			return NormalizedStreamResult{FullText: fullText.String(), ToolCalls: toolCalls, Stats: stats}
+			return NormalizedStreamResult{FullText: fullText.String(), Stats: stats}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return NormalizedStreamResult{FullText: fullText.String(), Err: err}
 	}
-	return NormalizedStreamResult{FullText: fullText.String(), ToolCalls: toolCalls}
+	return NormalizedStreamResult{FullText: fullText.String()}
 }
 
 // AppendAssistantWithToolCalls adds an assistant-with-tool-calls entry to the

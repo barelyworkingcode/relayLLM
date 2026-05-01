@@ -275,12 +275,14 @@ type openAIUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// StreamChunks reads the SSE-formatted response body, emits text/thinking
+// StreamChunks reads the SSE-formatted response body, emits text/thinking/tool
 // deltas through the provided callback, and returns the accumulated result.
 //
 // SSE format: each event is `data: <json>\n\n`, terminated by `data: [DONE]`.
-// Tool call arguments stream as string fragments across multiple chunks and
-// must be concatenated per (choice_index, tool_call_index).
+// Tool calls arrive incrementally: the first delta for a new tool call carries
+// the id + name, and subsequent deltas carry argument fragments. The transport
+// forwards both as ToolStart / ToolArgs events; BaseChatProvider's stream
+// state machine handles ordering and final assembly.
 func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.Time, emit func(ChatDelta)) NormalizedStreamResult {
 	defer resp.Body.Close()
 
@@ -289,14 +291,12 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 
 	var fullText strings.Builder
 	var usage *openAIUsage
-
-	// Tool call accumulator: index → in-progress call. OpenAI streams the
-	// name + id once and then arguments as fragments, all keyed by the
-	// same index.
-	toolAcc := make(map[int]*accumulatingToolCall)
-	var toolOrder []int // insertion order so we emit calls in a stable sequence
-
 	var firstTokenAt time.Time
+
+	// Track which tool-call indices we've already emitted ToolStart for.
+	// The OpenAI wire shape sends id/name on the first chunk, args on
+	// subsequent chunks — but rarely, both arrive in the same chunk.
+	startedTools := make(map[int]bool)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -353,44 +353,28 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 		}
 
 		for _, tcd := range delta.ToolCalls {
-			acc, existed := toolAcc[tcd.Index]
-			if !existed {
-				acc = &accumulatingToolCall{}
-				toolAcc[tcd.Index] = acc
-				toolOrder = append(toolOrder, tcd.Index)
-			}
-			if tcd.ID != "" {
-				acc.id = tcd.ID
-			}
-			if tcd.Function.Name != "" && acc.name == "" {
-				acc.name = tcd.Function.Name
+			// Emit ToolStart on the first chunk that carries a name for
+			// this tool-call index. The OpenAI spec guarantees name + id
+			// arrive together on the first delta.
+			if !startedTools[tcd.Index] && tcd.Function.Name != "" {
+				emit(ChatDelta{ToolStart: &ToolStartEvent{
+					Index: tcd.Index,
+					ID:    tcd.ID,
+					Name:  tcd.Function.Name,
+				}})
+				startedTools[tcd.Index] = true
 			}
 			if tcd.Function.Arguments != "" {
-				acc.args.WriteString(tcd.Function.Arguments)
+				emit(ChatDelta{ToolArgs: &ToolArgsEvent{
+					Index:   tcd.Index,
+					Partial: tcd.Function.Arguments,
+				}})
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return NormalizedStreamResult{FullText: fullText.String(), Err: err}
-	}
-
-	// Finalize tool calls in insertion order.
-	var toolCalls []NormalizedToolCall
-	for _, idx := range toolOrder {
-		acc := toolAcc[idx]
-		if acc.name == "" {
-			continue
-		}
-		args := strings.TrimSpace(acc.args.String())
-		if args == "" {
-			args = "{}"
-		}
-		toolCalls = append(toolCalls, NormalizedToolCall{
-			ID:        acc.id,
-			Name:      acc.name,
-			Arguments: json.RawMessage(args),
-		})
 	}
 
 	// Compute stats. OpenAI-compatible servers don't expose Ollama-style
@@ -411,19 +395,9 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 	}
 
 	return NormalizedStreamResult{
-		FullText:  fullText.String(),
-		ToolCalls: toolCalls,
-		Stats:     stats,
+		FullText: fullText.String(),
+		Stats:    stats,
 	}
-}
-
-// accumulatingToolCall holds in-progress state for one tool call as SSE
-// deltas arrive. OpenAI streams name + id once and then arguments as
-// string fragments; we concatenate them here.
-type accumulatingToolCall struct {
-	id   string
-	name string
-	args strings.Builder
 }
 
 // AppendAssistantWithToolCalls adds an assistant-with-tool-calls entry in

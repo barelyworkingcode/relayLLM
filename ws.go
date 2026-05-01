@@ -246,15 +246,16 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	session.mu.Unlock()
 
 	sendJSON(wc, map[string]interface{}{
-		"type":      "session_joined",
-		"sessionId": session.ID,
-		"projectId": session.ProjectID,
-		"directory": session.Directory,
-		"model":     session.Model,
-		"name":      session.Name,
-		"history":   history,
-		"stats":     stats,
-		"headless":  session.Headless,
+		"type":            "session_joined",
+		"sessionId":       session.ID,
+		"projectId":       session.ProjectID,
+		"directory":       session.Directory,
+		"model":           session.Model,
+		"name":            session.Name,
+		"history":         history,
+		"stats":           stats,
+		"headless":        session.Headless,
+		"protocolVersion": ProtocolVersion,
 	})
 }
 

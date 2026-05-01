@@ -395,7 +395,12 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.processing = false
 		session.mu.Unlock()
 
-		// If provider sent text with message_complete (LM Studio), store assistant message.
+		// Fallback save for providers that haven't persisted the assistant
+		// turn themselves. Contract: providers that DO persist (chat-base via
+		// turnStreamState.blocks; Claude via readClaudeHistory replay) MUST
+		// emit message_complete with nil data so this branch is a no-op —
+		// otherwise a duplicate text-only message gets appended on top of the
+		// canonical-blocks one.
 		if data != nil {
 			var complete struct {
 				Text string `json:"text"`

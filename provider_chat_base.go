@@ -47,29 +47,53 @@ type ChatTransport interface {
 }
 
 // NormalizedToolCall is the transport-agnostic representation of a single
-// tool call emitted by the model. The ID is always populated by OpenAI-shaped
-// APIs and left empty by Ollama-native (which does not track tool call IDs).
+// tool call emitted by the model. The ID is always populated — synthesized
+// by BaseChatProvider's stream state machine when the transport doesn't
+// track ids natively (Ollama).
 type NormalizedToolCall struct {
-	ID        string // empty for providers that don't track IDs
+	ID        string
 	Name      string
 	Arguments json.RawMessage
 }
 
 // NormalizedStreamResult is what a transport returns after streaming one
-// response. Both the Ollama and OpenAI transports map their wire formats
-// into this shape so BaseChatProvider's tool loop can stay format-agnostic.
+// response. Tool calls are NOT in here — BaseChatProvider builds them from
+// the streamed deltas (single source of truth). FullText is the concatenated
+// text content (excluding thinking and tool args), used for session history
+// persistence.
 type NormalizedStreamResult struct {
-	FullText  string
-	ToolCalls []NormalizedToolCall
-	Stats     SessionStats
-	Err       error
+	FullText string
+	Stats    SessionStats
+	Err      error
 }
 
 // ChatDelta is a single streamed piece of output from a transport. Exactly
-// one of Text or Thinking should be non-empty per call.
+// one field should be populated per call. ToolStart and ToolArgs let the
+// transport stream tool calls incrementally so the canonical event layer
+// can emit content_block_start + input_json_delta + content_block_stop.
 type ChatDelta struct {
-	Text     string
-	Thinking string
+	Text      string
+	Thinking  string
+	ToolStart *ToolStartEvent
+	ToolArgs  *ToolArgsEvent
+}
+
+// ToolStartEvent signals that a new tool call has begun streaming. Index
+// is the transport's stream-local accumulator key (matching subsequent
+// ToolArgs events). ID may be empty for providers that don't track ids
+// (Ollama); BaseChatProvider will synthesize one.
+type ToolStartEvent struct {
+	Index int
+	ID    string
+	Name  string
+}
+
+// ToolArgsEvent carries one fragment of a tool call's JSON-encoded arguments.
+// Multiple ToolArgs events for the same Index are concatenated. Ollama emits
+// the full arguments in a single event; OpenAI streams fragments.
+type ToolArgsEvent struct {
+	Index   int
+	Partial string
 }
 
 // BaseChatSettings holds the common knobs shared between Ollama and OpenAI.
@@ -285,24 +309,41 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		}
 		p.handler(eventType, data)
 	}
-	guardedTextDelta := func(text string) {
+	guardedEmitter := NewEventEmitter(func(eventType string, data json.RawMessage) {
 		if stale() {
 			return
 		}
-		p.emitTextDelta(text)
-	}
-	guardedAssistantStart := func() {
-		if stale() {
-			return
-		}
-		p.emitAssistantStart()
-	}
+		p.handler(eventType, data)
+	})
 
 	const maxIterations = 10
 	const maxToolResultLen = 8192
 
-	var allText strings.Builder
-	var toolMessages []Message // session-history tool messages accumulated across iterations
+	var toolMessages []Message
+
+	// All tool-loop iterations are one assistant turn from the client's POV,
+	// so emit message_start + system.init once at the top.
+	if !stale() {
+		guardedEmitter.MessageStart("")
+	}
+	if !stale() {
+		var toolNames []string
+		if p.builtinTools != nil {
+			for _, def := range p.builtinTools.tools {
+				toolNames = append(toolNames, def.Name)
+			}
+		}
+		var mcpNames []string
+		if p.mcpManager != nil && p.mcpManager.HasTools() {
+			for _, t := range p.mcpManager.tools {
+				toolNames = append(toolNames, t.Name)
+			}
+			for name := range p.mcpManager.servers {
+				mcpNames = append(mcpNames, name)
+			}
+		}
+		guardedEmitter.SystemInit(p.session.Model, p.session.Directory, toolNames, mcpNames)
+	}
 
 	for iteration := 0; iteration <= maxIterations; iteration++ {
 		// Register the response body so StopGeneration can close it immediately.
@@ -310,21 +351,23 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		p.activeBody = resp.Body
 		p.mu.Unlock()
 
-		// Emit the assistant-start event exactly once, on the first delta
-		// that arrives from the transport. This keeps the transport oblivious
-		// to the start event while still firing it in the right order.
-		var startOnce sync.Once
-		tracker := &thinkBlockTracker{emit: guardedTextDelta}
+		state := newTurnStreamState(guardedEmitter)
 		result := p.transport.StreamChunks(resp, startTime, func(d ChatDelta) {
-			startOnce.Do(guardedAssistantStart)
+			if stale() {
+				return
+			}
 			switch {
+			case d.ToolStart != nil:
+				state.onToolStart(d.ToolStart)
+			case d.ToolArgs != nil:
+				state.onToolArgs(d.ToolArgs)
 			case d.Thinking != "":
-				tracker.thinking(d.Thinking)
+				state.onThinking(d.Thinking)
 			case d.Text != "":
-				tracker.text(d.Text)
+				state.onText(d.Text)
 			}
 		})
-		tracker.close()
+		toolCalls := state.finalize()
 
 		p.mu.Lock()
 		p.activeBody = nil
@@ -338,7 +381,12 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			return
 		}
 
-		allText.WriteString(result.FullText)
+		// Prefer state-machine accumulated text; fall back to the transport's
+		// FullText for transports that report it without fanning through emit.
+		streamText := state.fullText.String()
+		if streamText == "" {
+			streamText = result.FullText
+		}
 
 		if result.Err != nil {
 			slog.Error("chat: stream error", "transport", p.transport.Name(), "session", p.session.ID, "error", result.Err)
@@ -347,47 +395,46 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		}
 
 		// Terminal condition: no more tool calls, no tool handlers, or cap hit.
-		if len(result.ToolCalls) == 0 || (p.mcpManager == nil && p.builtinTools == nil) || iteration == maxIterations {
+		if len(toolCalls) == 0 || (p.mcpManager == nil && p.builtinTools == nil) || iteration == maxIterations {
 			statsData, _ := json.Marshal(result.Stats)
 			guardedHandler("stats_update", statsData)
 
+			if len(state.blocks) > 0 {
+				toolMessages = append(toolMessages, Message{
+					Timestamp: timeNow(),
+					Role:      "assistant",
+					Content:   mustJSON(state.blocks),
+				})
+			}
 			if len(toolMessages) > 0 {
 				p.session.mu.Lock()
 				p.session.Messages = append(p.session.Messages, toolMessages...)
 				p.session.mu.Unlock()
 			}
 
-			completeData, _ := json.Marshal(map[string]string{"text": allText.String()})
-			guardedHandler("message_complete", completeData)
+			// Nil payload tells session.go's handler to skip its fallback
+			// text-only save — we already persisted the canonical blocks above.
+			guardedHandler("message_complete", nil)
 			return
 		}
 
-		// Persist the assistant-with-tool-calls message in session history.
-		tcJSON, _ := json.Marshal(result.ToolCalls)
-		assistantContent, _ := json.Marshal(result.FullText)
+		// Persist the assistant-with-tool-calls message as canonical content
+		// blocks. state.blocks is guaranteed non-empty here — toolCalls came
+		// from onToolStart, which appends a tool_use block via closeOpen.
+		tcJSON, _ := json.Marshal(toolCalls)
 		toolMessages = append(toolMessages, Message{
 			Timestamp: timeNow(),
 			Role:      "assistant",
-			Content:   assistantContent,
+			Content:   mustJSON(state.blocks),
 			ToolCalls: tcJSON,
 		})
-		messages = p.transport.AppendAssistantWithToolCalls(messages, result.FullText, result.ToolCalls)
+		messages = p.transport.AppendAssistantWithToolCalls(messages, streamText, toolCalls)
 
 		// Execute each tool and append its result.
-		for _, tc := range result.ToolCalls {
+		for _, tc := range toolCalls {
 			if ctx.Err() != nil {
 				return
 			}
-
-			// Emit a content_block tool_use event so the UI shows the
-			// tool indicator pill (matches the shape Claude emits natively).
-			guardedHandler("llm_event", mustJSON(map[string]any{
-				"type": "assistant",
-				"content_block": map[string]any{
-					"type": "tool_use",
-					"name": tc.Name,
-				},
-			}))
 
 			var toolResult string
 			var toolErr error
@@ -398,6 +445,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			} else {
 				toolErr = fmt.Errorf("no handler for tool %q", tc.Name)
 			}
+			isError := toolErr != nil
 			if toolErr != nil {
 				if ctx.Err() != nil {
 					return
@@ -409,14 +457,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 				toolResult = toolResult[:maxToolResultLen] + "\n...(truncated)"
 			}
 
-			// Emit a structured result event so the UI can mark the tool
-			// complete — routed as llm_event so the session manager forwards it.
-			guardedHandler("llm_event", mustJSON(map[string]any{
-				"type":      "result",
-				"subtype":   "tool_result",
-				"tool_name": tc.Name,
-				"content":   toolResult,
-			}))
+			guardedEmitter.ToolResult(tc.ID, tc.Name, toolResult, isError)
 
 			resultContent, _ := json.Marshal(toolResult)
 			toolMessages = append(toolMessages, Message{
@@ -478,38 +519,6 @@ func (p *BaseChatProvider) Alive() bool                    { return p.started.Lo
 func (p *BaseChatProvider) GetState() json.RawMessage      { return json.RawMessage(`{}`) }
 func (p *BaseChatProvider) RestoreState(_ json.RawMessage) {}
 
-// emitTextDelta streams a text_delta event to the session layer.
-func (p *BaseChatProvider) emitTextDelta(text string) {
-	event := map[string]any{
-		"type": "assistant",
-		"delta": map[string]any{
-			"type": "text_delta",
-			"text": text,
-		},
-	}
-	data, _ := json.Marshal(event)
-	p.handler("llm_event", data)
-}
-
-// emitError sends a safely JSON-encoded error event.
-func (p *BaseChatProvider) emitError(msg string) {
-	data, _ := json.Marshal(map[string]string{"error": msg})
-	p.handler("error", data)
-}
-
-// emitAssistantStart sends the initial "assistant" event that signals the
-// start of a streamed message. Transports call this from their StreamChunks
-// implementation via the emit callback's first text/thinking delta.
-func (p *BaseChatProvider) emitAssistantStart() {
-	event := map[string]any{
-		"type": "assistant",
-		"message": map[string]any{
-			"content": []any{},
-		},
-	}
-	data, _ := json.Marshal(event)
-	p.handler("llm_event", data)
-}
 
 func timeNow() string {
 	return time.Now().UTC().Format(time.RFC3339)
@@ -568,33 +577,189 @@ func decodeNormalizedToolCalls(raw json.RawMessage) []NormalizedToolCall {
 	return nil
 }
 
-// thinkBlockTracker wraps thinking deltas in <think>...</think> tags as text
-// deltas arrive interleaved. Both Ollama (chunk.message.thinking) and OpenAI
-// reasoning models (delta.reasoning_content) stream thinking this way.
-type thinkBlockTracker struct {
-	emit   func(string)
-	active bool
+// turnStreamState drives canonical event emission for a single streamed
+// response from the transport. It tracks the open content block (so
+// transitions emit content_block_stop + content_block_start), assigns
+// canonical block indices, and accumulates tool-call state so that at
+// stream end the caller can read out the resolved tool calls.
+//
+// The state machine is intentionally permissive about ordering — text and
+// thinking deltas can interleave in any order, and tool calls can start at
+// any point. The only invariant is that each block_start has a matching
+// block_stop before the next start at the same kind.
+type turnStreamState struct {
+	emitter *EventEmitter
+
+	// Per-turn block index counter. Resets each turn (each StreamChunks call).
+	nextBlockIdx int
+
+	// What kind of block is currently open, and at which index.
+	openKind  blockKind
+	openIndex int
+
+	// Transport-local index of the currently open tool block, if any. Lets
+	// closeOpen look the entry up in O(1) rather than scanning s.tools.
+	openToolIdx int
+
+	// Tool tracking: transport's stream-local index → tool block state.
+	tools map[int]*toolBlockState
+
+	// Order tools were started, so finalizeTools returns them in order.
+	toolOrder []int
+
+	// Per-block accumulator for the open text or thinking block. Reset on
+	// every text/thinking block start; consumed when the block closes.
+	openBlockText strings.Builder
+
+	// Accumulated user-visible text (excludes thinking and tool args).
+	fullText strings.Builder
+
+	// Resolved canonical content blocks for this turn, in stream order.
+	// Persisted as the assistant Message.Content so thinking and tool_use
+	// blocks survive a page refresh.
+	blocks []json.RawMessage
 }
 
-func (t *thinkBlockTracker) thinking(text string) {
-	if !t.active {
-		t.active = true
-		t.emit("<think>\n")
-	}
-	t.emit(text)
+type blockKind int
+
+const (
+	blockNone blockKind = iota
+	blockOpenText
+	blockOpenThinking
+	blockOpenToolUse
+)
+
+type toolBlockState struct {
+	blockIdx int
+	id       string
+	name     string
+	args     strings.Builder
 }
 
-func (t *thinkBlockTracker) text(text string) {
-	if t.active {
-		t.active = false
-		t.emit("\n</think>\n\n")
+func newTurnStreamState(emitter *EventEmitter) *turnStreamState {
+	return &turnStreamState{
+		emitter: emitter,
+		tools:   make(map[int]*toolBlockState),
 	}
-	t.emit(text)
 }
 
-func (t *thinkBlockTracker) close() {
-	if t.active {
-		t.active = false
-		t.emit("\n</think>\n\n")
+// onText handles a streaming text delta. Closes any open thinking/tool block,
+// opens a text block if needed, then emits the text_delta.
+func (s *turnStreamState) onText(text string) {
+	if s.openKind != blockOpenText {
+		s.closeOpen()
+		s.openKind = blockOpenText
+		s.openIndex = s.nextBlockIdx
+		s.nextBlockIdx++
+		s.openBlockText.Reset()
+		s.emitter.TextBlockStart(s.openIndex)
 	}
+	s.openBlockText.WriteString(text)
+	s.fullText.WriteString(text)
+	s.emitter.TextDelta(s.openIndex, text)
+}
+
+// onThinking handles a streaming thinking delta.
+func (s *turnStreamState) onThinking(text string) {
+	if s.openKind != blockOpenThinking {
+		s.closeOpen()
+		s.openKind = blockOpenThinking
+		s.openIndex = s.nextBlockIdx
+		s.nextBlockIdx++
+		s.openBlockText.Reset()
+		s.emitter.ThinkingBlockStart(s.openIndex)
+	}
+	s.openBlockText.WriteString(text)
+	s.emitter.ThinkingDelta(s.openIndex, text)
+}
+
+// onToolStart handles the first delta for a new tool call. Synthesizes an
+// id if the transport didn't provide one.
+func (s *turnStreamState) onToolStart(ev *ToolStartEvent) {
+	if _, exists := s.tools[ev.Index]; exists {
+		return // duplicate start, ignore
+	}
+	s.closeOpen()
+	id := ev.ID
+	if id == "" {
+		id = SynthesizeToolUseID(ev.Index, ev.Name)
+	}
+	tb := &toolBlockState{
+		blockIdx: s.nextBlockIdx,
+		id:       id,
+		name:     ev.Name,
+	}
+	s.tools[ev.Index] = tb
+	s.toolOrder = append(s.toolOrder, ev.Index)
+	s.openKind = blockOpenToolUse
+	s.openIndex = s.nextBlockIdx
+	s.openToolIdx = ev.Index
+	s.nextBlockIdx++
+	s.emitter.ToolUseBlockStart(tb.blockIdx, tb.id, tb.name)
+}
+
+// onToolArgs handles a streaming arguments fragment for a known tool call.
+func (s *turnStreamState) onToolArgs(ev *ToolArgsEvent) {
+	tb, ok := s.tools[ev.Index]
+	if !ok {
+		// Defensive: transport sent args without a start. Skip.
+		return
+	}
+	tb.args.WriteString(ev.Partial)
+	s.emitter.InputJsonDelta(tb.blockIdx, ev.Partial)
+}
+
+// closeOpen emits content_block_stop for whatever block is currently open and
+// appends the resolved block to s.blocks. For tool blocks it echoes the
+// resolved input; for text/thinking it's a bare stop event. Empty
+// text/thinking blocks aren't persisted (no user-visible content).
+func (s *turnStreamState) closeOpen() {
+	switch s.openKind {
+	case blockOpenText, blockOpenThinking:
+		blockType, contentKey := BlockText, "text"
+		if s.openKind == blockOpenThinking {
+			blockType, contentKey = BlockThinking, "thinking"
+		}
+		if text := s.openBlockText.String(); text != "" {
+			block, _ := json.Marshal(map[string]any{"type": blockType, contentKey: text})
+			s.blocks = append(s.blocks, block)
+		}
+		s.emitter.BlockStop(s.openIndex)
+	case blockOpenToolUse:
+		if tb := s.tools[s.openToolIdx]; tb != nil {
+			args := strings.TrimSpace(tb.args.String())
+			if args == "" {
+				args = "{}"
+			}
+			block, _ := json.Marshal(map[string]any{
+				"type":  BlockToolUse,
+				"id":    tb.id,
+				"name":  tb.name,
+				"input": json.RawMessage(args),
+			})
+			s.blocks = append(s.blocks, block)
+			s.emitter.ToolUseBlockStop(tb.blockIdx, tb.id, tb.name, json.RawMessage(args))
+		}
+	}
+	s.openKind = blockNone
+}
+
+// finalize closes any still-open block at end of stream. Returns the resolved
+// tool calls in the order they were started.
+func (s *turnStreamState) finalize() []NormalizedToolCall {
+	s.closeOpen()
+	out := make([]NormalizedToolCall, 0, len(s.toolOrder))
+	for _, idx := range s.toolOrder {
+		tb := s.tools[idx]
+		args := strings.TrimSpace(tb.args.String())
+		if args == "" {
+			args = "{}"
+		}
+		out = append(out, NormalizedToolCall{
+			ID:        tb.id,
+			Name:      tb.name,
+			Arguments: json.RawMessage(args),
+		})
+	}
+	return out
 }
