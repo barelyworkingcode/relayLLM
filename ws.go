@@ -173,6 +173,8 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			h.handleClearSession(wc, msgBytes)
 		case "permission_response":
 			h.handlePermissionResponse(msgBytes)
+		case "set_permission_mode":
+			h.handleSetPermissionMode(wc, msgBytes)
 		case "terminal_create":
 			h.handleTerminalCreate(wc, msgBytes, boundTerminals)
 		case "join_terminal":
@@ -377,6 +379,49 @@ func (h *WSHub) handleClearSession(wc *wsConn, msgBytes []byte) {
 	if err := h.sessions.ClearSession(req.SessionID); err != nil {
 		sendWSError(wc, err.Error())
 	}
+}
+
+// handleSetPermissionMode toggles a session's Claude permission mode mid-flight.
+// Only Claude provider sessions support this — other providers ignore the
+// request with an error event so the client can surface the regression.
+func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+		Mode      string `json:"mode"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+
+	sess, ok := h.sessions.GetSession(req.SessionID)
+	if !ok {
+		sendWSError(wc, "session not found")
+		return
+	}
+
+	provider := sess.getProvider()
+	claude, isClaude := provider.(*ClaudeProvider)
+	if !isClaude {
+		sendWSError(wc, "permission mode toggle only supported for Claude provider")
+		return
+	}
+
+	if err := claude.SetPermissionMode(req.Mode); err != nil {
+		sendWSError(wc, err.Error())
+		return
+	}
+
+	sess.mu.Lock()
+	mode := sess.PermissionMode
+	sess.mu.Unlock()
+	h.SendToSession(req.SessionID, map[string]interface{}{
+		"type":      "mode_changed",
+		"sessionId": req.SessionID,
+		"mode":      mode,
+	})
 }
 
 func (h *WSHub) handlePermissionResponse(msgBytes []byte) {

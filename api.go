@@ -292,7 +292,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 
 // --- Permission Routes ---
 
-func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {
+func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sessions *SessionManager) {
 	mux.HandleFunc("POST /api/permission", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			SessionID string `json:"sessionId"`
@@ -306,6 +306,21 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager) {
 		}
 
 		slog.Info("permission request", "session", body.SessionID, "tool", body.ToolName, "toolUseId", body.ToolUseID)
+
+		// Short-circuit if the session's policy matches a deny/allow rule.
+		// Deny is checked first so it wins on overlap.
+		if sess, ok := sessions.GetSession(body.SessionID); ok && sess.Policy != nil {
+			if MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.DeniedTools) {
+				slog.Info("permission auto-denied by rule", "session", body.SessionID, "tool", body.ToolName)
+				writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "denied by project policy"})
+				return
+			}
+			if MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.AllowedTools) {
+				slog.Info("permission auto-allowed by rule", "session", body.SessionID, "tool", body.ToolName)
+				writeJSON(w, 200, PermissionDecision{Decision: "allow", Reason: "allowed by project policy"})
+				return
+			}
+		}
 
 		req, ch := perms.CreateRequest(body.SessionID, body.ToolName, body.ToolInput, body.ToolUseID)
 

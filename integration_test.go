@@ -40,7 +40,7 @@ func newTestServer(t *testing.T) *testServer {
 
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)
-	RegisterPermissionRoutes(mux, perms)
+	RegisterPermissionRoutes(mux, perms, sessions)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	server := httptest.NewServer(mux)
