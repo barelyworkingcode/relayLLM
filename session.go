@@ -31,6 +31,13 @@ type Session struct {
 	Headless     bool   `json:"headless,omitempty"`
 	McpToken     string `json:"-"` // project-scoped MCP token, not serialized
 
+	// Per-session Claude permission policy (parsed from Settings at create
+	// time). PermissionMode is the live mode — may be mutated by
+	// SetPermissionMode for mid-session toggle. Policy is the per-project
+	// allow/deny rule set forwarded by Eve.
+	PermissionMode string            `json:"permissionMode,omitempty"`
+	Policy         *PermissionPolicy `json:"policy,omitempty"`
+
 	provider   Provider
 	processing bool
 	mu         sync.Mutex
@@ -164,26 +171,41 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	}
 
 	var parsedSettings struct {
-		Headless bool `json:"headless"`
+		Headless         bool              `json:"headless"`
+		PermissionMode   string            `json:"permissionMode"`
+		PermissionPolicy *PermissionPolicy `json:"permissionPolicy"`
 	}
 	if settings != nil {
 		json.Unmarshal(settings, &parsedSettings)
 	}
 
+	// permissionMode is the live mode used at spawn time. Headless is a
+	// legacy synonym for "bypassPermissions" and stays the dominant signal
+	// when set, so existing call sites keep working.
+	mode := parsedSettings.PermissionMode
+	if parsedSettings.Headless {
+		mode = "bypassPermissions"
+	}
+	if parsedSettings.PermissionPolicy != nil && mode == "" {
+		mode = parsedSettings.PermissionPolicy.DefaultMode
+	}
+
 	session := &Session{
-		ID:           uuid.New().String(),
-		ProjectID:    projectID,
-		Name:         name,
-		Directory:    dir,
-		Model:        model,
-		ProviderType: providerType,
-		Settings:     settings,
-		SystemPrompt: systemPrompt,
-		McpToken:     mcpToken,
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
-		Messages:     []Message{},
-		Stats:        SessionStats{},
-		Headless:     parsedSettings.Headless,
+		ID:             uuid.New().String(),
+		ProjectID:      projectID,
+		Name:           name,
+		Directory:      dir,
+		Model:          model,
+		ProviderType:   providerType,
+		Settings:       settings,
+		SystemPrompt:   systemPrompt,
+		McpToken:       mcpToken,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		Messages:       []Message{},
+		Stats:          SessionStats{},
+		Headless:       parsedSettings.Headless,
+		PermissionMode: mode,
+		Policy:         parsedSettings.PermissionPolicy,
 	}
 
 	m.mu.Lock()

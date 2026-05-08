@@ -149,7 +149,7 @@ func main() {
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
-	RegisterPermissionRoutes(mux, perms)
+	RegisterPermissionRoutes(mux, perms, sessions)
 	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	RegisterGeneratedImageRoutes(mux, *dataDir)

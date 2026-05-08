@@ -94,14 +94,25 @@ func (p *ClaudeProvider) Start() error {
 		args = append(args, "--append-system-prompt", p.session.SystemPrompt)
 	}
 
-	var settings struct {
-		Headless bool `json:"headless"`
+	mode := p.session.PermissionMode
+	if p.session.Headless {
+		// Legacy synonym; takes precedence even if a different mode is set.
+		mode = "bypassPermissions"
 	}
-	if p.session.Settings != nil {
-		json.Unmarshal(p.session.Settings, &settings)
+	if mode != "" && mode != "default" {
+		args = append(args, "--permission-mode", mode)
 	}
-	if settings.Headless {
-		args = append(args, "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions")
+	if mode == "bypassPermissions" {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+
+	if p.session.Policy != nil {
+		if len(p.session.Policy.AllowedTools) > 0 {
+			args = append(args, "--allowedTools", strings.Join(p.session.Policy.AllowedTools, ","))
+		}
+		if len(p.session.Policy.DeniedTools) > 0 {
+			args = append(args, "--disallowedTools", strings.Join(p.session.Policy.DeniedTools, ","))
+		}
 	}
 
 	claudePath := resolveClaudePath()
@@ -116,7 +127,7 @@ func (p *ClaudeProvider) Start() error {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("RELAY_LLM_HOOK_TOKEN=%s", p.hookToken))
 	}
 
-	if settings.Headless {
+	if mode == "bypassPermissions" {
 		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")
 	}
 
@@ -368,6 +379,40 @@ func (p *ClaudeProvider) Kill() {
 
 func (p *ClaudeProvider) Alive() bool {
 	return p.alive.Load()
+}
+
+// SetPermissionMode kills the running Claude subprocess and respawns it with
+// the new --permission-mode flag, using --resume so the conversation history
+// is preserved (Claude reloads from ~/.claude/projects/.../<sid>.jsonl).
+//
+// Refuses to switch while the session is mid-turn — killing Claude there
+// drops the in-flight assistant response that --resume can't recover.
+//
+// Mode is one of: default, acceptEdits, plan, bypassPermissions.
+// Empty string is treated as "default".
+func (p *ClaudeProvider) SetPermissionMode(mode string) error {
+	switch mode {
+	case "", "default", "acceptEdits", "plan", "bypassPermissions":
+	default:
+		return fmt.Errorf("invalid permission mode: %q", mode)
+	}
+	if mode == "" {
+		mode = "default"
+	}
+
+	p.session.mu.Lock()
+	if p.session.processing {
+		p.session.mu.Unlock()
+		return fmt.Errorf("cannot change permission mode while session is generating; stop the response first")
+	}
+	p.session.PermissionMode = mode
+	p.session.Headless = (mode == "bypassPermissions")
+	p.session.mu.Unlock()
+
+	if p.Alive() {
+		p.Kill()
+	}
+	return p.Start()
 }
 
 func (p *ClaudeProvider) DeleteSession() error {
