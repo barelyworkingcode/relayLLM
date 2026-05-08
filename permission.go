@@ -1,10 +1,51 @@
 package main
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 )
+
+// PermissionPolicy is the per-session Claude permission policy. Sourced from
+// session.Settings.permissionPolicy at session creation. relayLLM uses it for
+// (a) Claude CLI flags at spawn time and (b) short-circuit evaluation in
+// RegisterPermissionRoutes (matched rules skip the WS roundtrip to Eve).
+type PermissionPolicy struct {
+	DefaultMode  string   `json:"defaultMode,omitempty"`
+	AllowedTools []string `json:"allowedTools,omitempty"`
+	DeniedTools  []string `json:"deniedTools,omitempty"`
+}
+
+// MatchToolRule reports whether toolName/toolInput matches any of the given
+// patterns. A bare pattern like "Read" matches any use of Read. A pattern
+// of the form "ToolName:argPrefix" matches uses where the serialized
+// toolInput starts with argPrefix (after a leading "{" and any whitespace).
+//
+// This intentionally accepts a small subset of Claude CLI's grammar — enough
+// for safe-tool allowlisting without re-implementing arg parsing.
+func MatchToolRule(toolName, toolInput string, patterns []string) bool {
+	for _, pat := range patterns {
+		colon := strings.IndexByte(pat, ':')
+		if colon < 0 {
+			if pat == toolName {
+				return true
+			}
+			continue
+		}
+		if pat[:colon] != toolName {
+			continue
+		}
+		prefix := pat[colon+1:]
+		// Hook payload toolInput is the raw JSON (e.g. {"command":"ls -la"}).
+		// Strip the outer braces and whitespace, then string-match on the prefix.
+		trimmed := strings.TrimLeft(strings.TrimPrefix(toolInput, "{"), " \t\n")
+		if strings.Contains(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // PermissionDecision represents a user's decision on a tool permission request.
 type PermissionDecision struct {
