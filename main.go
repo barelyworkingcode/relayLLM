@@ -53,9 +53,17 @@ func main() {
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(sessionStore, perms)
 
+	// Load provider + pty config up front. Terminal subsystem needs the pty
+	// map to seed defaults before serving requests.
+	openaiCfg, llamaCfg, ptyCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
 	// Terminal subsystem.
-	templateStore := NewTemplateStore(filepath.Join(*dataDir, "terminals", "templates.json"))
-	if err := templateStore.Load(); err != nil {
+	templateStore := NewTemplateStore(*dataDir)
+	if err := templateStore.Load(ptyCfg); err != nil {
 		slog.Error("failed to load terminal templates", "error", err)
 	}
 	terminalMgr := NewTerminalManager(templateStore)
@@ -86,13 +94,6 @@ func main() {
 	sessions.SetHookToken(*internalToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
-	// Load provider config. Prefers {dataDir}/config.json (unified), falls back
-	// to separate openai_endpoints.json + llama_models.json, then env vars.
-	openaiCfg, llamaCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
-	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
-	}
 	if len(openaiCfg.Endpoints) > 0 {
 		slog.Info("openai endpoints loaded", "count", len(openaiCfg.Endpoints), "names", openaiCfg.Names())
 	}
