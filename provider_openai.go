@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,11 @@ type OpenAIChatTransport struct {
 	model    string // bare model id (after prefix stripping)
 	client   *http.Client
 	settings BaseChatSettings
+
+	// iterCounter scopes synthesized tool_call IDs to a specific invocation of
+	// AppendAssistantWithToolCalls so two successive tool-using turns within
+	// one conversation don't reuse the same ID (which trips strict gateways).
+	iterCounter atomic.Uint64
 }
 
 // NewOpenAIChatTransport constructs a transport for a configured endpoint.
@@ -39,9 +45,12 @@ func NewOpenAIChatTransport(endpoint OpenAIEndpoint, model string, settings json
 
 func (t *OpenAIChatTransport) Name() string { return "openai:" + t.endpoint.Name }
 
-// Ping verifies the endpoint is reachable by calling /models. A healthy
-// OpenAI-compatible server responds to this with a 200 and a JSON body
-// listing available models.
+// Ping verifies the endpoint is reachable by calling /models. We accept any
+// 2xx as healthy, and 404 as "endpoint up but /models not implemented" — some
+// compat servers (custom proxies, certain llama.cpp builds) don't ship a
+// model-listing endpoint, and rejecting them here would make the transport
+// unusable for no good reason. 401/403 still surface as errors because they
+// indicate misconfigured auth that the chat call would also fail on.
 func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint.BaseURL+"/models", nil)
 	if err != nil {
@@ -54,10 +63,16 @@ func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 		return fmt.Errorf("not reachable at %s: %w", t.endpoint.BaseURL, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound:
+		slog.Debug("openai: /models not implemented, treating endpoint as healthy",
+			"endpoint", t.endpoint.Name)
+		return nil
+	default:
 		return fmt.Errorf("/models returned %d", resp.StatusCode)
 	}
-	return nil
 }
 
 // addAuth attaches a Bearer token when the endpoint has an API key set.
@@ -84,11 +99,13 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 
 	// We need to pair tool results back to the assistant tool_call that
 	// produced them. Track the most recent assistant tool_call IDs so we
-	// can attach tool_call_id to tool-role messages.
+	// can attach tool_call_id to tool-role messages. Any non-tool message
+	// resets the pairing window so a stale assistant from an earlier turn
+	// can't be re-used by tool messages that arrive after a user turn.
 	var lastAssistantCalls []NormalizedToolCall
 	var toolResultIdx int
 
-	for _, msg := range msgs {
+	for idx, msg := range msgs {
 		switch msg.Role {
 		case "tool":
 			entry := map[string]any{
@@ -101,7 +118,10 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 					entry["tool_call_id"] = id
 				} else {
 					// Synthesize a stable id if the source didn't track one.
-					entry["tool_call_id"] = fmt.Sprintf("call_%s_%d", msg.ToolName, toolResultIdx)
+					// Scope to the assistant's history position so this id
+					// matches whatever the assistant entry synthesized above.
+					entry["tool_call_id"] = synthesizeToolCallID(
+						scopeForHistoryMsg(idx-toolResultIdx-1), msg.ToolName, toolResultIdx)
 				}
 				toolResultIdx++
 			}
@@ -114,13 +134,17 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 			}
 			if norm := decodeNormalizedToolCalls(msg.ToolCalls); len(norm) > 0 {
 				// Mutate in place so any synthesized IDs propagate to the
-				// tool-result pairing pass below.
+				// tool-result pairing pass below. Scope the synthesized id by
+				// the assistant's history position so an identically-shaped
+				// turn that appears later in the conversation produces a
+				// different id (strict gateways reject duplicates).
+				scope := scopeForHistoryMsg(idx)
 				for i := range norm {
 					if norm[i].ID == "" {
-						norm[i].ID = synthesizeToolCallID(norm[i].Name, i)
+						norm[i].ID = synthesizeToolCallID(scope, norm[i].Name, i)
 					}
 				}
-				entry["tool_calls"] = buildOpenAIToolCallEntries(norm)
+				entry["tool_calls"] = buildOpenAIToolCallEntries(scope, norm)
 				lastAssistantCalls = norm
 			} else {
 				lastAssistantCalls = nil
@@ -129,6 +153,11 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 			result = append(result, entry)
 
 		default: // "user" and any other role
+			// Reset pairing window — a user turn ends the tool-result run that
+			// belongs to the previous assistant.
+			lastAssistantCalls = nil
+			toolResultIdx = 0
+
 			text := extractTextContent(msg)
 			if len(msg.Files) == 0 {
 				result = append(result, map[string]any{
@@ -202,10 +231,12 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 		"model":    t.model,
 		"messages": messages,
 		"stream":   true,
-		// Ask the server to include usage stats in the final chunk. Servers
-		// that don't support this field ignore it safely; servers that do
-		// (OpenAI, LM Studio) will emit a final chunk with {usage:{...}}.
-		"stream_options": map[string]any{"include_usage": true},
+	}
+	// stream_options.include_usage is a real OpenAI field that most compat
+	// servers ignore safely — but older LM Studio releases and stricter
+	// gateways 400 on unknown body fields, so gate it on Strict.
+	if !t.endpoint.Strict {
+		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if t.settings.Temperature != nil {
 		body["temperature"] = *t.settings.Temperature
@@ -213,15 +244,16 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 	if t.settings.TopP != nil {
 		body["top_p"] = *t.settings.TopP
 	}
-	if t.settings.TopK != nil {
+	if t.settings.TopK != nil && !t.endpoint.Strict {
 		// Not standard OpenAI, but most compatible servers (LM Studio, Ollama /v1)
-		// accept it as an extension. Harmless on servers that ignore it.
+		// accept it as an extension. OpenAI proper rejects unknown fields on
+		// stricter API versions, so omit it when Strict is on.
 		body["top_k"] = *t.settings.TopK
 	}
-	if t.settings.MinP != nil {
+	if t.settings.MinP != nil && !t.endpoint.Strict {
 		body["min_p"] = *t.settings.MinP
 	}
-	if t.settings.RepetitionPenalty != nil {
+	if t.settings.RepetitionPenalty != nil && !t.endpoint.Strict {
 		body["repetition_penalty"] = *t.settings.RepetitionPenalty
 	}
 	if t.settings.PresencePenalty != nil {
@@ -402,20 +434,25 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 
 // AppendAssistantWithToolCalls adds an assistant-with-tool-calls entry in
 // OpenAI's wire shape (each call has id, type, and function with string
-// arguments).
+// arguments). The iterCounter scope ensures that synthesized IDs from one
+// live turn don't collide with synthesized IDs from a later turn within the
+// same conversation.
 func (t *OpenAIChatTransport) AppendAssistantWithToolCalls(messages []map[string]any, text string, toolCalls []NormalizedToolCall) []map[string]any {
+	scope := scopeForIter(t.iterCounter.Add(1))
 	return append(messages, map[string]any{
 		"role":       "assistant",
 		"content":    text,
-		"tool_calls": buildOpenAIToolCallEntries(toolCalls),
+		"tool_calls": buildOpenAIToolCallEntries(scope, toolCalls),
 	})
 }
 
 // AppendToolResult adds a tool result entry with the required tool_call_id.
+// Falls back to a synthesized id only if the caller passed one with no ID —
+// in normal flow tc.ID is always populated by the time we get here.
 func (t *OpenAIChatTransport) AppendToolResult(messages []map[string]any, tc NormalizedToolCall, result string) []map[string]any {
 	id := tc.ID
 	if id == "" {
-		id = synthesizeToolCallID(tc.Name, 0)
+		id = synthesizeToolCallID(scopeForIter(t.iterCounter.Load()), tc.Name, 0)
 	}
 	return append(messages, map[string]any{
 		"role":         "tool",
@@ -426,22 +463,38 @@ func (t *OpenAIChatTransport) AppendToolResult(messages []map[string]any, tc Nor
 
 // synthesizeToolCallID produces a deterministic fallback id for tool calls
 // that didn't carry one (e.g. persisted sessions from before the refactor,
-// or transports that don't track ids natively). The format matches what
-// OpenAI's own ids look like enough that servers don't balk.
-func synthesizeToolCallID(name string, index int) string {
-	return fmt.Sprintf("call_%s_%d", name, index)
+// or transports that don't track ids natively). The scope makes the id
+// unique across iterations within a single conversation: without it, two
+// identical-looking turns would emit colliding "call_<name>_0" entries that
+// strict OpenAI gateways reject.
+func synthesizeToolCallID(scope, name string, index int) string {
+	if scope == "" {
+		return fmt.Sprintf("call_%s_%d", name, index)
+	}
+	return fmt.Sprintf("call_%s_%s_%d", scope, name, index)
 }
+
+// scopeForHistoryMsg builds a scope token from a message's index in the
+// persisted history. Stable across runs (deterministic in input), so the
+// same history rebuilt twice produces the same wire IDs.
+func scopeForHistoryMsg(idx int) string { return fmt.Sprintf("m%d", idx) }
+
+// scopeForIter builds a scope token from the transport's live iteration
+// counter. Used by AppendAssistantWithToolCalls so successive tool-using
+// turns in one conversation don't collide.
+func scopeForIter(n uint64) string { return fmt.Sprintf("t%d", n) }
 
 // buildOpenAIToolCallEntries converts normalized tool calls into the OpenAI
 // wire shape ({id, type:"function", function:{name, arguments}}). Used by
 // BuildMessages (reading persisted history) and AppendAssistantWithToolCalls
-// (running tool loop).
-func buildOpenAIToolCallEntries(toolCalls []NormalizedToolCall) []map[string]any {
+// (running tool loop). The scope parameter feeds synthesizeToolCallID for
+// entries with empty IDs; pass "" if you don't need scoping.
+func buildOpenAIToolCallEntries(scope string, toolCalls []NormalizedToolCall) []map[string]any {
 	out := make([]map[string]any, len(toolCalls))
 	for i, n := range toolCalls {
 		id := n.ID
 		if id == "" {
-			id = synthesizeToolCallID(n.Name, i)
+			id = synthesizeToolCallID(scope, n.Name, i)
 		}
 		args := string(n.Arguments)
 		if args == "" {
@@ -462,10 +515,16 @@ func buildOpenAIToolCallEntries(toolCalls []NormalizedToolCall) []map[string]any
 // FetchOpenAIModels queries /v1/models on the endpoint and returns ModelInfo
 // entries. Model values are prefixed with the endpoint name so the session
 // layer can route them back to the right endpoint at session-create time.
-func FetchOpenAIModels(endpoint OpenAIEndpoint) []ModelInfo {
+//
+// Returns nil for any error path (unreachable endpoint, non-2xx, malformed
+// JSON). The caller treats nil as "no models from this endpoint" rather than
+// a hard error, since the model picker fans out across many endpoints in
+// parallel and one being down shouldn't break the others.
+func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) []ModelInfo {
 	client := &http.Client{Timeout: 3 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, endpoint.BaseURL+"/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {
+		slog.Warn("openai: model discovery: build request", "endpoint", endpoint.Name, "error", err)
 		return nil
 	}
 	if endpoint.APIKey != "" {
@@ -473,12 +532,12 @@ func FetchOpenAIModels(endpoint OpenAIEndpoint) []ModelInfo {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Debug("openai: model discovery failed", "endpoint", endpoint.Name, "error", err)
+		slog.Warn("openai: model discovery: unreachable", "endpoint", endpoint.Name, "error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("openai: model discovery returned non-OK status", "endpoint", endpoint.Name, "status", resp.StatusCode)
+		slog.Warn("openai: model discovery: non-OK status", "endpoint", endpoint.Name, "status", resp.StatusCode)
 		return nil
 	}
 	var result struct {
@@ -487,6 +546,7 @@ func FetchOpenAIModels(endpoint OpenAIEndpoint) []ModelInfo {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Warn("openai: model discovery: decode body", "endpoint", endpoint.Name, "error", err)
 		return nil
 	}
 	models := make([]ModelInfo, 0, len(result.Data))

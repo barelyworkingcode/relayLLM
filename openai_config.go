@@ -4,11 +4,19 @@ package main
 // Multiple endpoints can be configured side-by-side (Ollama's /v1, LM Studio,
 // OMLX, OpenAI proper, etc.). The Name field is used as a routing prefix on
 // model identifiers (e.g. "lmstudio/qwen2.5-7b").
+//
+// Set Strict=true for endpoints that 400 on unknown body fields (OpenAI proper
+// in some API versions, Azure OpenAI, stricter gateways). When strict, the
+// transport omits stream_options and the non-standard sampling fields (top_k,
+// min_p, repetition_penalty). Defaults to false to preserve compatibility
+// with the wider compat-server ecosystem (LM Studio, Ollama /v1, oMLX), which
+// accepts those fields silently.
 type OpenAIEndpoint struct {
-	Name    string `json:"name"`    // routing prefix, e.g. "lmstudio"
-	BaseURL string `json:"baseURL"` // e.g. "http://localhost:1234/v1"
-	APIKey  string `json:"apiKey"`  // optional; sent as "Authorization: Bearer ..."
-	Group   string `json:"group"`   // display group in model picker; defaults to Name
+	Name    string `json:"name"`             // routing prefix, e.g. "lmstudio"
+	BaseURL string `json:"baseURL"`          // e.g. "http://localhost:1234/v1"
+	APIKey  string `json:"apiKey"`           // optional; sent as "Authorization: Bearer ..."
+	Group   string `json:"group"`            // display group in model picker; defaults to Name
+	Strict  bool   `json:"strict,omitempty"` // gate non-standard request fields
 }
 
 // OpenAIConfig is the top-level config file structure.

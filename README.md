@@ -310,6 +310,18 @@ Both sections are optional. If `config.json` is absent, falls back to separate `
 
 The `openai` section configures OpenAI-compatible servers (LM Studio, Ollama /v1, OMLX, etc.). Each endpoint's `name` is the routing prefix — users select models as `{name}/{model-id}` (e.g. `lmstudio/qwen2.5-coder-32b`).
 
+Per-endpoint fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Routing prefix used in model IDs (`{name}/{model}`) |
+| `baseURL` | yes | Endpoint base URL, e.g. `http://localhost:1234/v1`. Trailing slash is stripped |
+| `apiKey` | no | Sent as `Authorization: Bearer ...`. Omit for unauthenticated servers (local Ollama, llama.cpp) |
+| `group` | no | Display group in the model picker. Defaults to `name` |
+| `strict` | no | When `true`, omits non-standard request fields (`stream_options`, `top_k`, `min_p`, `repetition_penalty`). Set for OpenAI proper, Azure OpenAI, and stricter gateways that 400 on unknown body fields. Defaults to `false` for compatibility with LM Studio, Ollama /v1, oMLX, llama.cpp, which accept these fields silently |
+
+Reachability is verified at session start via `GET /models`. Any 2xx response is healthy; 404 is treated as "endpoint up but `/models` not implemented" so servers without a model-listing endpoint remain usable. 401/403 fail fast.
+
 ### llama.cpp / llama-server
 
 The `llama-server` section configures managed llama-server processes. Every key in a model entry except `alias` maps directly to a `--{key}` llama-server CLI flag. Boolean `true` emits the flag, `false` omits it, numbers and strings become `--key value`. Any llama-server flag works without code changes — `mmproj`, `mlock`, `cont-batching`, future flags, etc.
@@ -344,7 +356,11 @@ The proxy reads the `model` field, launches or reuses the right llama-server, an
 
 ## Data Storage
 
-Default: `~/.config/relayLLM/`. Override with `--data-dir` or `RELAY_LLM_DATA`.
+Default is `os.UserConfigDir()/relayLLM`:
+- macOS: `~/Library/Application Support/relayLLM/`
+- Linux: `~/.config/relayLLM/`
+
+Override with `--data-dir` or `RELAY_LLM_DATA`.
 
 - `config.json` -- unified provider config (see [Provider Configuration](#provider-configuration))
 - `projects.json` -- project definitions

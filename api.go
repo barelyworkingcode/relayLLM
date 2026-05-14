@@ -160,11 +160,12 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 
 		if openaiCfg != nil {
 			openai = make([][]ModelInfo, len(openaiCfg.Endpoints))
+			ctx := r.Context()
 			for i, endpoint := range openaiCfg.Endpoints {
 				wg.Add(1)
 				go func(i int, ep OpenAIEndpoint) {
 					defer wg.Done()
-					openai[i] = FetchOpenAIModels(ep)
+					openai[i] = FetchOpenAIModels(ctx, ep)
 				}(i, endpoint)
 			}
 		}
