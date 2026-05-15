@@ -24,6 +24,7 @@ builtin_tools.go     Built-in tool registry (generate_image) + dynamic schema
 terminal_template.go Terminal template types + JSON file store (built-in + custom)
 terminal_session.go  Terminal session with PTY management (creack/pty)
 terminal_manager.go  Terminal CRUD + lifecycle management
+terminal_log.go      On-disk head/tail log files for PTY replay after eviction
 api.go               HTTP routes (projects, sessions, terminals, permissions, generated images)
 ws.go                WebSocket server (streaming events to Eve, terminal I/O)
 permission.go        Permission request/response tracking
@@ -63,8 +64,9 @@ POST           /api/sessions/:id/message — send message (sync, for HTTP client
 DELETE         /api/sessions/:id   — end session
 GET/POST       /api/terminal/templates     — list/create terminal templates
 GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
-GET/POST       /api/terminals              — list/create terminal instances
+GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
 DELETE         /api/terminals/:id          — close terminal
+GET            /api/terminals/:id/log      — stitched head+tail of PTY's raw byte stream (works after session eviction)
 POST           /api/permission     — hook binary posts here, held open until user decides
 GET            /api/generated/:filename — serve generated images (ComfyUI output)
 GET/POST       /api/tasks          — list/create tasks (proxy to relayScheduler)
@@ -91,7 +93,9 @@ PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via We
 - **Templates**: Built-in (Claude Code, OpenCode, Shell) + custom via API. `IdleTimeout` field (minutes, default 1440 = 24h).
 - **Idle timeout**: When all viewers disconnect, an idle timer starts. If no viewer reconnects before it fires, the terminal is auto-closed. Configurable per template.
 - **Color**: PTY spawned with `TERM=xterm-256color` and `COLORTERM=truecolor` for full 24-bit color.
-- **Scrollback**: 100KB ring buffer per terminal, replayed on reconnect.
+- **Scrollback**: 100KB in-memory ring buffer per terminal, replayed on reconnect.
+- **On-disk log**: Each session's raw byte stream is also teed to `{dataDir}/terminal_logs/{id}.head.log` (first 64KB) + `{id}.tail.log` (rolling, capped at ~960KB → 1MB total). Files survive the session being evicted from memory. The ANSI-aware "head + tail" split preserves the stream's initial mode-setting (cursor home, SGR resets) so xterm replay renders correctly even when the middle was truncated. Used by `GET /api/terminals/{id}/log`. A daily sweeper deletes files older than 30 days; bounded by a 500MB total cap as a safety net.
+- **Per-task `extraArgs`**: `POST /api/terminals` accepts `extraArgs []string` that are appended to the template's argv after `${PROJECT_PATH}` / `${RELAY_TOKEN}` / `${SKILL_PATH}` substitution. Same substitution applies to extras. Used by relayScheduler to schedule shell-style tasks against a shared template.
 
 ## Data
 

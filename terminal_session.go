@@ -33,12 +33,24 @@ type TerminalSession struct {
 	cols uint16
 	rows uint16
 
+	// Additional argv tokens appended after the template's resolved Args.
+	// Same ${PROJECT_PATH}/${RELAY_TOKEN}/${SKILL_PATH} substitution applies.
+	// Used by scheduled PTY tasks to pass per-task commands into a shared
+	// template (e.g. a "shell" template invoked with ["-c","npm test"]).
+	extraArgs []string
+
 	cmd        *exec.Cmd
 	ptmx       *os.File // PTY master
 	mu         sync.Mutex
 	alive      atomic.Bool
 	scrollback *scrollBuffer
 	waitDone   chan struct{}
+
+	// On-disk capture of the raw byte stream. Survives session eviction so
+	// the output is replayable after a long-running PTY task exits and the
+	// in-memory scrollback is gone. nil disables disk logging.
+	logDir string
+	logger *terminalLogger
 
 	// Idle timeout: kills terminal after no viewers for this duration.
 	idleTimeout time.Duration
@@ -63,8 +75,11 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 		return err
 	}
 
-	args := make([]string, 0, len(tmpl.Args))
+	args := make([]string, 0, len(tmpl.Args)+len(s.extraArgs))
 	for _, a := range tmpl.Args {
+		args = append(args, subs.expand(a))
+	}
+	for _, a := range s.extraArgs {
 		args = append(args, subs.expand(a))
 	}
 
@@ -112,6 +127,17 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 	s.scrollback = newScrollBuffer(terminalScrollbackSize)
 	s.waitDone = make(chan struct{})
 
+	if s.logDir != "" {
+		lg, err := newTerminalLogger(s.logDir, s.ID)
+		if err != nil {
+			// Disk logging is best-effort: if we can't open files we still
+			// let the terminal run, just without replay support.
+			slog.Warn("terminal log open failed", "id", s.ID, "error", err)
+		} else {
+			s.logger = lg
+		}
+	}
+
 	go s.readLoop()
 	go s.waitForExit()
 
@@ -120,6 +146,7 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 }
 
 func (s *TerminalSession) readLoop() {
+	defer s.logger.Close() // nil-safe; flushes and syncs the log files.
 	buf := make([]byte, terminalReadBufSize)
 	for {
 		n, err := s.ptmx.Read(buf)
@@ -128,6 +155,9 @@ func (s *TerminalSession) readLoop() {
 			copy(chunk, buf[:n])
 
 			s.scrollback.Write(chunk)
+			if s.logger != nil {
+				s.logger.Write(chunk)
+			}
 
 			if s.onOutput != nil {
 				s.onOutput(s.ID, chunk)
@@ -147,9 +177,17 @@ func (s *TerminalSession) waitForExit() {
 	s.alive.Store(false)
 
 	exitCode := 0
+	var signalName string
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
+			// ExitCode == -1 means the process was signaled rather than
+			// exiting normally. Surface the signal name in logs so ops can
+			// distinguish "process crashed" from "scheduler timed out and
+			// killed it".
+			if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				signalName = ws.Signal().String()
+			}
 		}
 	}
 
@@ -160,7 +198,11 @@ func (s *TerminalSession) waitForExit() {
 
 	close(s.waitDone)
 
-	slog.Info("terminal exited", "id", s.ID, "exitCode", exitCode)
+	if signalName != "" {
+		slog.Info("terminal exited", "id", s.ID, "exitCode", exitCode, "signal", signalName)
+	} else {
+		slog.Info("terminal exited", "id", s.ID, "exitCode", exitCode)
+	}
 
 	if s.onExit != nil {
 		s.onExit(s.ID, exitCode)

@@ -66,7 +66,31 @@ func main() {
 	if err := templateStore.Load(ptyCfg); err != nil {
 		slog.Error("failed to load terminal templates", "error", err)
 	}
-	terminalMgr := NewTerminalManager(templateStore)
+	terminalLogDir := filepath.Join(*dataDir, "terminal_logs")
+	if err := os.MkdirAll(terminalLogDir, 0700); err != nil {
+		slog.Error("failed to create terminal log directory", "path", terminalLogDir, "error", err)
+		os.Exit(1)
+	}
+	terminalMgr := NewTerminalManager(templateStore, terminalLogDir)
+
+	// Daily log GC. 30 days time-based with a 500 MB byte cap as a safety
+	// net. Runs immediately at startup to catch up after a long downtime,
+	// then once per 24h. Idle process — no shutdown coordination needed.
+	go func() {
+		const (
+			sweepAge        = 30 * 24 * time.Hour
+			sweepMaxBytes   = int64(500 * 1024 * 1024)
+			sweepInterval   = 24 * time.Hour
+		)
+		for {
+			if removed, err := sweepTerminalLogs(terminalLogDir, sweepAge, sweepMaxBytes); err != nil {
+				slog.Warn("terminal log sweep failed", "error", err)
+			} else if removed > 0 {
+				slog.Info("terminal log sweep", "removed", removed)
+			}
+			time.Sleep(sweepInterval)
+		}
+	}()
 
 	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
