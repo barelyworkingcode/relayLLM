@@ -66,10 +66,12 @@ func parseLlamaRawModels(cfg *LlamaConfig, source string) error {
 			}
 			args[k] = v
 		}
-		// Resolve relative model paths against modelDir.
+		// Resolve relative file paths against modelDir.
 		if modelDir != "" {
-			if m, ok := args["model"].(string); ok && !filepath.IsAbs(m) {
-				args["model"] = filepath.Join(modelDir, m)
+			for _, k := range []string{"model", "mmproj"} {
+				if v, ok := args[k].(string); ok && !filepath.IsAbs(v) {
+					args[k] = filepath.Join(modelDir, v)
+				}
 			}
 		}
 		cfg.Models = append(cfg.Models, LlamaModelConfig{Alias: alias, Args: args})
@@ -230,15 +232,19 @@ func (m *LlamaServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) 
 }
 
 // ListModels returns ModelInfo entries for all configured models.
+// Attachment support is per-model: present only when the user configured
+// an mmproj (multimodal projector) for the underlying llama-server.
 func (m *LlamaServerManager) ListModels() []ModelInfo {
 	models := make([]ModelInfo, len(m.config.Models))
 	for i, cfg := range m.config.Models {
 		value := "llama/" + cfg.Alias
+		_, hasMmproj := cfg.Args["mmproj"]
 		models[i] = ModelInfo{
-			Label:    value,
-			Value:    value,
-			Group:    "llama.cpp",
-			Provider: "llama",
+			Label:               value,
+			Value:               value,
+			Group:               "llama.cpp",
+			Provider:            "llama",
+			SupportsAttachments: hasMmproj,
 		}
 	}
 	return models

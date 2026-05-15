@@ -173,7 +173,7 @@ func (t *OllamaChatTransport) PostChat(ctx context.Context, messages []map[strin
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, decodeChatError(resp.StatusCode, bodyBytes)
 	}
 	return resp, nil
 }

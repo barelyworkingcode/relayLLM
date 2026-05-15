@@ -402,10 +402,13 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 		return
 	}
 
-	provider := sess.getProvider()
-	claude, isClaude := provider.(*ClaudeProvider)
-	if !isClaude {
-		sendWSError(wc, "permission mode toggle only supported for Claude provider")
+	if !CapabilitiesForProvider(sess.ProviderType).SupportsPermissions {
+		sendWSError(wc, "permission mode toggle not supported for this provider")
+		return
+	}
+	claude, ok := sess.getProvider().(*ClaudeProvider)
+	if !ok {
+		sendWSError(wc, "permission mode toggle not supported for this provider")
 		return
 	}
 
