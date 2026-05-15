@@ -16,6 +16,12 @@ import (
 // On disk inside config.json's `pty` map the entries omit `id` (the map key
 // IS the id) and `builtIn` (computed from protectedTemplateIDs at API time).
 // In-memory copies returned by Get/List have both populated for consumers.
+//
+// Relay-managed fields (UseRelayToken, AutoRegenSkills, SkillPath, EnvPassthrough)
+// opt the template into spawn-time resolution via relay's bridge ResolvePtyEnv.
+// Args may reference ${SKILL_PATH}, ${RELAY_TOKEN}, ${PROJECT_PATH}; SkillPath
+// may reference ${project.path}. See terminal_session.go:Start for the
+// substitution rules.
 type TerminalTemplate struct {
 	ID          string            `json:"id,omitempty"`
 	Name        string            `json:"name"`
@@ -26,6 +32,12 @@ type TerminalTemplate struct {
 	Icon        string            `json:"icon,omitempty"`
 	BuiltIn     bool              `json:"builtIn,omitempty"`
 	IdleTimeout int               `json:"idleTimeout,omitempty"` // minutes, 0 = default (1440 = 24h)
+
+	// Relay-managed PTY fields. Zero values mean "not relay-managed".
+	UseRelayToken   bool     `json:"useRelayToken,omitempty"`
+	AutoRegenSkills string   `json:"autoRegenSkills,omitempty"` // "always" | "skipIfExists" | "never"
+	SkillPath       string   `json:"skillPath,omitempty"`       // supports ${project.path}
+	EnvPassthrough  []string `json:"env_passthrough,omitempty"`
 }
 
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
