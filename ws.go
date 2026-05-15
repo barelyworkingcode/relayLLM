@@ -636,6 +636,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 
 	scrollback := session.ScrollbackBytes()
 	state, exitCode := session.Snapshot()
+	cols, rows := session.Size()
 	sendJSON(wc, map[string]interface{}{
 		"type":       "terminal_joined",
 		"terminalId": tid,
@@ -643,6 +644,8 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 		"name":       session.Name,
 		"directory":  session.Directory,
 		"state":      state,
+		"cols":       cols,
+		"rows":       rows,
 		"scrollback": base64.StdEncoding.EncodeToString(scrollback),
 	})
 
