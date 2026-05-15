@@ -33,7 +33,7 @@ func newTestServer(t *testing.T) *testServer {
 	})
 
 	templateStore := NewTemplateStore(dataDir + "/terminals/templates.json")
-	terminalMgr := NewTerminalManager(templateStore)
+	terminalMgr := NewTerminalManager(templateStore, "")
 	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
 	perms.sink = wsHub

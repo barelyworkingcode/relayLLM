@@ -446,11 +446,12 @@ func (h *WSHub) handlePermissionResponse(msgBytes []byte) {
 
 func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
 	var req struct {
-		TemplateID string `json:"templateId"`
-		Name       string `json:"name"`
-		Directory  string `json:"directory"`
-		Cols       uint16 `json:"cols"`
-		Rows       uint16 `json:"rows"`
+		TemplateID string   `json:"templateId"`
+		Name       string   `json:"name"`
+		Directory  string   `json:"directory"`
+		Cols       uint16   `json:"cols"`
+		Rows       uint16   `json:"rows"`
+		ExtraArgs  []string `json:"extraArgs"`
 	}
 	json.Unmarshal(msgBytes, &req)
 
@@ -459,7 +460,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 		return
 	}
 
-	session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows)
+	session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows, req.ExtraArgs)
 	if err != nil {
 		sendWSError(wc, err.Error())
 		return
