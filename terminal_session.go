@@ -174,6 +174,20 @@ func (s *TerminalSession) Resize(cols, rows uint16) error {
 	return pty.Setsize(s.ptmx, &pty.Winsize{Rows: rows, Cols: cols})
 }
 
+// Size returns the current PTY dimensions, defaulting to 80x24 if never set.
+func (s *TerminalSession) Size() (cols, rows uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cols, rows = s.cols, s.rows
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	return
+}
+
 // Close gracefully shuts down the terminal process.
 // Sends SIGTERM, waits 3s, then SIGKILL.
 func (s *TerminalSession) Close() {
