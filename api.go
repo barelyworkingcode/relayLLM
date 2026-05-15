@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -260,17 +262,18 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 
 	mux.HandleFunc("POST /api/terminals", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			TemplateID string `json:"templateId"`
-			Name       string `json:"name"`
-			Directory  string `json:"directory"`
-			Cols       uint16 `json:"cols"`
-			Rows       uint16 `json:"rows"`
+			TemplateID string   `json:"templateId"`
+			Name       string   `json:"name"`
+			Directory  string   `json:"directory"`
+			Cols       uint16   `json:"cols"`
+			Rows       uint16   `json:"rows"`
+			ExtraArgs  []string `json:"extraArgs"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		session, err := terminals.Create(body.TemplateID, body.Name, body.Directory, body.Cols, body.Rows)
+		session, err := terminals.Create(body.TemplateID, body.Name, body.Directory, body.Cols, body.Rows, body.ExtraArgs)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return
@@ -288,6 +291,38 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 	mux.HandleFunc("DELETE /api/terminals/{id}", func(w http.ResponseWriter, r *http.Request) {
 		terminals.Close(r.PathValue("id"))
 		writeJSON(w, 200, map[string]bool{"success": true})
+	})
+
+	// Stitched head + tail of the PTY's raw byte stream. Works whether the
+	// session is live, exited but still resident, or evicted from memory —
+	// the files persist on disk until the log sweeper removes them.
+	mux.HandleFunc("GET /api/terminals/{id}/log", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		dir := terminals.LogDir()
+		if dir == "" {
+			http.Error(w, "log persistence disabled", http.StatusNotFound)
+			return
+		}
+		head, tail, err := openTerminalLogReaders(dir, id)
+		if err != nil {
+			if errors.Is(err, errTerminalLogNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		for _, f := range []*os.File{head, tail} {
+			if f == nil {
+				continue
+			}
+			if _, cerr := io.Copy(w, f); cerr != nil {
+				slog.Debug("terminal log stream failed", "id", id, "error", cerr)
+			}
+			_ = f.Close()
+		}
 	})
 }
 

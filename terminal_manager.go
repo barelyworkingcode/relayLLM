@@ -16,15 +16,28 @@ type TerminalManager struct {
 	terminals map[string]*TerminalSession
 	templates *TemplateStore
 
+	// logDir is where each session's head/tail log files live. Empty disables
+	// disk logging (used by tests that don't need replay).
+	logDir string
+
 	onOutput func(terminalID string, data []byte)
 	onExit   func(terminalID string, exitCode int)
 }
 
-func NewTerminalManager(templates *TemplateStore) *TerminalManager {
+// NewTerminalManager constructs a manager. logDir is the directory under
+// which per-session log files are written; pass "" to disable disk logging.
+func NewTerminalManager(templates *TemplateStore, logDir string) *TerminalManager {
 	return &TerminalManager{
 		terminals: make(map[string]*TerminalSession),
 		templates: templates,
+		logDir:    logDir,
 	}
+}
+
+// LogDir returns the directory where per-session log files are written. Used
+// by the /api/terminals/{id}/log handler to read post-exit replays.
+func (m *TerminalManager) LogDir() string {
+	return m.logDir
 }
 
 func (m *TerminalManager) SetOutputHandler(fn func(terminalID string, data []byte)) {
@@ -35,8 +48,10 @@ func (m *TerminalManager) SetExitHandler(fn func(terminalID string, exitCode int
 	m.onExit = fn
 }
 
-// Create starts a new terminal session from a template.
-func (m *TerminalManager) Create(templateID, name, directory string, cols, rows uint16) (*TerminalSession, error) {
+// Create starts a new terminal session from a template. extraArgs is
+// appended to the template's resolved Args (after substitution) — used by
+// scheduled tasks to pass per-task commands through a shared template.
+func (m *TerminalManager) Create(templateID, name, directory string, cols, rows uint16, extraArgs []string) (*TerminalSession, error) {
 	tmpl, ok := m.templates.Get(templateID)
 	if !ok {
 		return nil, fmt.Errorf("terminal template not found: %s", templateID)
@@ -65,6 +80,8 @@ func (m *TerminalManager) Create(templateID, name, directory string, cols, rows 
 		cols:        cols,
 		rows:        rows,
 		idleTimeout: time.Duration(idleMinutes) * time.Minute,
+		extraArgs:   extraArgs,
+		logDir:      m.logDir,
 		onOutput:    m.onOutput,
 		onExit:      m.onExit,
 		onIdle:      func(id string) { m.Close(id) },
