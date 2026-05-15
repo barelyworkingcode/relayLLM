@@ -221,9 +221,29 @@ func (t *OpenAIChatTransport) PostChat(ctx context.Context, messages []map[strin
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, decodeChatError(resp.StatusCode, bodyBytes)
 	}
 	return resp, nil
+}
+
+// decodeChatError turns a non-2xx response body into a user-facing error.
+// OpenAI-compatible servers return {"error":{"message":...}}; we surface that
+// directly and translate known patterns (e.g. llama-server's image rejection
+// when the model can't parse the attached image) into actionable messages.
+func decodeChatError(status int, body []byte) error {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	msg := strings.TrimSpace(string(body))
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error.Message != "" {
+		msg = parsed.Error.Message
+	}
+	if strings.Contains(msg, "Failed to load image") {
+		return fmt.Errorf("couldn't read the attached image — the model may not support this format. Try a standard JPEG or PNG (not CMYK, not progressive)")
+	}
+	return fmt.Errorf("HTTP %d: %s", status, msg)
 }
 
 func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []map[string]any) map[string]any {

@@ -546,6 +546,14 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	if err := provider.SendMessage(text, files); err != nil {
 		session.mu.Lock()
 		session.processing = false
+		// Roll back the just-appended user message when it carried attachments
+		// and the provider rejected it synchronously — otherwise a rejected
+		// image stays in history and poisons every subsequent request.
+		if len(files) > 0 {
+			if n := len(session.Messages); n > 0 && session.Messages[n-1].Role == "user" {
+				session.Messages = session.Messages[:n-1]
+			}
+		}
 		session.mu.Unlock()
 		return err
 	}

@@ -129,10 +129,12 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 // --- Models Route ---
 
 type ModelInfo struct {
-	Label    string `json:"label"`
-	Value    string `json:"value"`
-	Group    string `json:"group"`
-	Provider string `json:"provider"`
+	Label               string `json:"label"`
+	Value               string `json:"value"`
+	Group               string `json:"group"`
+	Provider            string `json:"provider"`
+	SupportsPermissions bool   `json:"supportsPermissions"`
+	SupportsAttachments bool   `json:"supportsAttachments"`
 }
 
 func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager) {
@@ -179,6 +181,14 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		}
 		if llamaMgr != nil {
 			models = append(models, llamaMgr.ListModels()...)
+		}
+
+		// Stamp provider-default capabilities, OR-ing with any per-source
+		// values (e.g. llama uses per-model mmproj detection).
+		for i := range models {
+			caps := CapabilitiesForProvider(models[i].Provider)
+			models[i].SupportsPermissions = models[i].SupportsPermissions || caps.SupportsPermissions
+			models[i].SupportsAttachments = models[i].SupportsAttachments || caps.SupportsAttachments
 		}
 
 		writeJSON(w, 200, map[string]interface{}{
