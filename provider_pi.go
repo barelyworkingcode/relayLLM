@@ -81,6 +81,12 @@ type PiProvider struct {
 	openToolName    string          // tool_use only
 	openToolArgs    strings.Builder // tool_use input_json fragments
 	allBlocks       []map[string]any
+	// Tool names indexed by id, harvested from tool_execution_start /
+	// tool_execution_end events. Pi's assistantMessageEvent.toolcall_start
+	// doesn't reliably carry the name (some pi versions only put it on the
+	// top-level tool_execution events); this is the fallback so we never
+	// emit a tool_use block with an empty name.
+	toolNamesByID map[string]string
 
 	lastActivity atomic.Int64
 	stopIdle     chan struct{}
@@ -103,6 +109,7 @@ func NewPiProvider(session *Session, handler EventHandler, provider, modelID, da
 		dataDir:       dataDir,
 		rpcPending:    make(map[string]chan json.RawMessage),
 		piIdxToRelay:  make(map[int]int),
+		toolNamesByID: make(map[string]string),
 	}
 	p.emitter = NewEventEmitter(handler)
 	if cfg != nil {
@@ -458,7 +465,31 @@ func (p *PiProvider) resetTurnState() {
 	p.openToolName = ""
 	p.openToolArgs.Reset()
 	p.allBlocks = nil
+	p.toolNamesByID = make(map[string]string)
 	p.streamMu.Unlock()
+}
+
+// rememberToolName records a tool's name for later lookup by id. Pi emits the
+// name on tool_execution_start / tool_execution_end events at the top level;
+// captureToolName scrapes those so the assistantMessageEvent.toolcall_start
+// path can fall back when its nested toolCall payload doesn't include a name.
+func (p *PiProvider) rememberToolName(id, name string) {
+	if id == "" || name == "" {
+		return
+	}
+	p.streamMu.Lock()
+	p.toolNamesByID[id] = name
+	p.streamMu.Unlock()
+}
+
+func (p *PiProvider) lookupToolName(id string) string {
+	if id == "" {
+		return ""
+	}
+	p.streamMu.Lock()
+	name := p.toolNamesByID[id]
+	p.streamMu.Unlock()
+	return name
 }
 
 // flushOpenBlock closes any open block at turn end (defensive — pi should
@@ -494,9 +525,22 @@ func (p *PiProvider) translate(eventType string, raw json.RawMessage) {
 	case "agent_end":
 		p.translateAgentEnd(raw)
 
-	case "message_start", "message_end", "turn_start", "turn_end", "tool_execution_start", "tool_execution_update":
-		// Coarser bookkeeping events — already covered by the finer
-		// message_update / tool_execution_end translations. Skip silently.
+	case "tool_execution_start", "tool_execution_update":
+		// Pi emits the canonical {toolCallId, toolName} pair on these
+		// top-level events. Harvest them so toolcall_start (whose nested
+		// toolCall payload is unreliable across pi versions) can fall back
+		// to a real name instead of leaving the wire field empty.
+		var ev struct {
+			ToolCallID string `json:"toolCallId"`
+			ToolName   string `json:"toolName"`
+		}
+		if json.Unmarshal(raw, &ev) == nil {
+			p.rememberToolName(ev.ToolCallID, ev.ToolName)
+		}
+
+	case "message_start", "message_end", "turn_start", "turn_end":
+		// Bookkeeping events — already covered by the finer message_update
+		// translations. Skip silently.
 
 	case "auto_retry_start", "auto_retry_end":
 		p.emitRetryNotice(eventType, raw)
@@ -562,7 +606,11 @@ func shortenError(s string) string {
 }
 
 // piContentBlock describes the relevant subset of an assistantMessageEvent
-// delta that we care about for canonicalization.
+// delta. Pi has shipped two schemas for tool calls: older versions emit a
+// nested toolCall:{id, name} object on toolcall_start; newer versions emit
+// flat toolCallId/toolName fields at the assistantMessageEvent level (the
+// same shape its tool_execution_* events use). resolveToolIdentity reads
+// whichever is populated, with a final fallback to the harvested map.
 type piContentBlock struct {
 	Type         string          `json:"type"`
 	ContentIndex int             `json:"contentIndex"`
@@ -570,6 +618,8 @@ type piContentBlock struct {
 	Content      string          `json:"content,omitempty"`
 	Reason       string          `json:"reason,omitempty"`
 	ToolCall     *piToolCall     `json:"toolCall,omitempty"`
+	ToolCallID   string          `json:"toolCallId,omitempty"`
+	ToolName     string          `json:"toolName,omitempty"`
 	Partial      json.RawMessage `json:"partial,omitempty"`
 }
 
@@ -577,6 +627,33 @@ type piToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// resolveToolIdentity returns the best (id, name) pair available for a pi
+// tool_use block. It checks the nested toolCall object, then the flat
+// top-level fields, then the harvested-from-tool_execution_start cache. If
+// the name is still empty we log and fall back to a synthetic placeholder
+// rather than ship "undefined" to the renderer — pi will surface the real
+// name on the subsequent tool_execution_end and the result block still
+// pairs correctly by id.
+func (p *PiProvider) resolveToolIdentity(ev piContentBlock) (id, name string) {
+	if ev.ToolCall != nil {
+		id, name = ev.ToolCall.ID, ev.ToolCall.Name
+	}
+	if id == "" {
+		id = ev.ToolCallID
+	}
+	if name == "" {
+		name = ev.ToolName
+	}
+	if name == "" {
+		name = p.lookupToolName(id)
+	}
+	if name == "" {
+		slog.Warn("pi: toolcall_start missing tool name", "session", p.session.ID, "toolCallId", id)
+		name = "tool"
+	}
+	return id, name
 }
 
 func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
@@ -626,11 +703,7 @@ func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
 	case "toolcall_start":
 		idx := p.allocBlockIndex(ev.ContentIndex)
 		p.startBlock(idx, BlockToolUse)
-		var id, name string
-		if ev.ToolCall != nil {
-			id = ev.ToolCall.ID
-			name = ev.ToolCall.Name
-		}
+		id, name := p.resolveToolIdentity(ev)
 		p.setOpenTool(id, name)
 		p.emitter.ToolUseBlockStart(idx, id, name)
 
