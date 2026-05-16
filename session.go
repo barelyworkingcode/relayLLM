@@ -458,34 +458,15 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.processing = false
 		session.mu.Unlock()
 
-		// Fallback save for providers that haven't persisted the assistant
-		// turn themselves. Contract: providers that DO persist (chat-base via
-		// turnStreamState.blocks; Claude via readClaudeHistory replay) MUST
-		// emit message_complete with nil data so this branch is a no-op —
-		// otherwise a duplicate text-only message gets appended on top of the
-		// canonical-blocks one.
-		if data != nil {
-			var complete struct {
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(data, &complete) == nil && complete.Text != "" {
-				contentJSON, _ := json.Marshal([]map[string]string{{"type": "text", "text": complete.Text}})
-				session.mu.Lock()
-				session.Messages = append(session.Messages, Message{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Role:      "assistant",
-					Content:   contentJSON,
-				})
-				session.mu.Unlock()
-			}
-		}
-
+		// Contract: all providers persist their own assistant turns (chat-base
+		// via turnStreamState.blocks, pi via allBlocks, Claude via its CLI's
+		// JSONL replayed by readClaudeHistory). message_complete data is
+		// always nil; there is no fallback save path.
 		msg = map[string]interface{}{
 			"type":      "message_complete",
 			"sessionId": session.ID,
 		}
 
-		// Persist session state.
 		m.saveSession(session)
 
 	case "process_exited":

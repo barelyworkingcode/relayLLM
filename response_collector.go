@@ -56,60 +56,29 @@ func (c *ResponseCollector) HandleEvent(msg map[string]interface{}) {
 }
 
 // extractText pulls user-visible text out of a canonical event. Thinking and
-// tool blocks are deliberately excluded — HTTP callers only see the final
-// reply text. See docs/event-protocol.md for event shapes.
+// tool blocks are deliberately excluded — HTTP callers see the final reply
+// text only.
 func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 	if eventRaw == nil {
 		return
 	}
 
 	var event struct {
-		Type  string `json:"type"`
 		Delta *struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"delta"`
-		ContentBlock *struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content_block"`
-		// Claude CLI stream-json: assistant message_start may carry full
-		// content array on the first event.
-		Message *struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"message"`
 	}
-
 	if err := json.Unmarshal(eventRaw, &event); err != nil {
+		return
+	}
+	if event.Delta == nil || event.Delta.Type != "text_delta" {
 		return
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// Canonical: text_delta inside content_block_delta.
-	if event.Delta != nil && event.Delta.Type == "text_delta" {
-		c.text.WriteString(event.Delta.Text)
-		return
-	}
-
-	// Claude CLI legacy: text content_block carries inline text.
-	if event.ContentBlock != nil && event.ContentBlock.Type == "text" && event.ContentBlock.Text != "" {
-		c.text.WriteString(event.ContentBlock.Text)
-		return
-	}
-
-	// Claude CLI: full message at message_start (rare but possible).
-	if event.Type == "assistant" && event.Message != nil {
-		for _, block := range event.Message.Content {
-			if block.Type == "text" {
-				c.text.WriteString(block.Text)
-			}
-		}
-	}
+	c.text.WriteString(event.Delta.Text)
 }
 
 // Wait blocks until the response is complete or timeout.
