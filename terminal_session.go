@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -77,10 +76,10 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 
 	args := make([]string, 0, len(tmpl.Args)+len(s.extraArgs))
 	for _, a := range tmpl.Args {
-		args = append(args, subs.expand(a))
+		args = append(args, subs.Expand(a))
 	}
 	for _, a := range s.extraArgs {
-		args = append(args, subs.expand(a))
+		args = append(args, subs.Expand(a))
 	}
 
 	cmd := exec.Command(command, args...)
@@ -91,17 +90,13 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
 
 	for k, v := range tmpl.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.expand(v)))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.Expand(v)))
 	}
 
-	if subs.relayToken != "" {
-		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.relayToken)
+	if subs.RelayToken != "" {
+		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
 	}
-	for _, key := range tmpl.EnvPassthrough {
-		if v := os.Getenv(key); v != "" {
-			cmd.Env = setEnv(cmd.Env, key, v)
-		}
-	}
+	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
 
 	cols := s.cols
 	rows := s.rows
@@ -380,67 +375,14 @@ func setEnv(env []string, key, value string) []string {
 	return append(env, prefix+value)
 }
 
-// templateSubs holds the resolved substitution values for a PTY launch.
-// Built from the template's relay-managed fields plus a bridge call.
-type templateSubs struct {
-	projectPath string // resolved via bridge (or template directory if not relay-managed)
-	skillPath   string // resolved skill directory (where SKILL.md was written)
-	relayToken  string // project plaintext token (empty if !useRelayToken)
-}
-
-// expand substitutes ${PROJECT_PATH}, ${SKILL_PATH}, ${RELAY_TOKEN} and the
-// lower-case ${project.path} into s.
-func (t templateSubs) expand(s string) string {
-	r := strings.NewReplacer(
-		"${PROJECT_PATH}", t.projectPath,
-		"${SKILL_PATH}", t.skillPath,
-		"${RELAY_TOKEN}", t.relayToken,
-		"${project.path}", t.projectPath,
-	)
-	return r.Replace(s)
-}
-
-// resolveTemplateSubs computes the substitution values for a template. For
-// non-relay-managed templates, exposes PROJECT_PATH only. For relay-managed
-// templates, calls relay's bridge ResolvePtyEnv, which also regenerates
-// SKILL.md as a side effect when AutoRegenSkills requires it. Fails closed:
-// returns error rather than spawning with unresolved placeholders.
-func resolveTemplateSubs(tmpl TerminalTemplate, directory string) (templateSubs, error) {
-	relayManaged := tmpl.UseRelayToken || (tmpl.AutoRegenSkills != "" && tmpl.AutoRegenSkills != "never")
-	if !relayManaged {
-		return templateSubs{projectPath: directory}, nil
-	}
-
-	// SkillPath's ${project.path} is resolved against the launch directory
-	// before sending over the bridge — relay treats the path as opaque.
-	skillPath := (templateSubs{projectPath: directory}).expand(tmpl.SkillPath)
-
-	regen := tmpl.AutoRegenSkills
-	if regen == "" {
-		regen = "never"
-	}
-	if regen != "never" && skillPath == "" {
-		return templateSubs{}, fmt.Errorf("template %s: skillPath required when autoRegenSkills != never", tmpl.ID)
-	}
-
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
-		Directory:   directory,
-		RegenSkills: regen,
-		SkillPath:   skillPath,
-	})
-	if err != nil {
-		return templateSubs{}, fmt.Errorf("relay-managed template %s: resolve env: %w", tmpl.ID, err)
-	}
-
-	subs := templateSubs{
-		projectPath: resp.WorkingDir,
-		skillPath:   resp.SkillPath,
-	}
-	if tmpl.UseRelayToken {
-		subs.relayToken = resp.RelayToken
-	}
-	if subs.projectPath == "" {
-		subs.projectPath = directory
-	}
-	return subs, nil
+// resolveTemplateSubs is a thin adapter that builds a RelayManagedSpec from
+// a TerminalTemplate and delegates to the generic resolver. See relay_spawn.go.
+func resolveTemplateSubs(tmpl TerminalTemplate, directory string) (SpawnSubs, error) {
+	return RelayManagedSpec{
+		Directory:       directory,
+		SkillPath:       tmpl.SkillPath,
+		AutoRegenSkills: tmpl.AutoRegenSkills,
+		UseRelayToken:   tmpl.UseRelayToken,
+		Label:           "template " + tmpl.ID,
+	}.Resolve()
 }

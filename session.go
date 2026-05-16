@@ -27,9 +27,10 @@ type Session struct {
 	Stats         SessionStats    `json:"stats"`
 	ProviderState json.RawMessage `json:"providerState,omitempty"`
 
-	SystemPrompt string `json:"systemPrompt,omitempty"`
-	Headless     bool   `json:"headless,omitempty"`
-	McpToken     string `json:"-"` // project-scoped MCP token, not serialized
+	SystemPrompt  string `json:"systemPrompt,omitempty"`
+	Headless      bool   `json:"headless,omitempty"`
+	ThinkingLevel string `json:"thinkingLevel,omitempty"` // pi-only: off/minimal/low/medium/high/xhigh
+	McpToken      string `json:"-"`                       // project-scoped MCP token, not serialized
 
 	// Per-session Claude permission policy (parsed from Settings at create
 	// time). PermissionMode is the live mode — may be mutated by
@@ -86,6 +87,8 @@ type SessionManager struct {
 	openaiConfig *OpenAIConfig
 	llamaManager *LlamaServerManager
 	builtinTools *BuiltinToolRegistry
+	dataDir      string
+	piConfig     *PiConfig
 }
 
 func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -131,6 +134,18 @@ func (m *SessionManager) SetBuiltinTools(r *BuiltinToolRegistry) {
 // disable the llama.cpp provider.
 func (m *SessionManager) SetLlamaManager(mgr *LlamaServerManager) {
 	m.llamaManager = mgr
+}
+
+// SetDataDir records relayLLM's data directory. The pi provider stores its
+// session JSONLs under {dataDir}/pi-sessions so cleanup is predictable.
+func (m *SessionManager) SetDataDir(dir string) {
+	m.dataDir = dir
+}
+
+// SetPiConfig injects the pi.dev provider configuration (binary path,
+// extra args, …). Pass nil for defaults.
+func (m *SessionManager) SetPiConfig(cfg *PiConfig) {
+	m.piConfig = cfg
 }
 
 // llamaConfig returns the LlamaConfig from the manager, or nil if no
@@ -235,6 +250,9 @@ func deriveProviderType(model string, openaiCfg *OpenAIConfig, llamaCfg *LlamaCo
 	case "haiku", "sonnet", "opus":
 		return "claude"
 	}
+	if strings.HasPrefix(model, "pi/") {
+		return "pi"
+	}
 	if idx := strings.Index(model, "/"); idx > 0 {
 		prefix := model[:idx]
 		if prefix == "llama" && llamaCfg.FindByAlias(model[idx+1:]) != nil {
@@ -285,6 +303,29 @@ func (m *SessionManager) initProvider(session *Session) error {
 		}
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
 		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
+
+	case "pi":
+		// Expected model format: pi/<provider>/<modelId>
+		rest := strings.TrimPrefix(session.Model, "pi/")
+		upstreamProvider, modelID, ok := strings.Cut(rest, "/")
+		if !ok || upstreamProvider == "" || modelID == "" {
+			return fmt.Errorf("pi: model %q malformed (want pi/<provider>/<modelId>)", session.Model)
+		}
+		// Parse pi-specific session settings so thinkingLevel set on
+		// CreateSession lands on the Session before Start() reads it.
+		if session.ThinkingLevel == "" && session.Settings != nil {
+			var s struct {
+				ThinkingLevel string `json:"thinkingLevel"`
+			}
+			if json.Unmarshal(session.Settings, &s) == nil {
+				session.ThinkingLevel = s.ThinkingLevel
+			}
+		}
+		p := NewPiProvider(session, handler, upstreamProvider, modelID, m.dataDir, m.piConfig)
+		if session.ProviderState != nil {
+			p.RestoreState(session.ProviderState)
+		}
+		provider = p
 
 	default: // "claude" or unset (backward compat)
 		if err := m.ensureHookConfig(session.Directory); err != nil {
@@ -776,6 +817,62 @@ func (m *SessionManager) ClearSession(id string) error {
 	}
 
 	slog.Info("session cleared", "id", id)
+	return nil
+}
+
+// SetPiModel switches a pi-backed session to a different model mid-flight.
+// Returns an error if the session isn't pi-backed or the underlying RPC
+// rejects the change.
+func (m *SessionManager) SetPiModel(id, upstreamProvider, modelID string) error {
+	session, ok := m.GetSession(id)
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if session.ProviderType != "pi" {
+		return fmt.Errorf("model switch is only supported for pi sessions")
+	}
+	pi, ok := session.getProvider().(*PiProvider)
+	if !ok {
+		return fmt.Errorf("session has no live pi provider")
+	}
+	if err := pi.SetModel(upstreamProvider, modelID); err != nil {
+		return err
+	}
+	m.saveSession(session)
+	if m.sink != nil {
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      "model_changed",
+			"sessionId": id,
+			"model":     session.Model,
+		})
+	}
+	return nil
+}
+
+// SetPiThinkingLevel changes pi's reasoning depth mid-session.
+func (m *SessionManager) SetPiThinkingLevel(id, level string) error {
+	session, ok := m.GetSession(id)
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if session.ProviderType != "pi" {
+		return fmt.Errorf("thinking level is only supported for pi sessions")
+	}
+	pi, ok := session.getProvider().(*PiProvider)
+	if !ok {
+		return fmt.Errorf("session has no live pi provider")
+	}
+	if err := pi.SetThinkingLevel(level); err != nil {
+		return err
+	}
+	m.saveSession(session)
+	if m.sink != nil {
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":          "thinking_level_changed",
+			"sessionId":     id,
+			"thinkingLevel": level,
+		})
+	}
 	return nil
 }
 

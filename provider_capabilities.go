@@ -16,7 +16,7 @@ func CapabilitiesForProvider(providerType string) ProviderCapabilities {
 	switch providerType {
 	case "claude":
 		return ProviderCapabilities{SupportsPermissions: true, SupportsAttachments: true}
-	case "openai", "ollama":
+	case "openai", "ollama", "pi":
 		return ProviderCapabilities{SupportsAttachments: true}
 	default:
 		return ProviderCapabilities{}

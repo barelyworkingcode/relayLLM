@@ -124,6 +124,37 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 		sessions.EndSession(r.PathValue("id"))
 		writeJSON(w, 200, map[string]bool{"success": true})
 	})
+
+	mux.HandleFunc("PUT /api/sessions/{id}/model", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Provider string `json:"provider"`
+			ModelID  string `json:"modelId"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if err := sessions.SetPiModel(r.PathValue("id"), body.Provider, body.ModelID); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"success": true})
+	})
+
+	mux.HandleFunc("PUT /api/sessions/{id}/thinking-level", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Level string `json:"level"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if err := sessions.SetPiThinkingLevel(r.PathValue("id"), body.Level); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"success": true})
+	})
 }
 
 // --- Models Route ---
@@ -137,7 +168,7 @@ type ModelInfo struct {
 	SupportsAttachments bool   `json:"supportsAttachments"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager, piCfg *PiConfig) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -152,6 +183,7 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 			wg     sync.WaitGroup
 			ollama []ModelInfo
 			openai [][]ModelInfo
+			pi     []ModelInfo
 		)
 
 		if ollamaURL != "" {
@@ -173,6 +205,17 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 				}(i, endpoint)
 			}
 		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var piPathOverride string
+			if piCfg != nil {
+				piPathOverride = piCfg.BinaryPath
+			}
+			pi = FetchPiModels(r.Context(), piPathOverride)
+		}()
+
 		wg.Wait()
 
 		models := append(claude, ollama...)
@@ -182,6 +225,7 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		if llamaMgr != nil {
 			models = append(models, llamaMgr.ListModels()...)
 		}
+		models = append(models, pi...)
 
 		// Stamp provider-default capabilities, OR-ing with any per-source
 		// values (e.g. llama uses per-model mmproj detection).

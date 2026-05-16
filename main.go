@@ -52,13 +52,18 @@ func main() {
 	sessionStore := NewSessionStore(filepath.Join(*dataDir, "sessions"))
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(sessionStore, perms)
+	sessions.SetDataDir(*dataDir)
 
 	// Load provider + pty config up front. Terminal subsystem needs the pty
 	// map to seed defaults before serving requests.
-	openaiCfg, llamaCfg, ptyCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
+	openaiCfg, llamaCfg, piCfg, ptyCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
+	}
+	sessions.SetPiConfig(piCfg)
+	if piCfg.BinaryPath != "" {
+		slog.Info("pi binary configured", "path", piCfg.BinaryPath)
 	}
 
 	// Terminal subsystem.
@@ -175,7 +180,7 @@ func main() {
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms, sessions)
-	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager)
+	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager, piCfg)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)

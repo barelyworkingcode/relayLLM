@@ -14,6 +14,8 @@ echo "Built hook binary."
   --command "$(pwd)/relayllm" \
   --args "--comfyui-url" \
   --args "http://localhost:8188" \
+  --args "--llama-proxy-port" \
+  --args "8180" \
   --autostart
 echo ""
 echo "Registered with Relay."
