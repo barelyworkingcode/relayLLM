@@ -198,13 +198,15 @@ func TestOpenAIBuildMessages_UserWithImage(t *testing.T) {
 
 func TestOpenAIBuildMessages_ToolCallRoundTrip(t *testing.T) {
 	transport := &OpenAIChatTransport{}
-	// Simulate a persisted session: user → assistant with tool_calls → tool result → follow-up.
-	toolCallsJSON, _ := json.Marshal([]NormalizedToolCall{
-		{ID: "call_abc", Name: "search", Arguments: json.RawMessage(`{"q":"foo"}`)},
+	// Simulate a persisted session: user → assistant with tool_use blocks → tool result → follow-up.
+	// Tool calls are extracted from canonical content blocks via toolCallsFromContent.
+	assistantBlocks, _ := json.Marshal([]map[string]any{
+		{"type": "text", "text": "looking it up"},
+		{"type": "tool_use", "id": "call_abc", "name": "search", "input": json.RawMessage(`{"q":"foo"}`)},
 	})
 	msgs := []Message{
 		{Role: "user", Content: json.RawMessage(`"find foo"`)},
-		{Role: "assistant", Content: json.RawMessage(`"looking it up"`), ToolCalls: toolCallsJSON},
+		{Role: "assistant", Content: assistantBlocks},
 		{Role: "tool", ToolName: "search", Content: json.RawMessage(`"result: 42"`)},
 	}
 	out := transport.BuildMessages("", msgs)

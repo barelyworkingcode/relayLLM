@@ -40,14 +40,17 @@ type FileAttachment struct {
 }
 
 // Message represents a persisted chat message.
+//
+// Assistant messages with tool calls store the calls as tool_use blocks
+// inside Content — see toolCallsFromContent for the extraction path used on
+// history replay. There is no separate tool-calls field.
 type Message struct {
-	Timestamp string          `json:"timestamp"`
-	Role      string          `json:"role"` // "user", "assistant", or "tool"
-	Content   json.RawMessage `json:"content"`
+	Timestamp string           `json:"timestamp"`
+	Role      string           `json:"role"` // "user", "assistant", or "tool"
+	Content   json.RawMessage  `json:"content"`
 	Files     []FileAttachment `json:"files,omitempty"`
-	ToolName  string          `json:"toolName,omitempty"`  // set when Role="tool"
-	ToolUseID string          `json:"toolUseId,omitempty"` // set when Role="tool" so the client can pair the result back to its tool_use block
-	ToolCalls json.RawMessage `json:"toolCalls,omitempty"` // set on assistant msgs that invoked tools
+	ToolName  string           `json:"toolName,omitempty"`  // set when Role="tool"
+	ToolUseID string           `json:"toolUseId,omitempty"` // set when Role="tool" so the client can pair the result back to its tool_use block
 }
 
 // SessionStats tracks token usage and cost.
@@ -75,11 +78,29 @@ func extractTextContent(msg Message) string {
 		}
 		return string(msg.Content)
 	}
+	return flattenTextBlocks(msg.Content)
+}
+
+// flattenTextBlocks reduces polymorphic content (a JSON string OR an array of
+// {type:"text", text:"..."} blocks) to a single string. Used by translators
+// to canonicalize tool_result content and by extractTextContent above.
+//
+// Empty input returns "". Input that decodes as neither a string nor the
+// block array falls back to the raw bytes — preserves diagnostics for
+// inputs the translator didn't anticipate.
+func flattenTextBlocks(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(msg.Content, &blocks) == nil {
+	if json.Unmarshal(raw, &blocks) == nil {
 		var sb strings.Builder
 		for _, b := range blocks {
 			if b.Type == "text" {
@@ -88,7 +109,7 @@ func extractTextContent(msg Message) string {
 		}
 		return sb.String()
 	}
-	return string(msg.Content)
+	return string(raw)
 }
 
 // EventHandler is the callback from provider to session for streaming events.

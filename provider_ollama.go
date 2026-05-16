@@ -116,7 +116,7 @@ func (t *OllamaChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 				"role":    "assistant",
 				"content": extractTextContent(msg),
 			}
-			if norm := decodeNormalizedToolCalls(msg.ToolCalls); len(norm) > 0 {
+			if norm := toolCallsFromContent(msg.Content); len(norm) > 0 {
 				// Convert normalized → Ollama wire shape (no "id", no "type").
 				tc := make([]map[string]any, len(norm))
 				for i, n := range norm {

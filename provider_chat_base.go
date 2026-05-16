@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -421,12 +422,12 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		// Persist the assistant-with-tool-calls message as canonical content
 		// blocks. state.blocks is guaranteed non-empty here — toolCalls came
 		// from onToolStart, which appends a tool_use block via closeOpen.
-		tcJSON, _ := json.Marshal(toolCalls)
+		// Tool calls are extracted from these blocks on history replay (see
+		// toolCallsFromContent); no separate persistence field needed.
 		toolMessages = append(toolMessages, Message{
 			Timestamp: timeNow(),
 			Role:      "assistant",
 			Content:   mustJSON(state.blocks),
-			ToolCalls: tcJSON,
 		})
 		messages = p.transport.AppendAssistantWithToolCalls(messages, streamText, toolCalls)
 
@@ -529,53 +530,44 @@ func mustJSON(v any) json.RawMessage {
 	return data
 }
 
-// decodeNormalizedToolCalls unmarshals a persisted tool_calls JSON blob into
-// []NormalizedToolCall, falling back to the pre-refactor Ollama wire shape
-// ([{function:{name, arguments}}]). Returns nil if neither form applies.
-func decodeNormalizedToolCalls(raw json.RawMessage) []NormalizedToolCall {
-	if len(raw) == 0 {
+// toolCallsFromContent extracts tool calls from a persisted assistant
+// Message.Content. Tool calls live inside canonical content blocks as
+// tool_use entries — single source of truth on history replay.
+//
+// The bytes.Contains precheck rejects text-only assistant turns (the common
+// case) without paying for a full unmarshal of the content blob.
+func toolCallsFromContent(content json.RawMessage) []NormalizedToolCall {
+	if len(content) == 0 || !bytes.Contains(content, toolUseMarker) {
 		return nil
 	}
-	// Try the new normalized shape first.
-	var norm []NormalizedToolCall
-	if err := json.Unmarshal(raw, &norm); err == nil {
-		// If the decoder got entries but none carry a Name, the blob is
-		// probably in the legacy Ollama shape — fall through to that.
-		allEmpty := len(norm) > 0
-		for _, n := range norm {
-			if n.Name != "" {
-				allEmpty = false
-				break
-			}
-		}
-		if !allEmpty {
-			return norm
-		}
+	var blocks []struct {
+		Type  string          `json:"type"`
+		ID    string          `json:"id"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
 	}
-	// Legacy Ollama shape: [{function:{name, arguments}}]
-	var legacy []struct {
-		Function struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-		} `json:"function"`
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return nil
 	}
-	if err := json.Unmarshal(raw, &legacy); err == nil {
-		out := make([]NormalizedToolCall, 0, len(legacy))
-		for _, l := range legacy {
-			if l.Function.Name == "" {
-				continue
-			}
-			out = append(out, NormalizedToolCall{
-				Name:      l.Function.Name,
-				Arguments: l.Function.Arguments,
-			})
+	var out []NormalizedToolCall
+	for _, b := range blocks {
+		if b.Type != BlockToolUse || b.Name == "" {
+			continue
 		}
-		if len(out) > 0 {
-			return out
+		args := b.Input
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
 		}
+		out = append(out, NormalizedToolCall{
+			ID:        b.ID,
+			Name:      b.Name,
+			Arguments: args,
+		})
 	}
-	return nil
+	return out
 }
+
+var toolUseMarker = []byte(`"tool_use"`)
 
 // turnStreamState drives canonical event emission for a single streamed
 // response from the transport. It tracks the open content block (so
