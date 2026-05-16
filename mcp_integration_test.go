@@ -109,7 +109,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 		if msg.Role == "tool" {
 			hasToolMsg = true
 		}
-		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		if msg.Role == "assistant" && len(toolCallsFromContent(msg.Content)) > 0 {
 			hasToolCallAssistant = true
 		}
 	}

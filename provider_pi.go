@@ -659,25 +659,14 @@ func (p *PiProvider) translateToolResult(raw json.RawMessage) {
 		ToolCallID string `json:"toolCallId"`
 		ToolName   string `json:"toolName"`
 		Result     struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
+			Content json.RawMessage `json:"content"`
 		} `json:"result"`
 		IsError bool `json:"isError"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return
 	}
-	// Concatenate text segments — the canonical ToolResult emitter takes a
-	// single string, matching how chat_base reports tool output.
-	var sb strings.Builder
-	for _, c := range ev.Result.Content {
-		if c.Type == "text" {
-			sb.WriteString(c.Text)
-		}
-	}
-	p.emitter.ToolResult(ev.ToolCallID, ev.ToolName, sb.String(), ev.IsError)
+	p.emitter.ToolResult(ev.ToolCallID, ev.ToolName, flattenTextBlocks(ev.Result.Content), ev.IsError)
 }
 
 func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {

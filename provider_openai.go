@@ -132,7 +132,7 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 				"role":    "assistant",
 				"content": extractTextContent(msg),
 			}
-			if norm := decodeNormalizedToolCalls(msg.ToolCalls); len(norm) > 0 {
+			if norm := toolCallsFromContent(msg.Content); len(norm) > 0 {
 				// Mutate in place so any synthesized IDs propagate to the
 				// tool-result pairing pass below. Scope the synthesized id by
 				// the assistant's history position so an identically-shaped

@@ -17,10 +17,20 @@ import (
 
 const claudeIdleTimeout = 15 * time.Minute
 
-// ClaudeProvider manages a persistent Claude CLI process.
+// ClaudeProvider manages a persistent Claude CLI process and translates its
+// stream-json output into canonical relay events.
+//
+// One legacy variant gets normalized here so clients see only the canonical
+// shape: a content_block_start for a text or thinking block that carries
+// inline content is split into bare-start + delta.
+//
+// Persistence: Claude CLI owns the JSONL history file under ~/.claude/
+// projects/<dir>/<sid>.jsonl, replayed on session join by readClaudeHistory.
+// This provider does not accumulate into session.Messages.
 type ClaudeProvider struct {
 	session *Session
 	handler EventHandler
+	emitter *EventEmitter
 
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -35,18 +45,18 @@ type ClaudeProvider struct {
 
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
-	stopIdleOnce sync.Once    // prevents double-close of stopIdle
+	stopIdleOnce sync.Once     // prevents double-close of stopIdle
 	waitDone     chan struct{} // closed when cmd.Wait() returns
 
-	// Per-turn timing for TTFT / TPS metrics.
-	msgStartNano   atomic.Int64 // set in SendMessage
-	firstTokenNano atomic.Int64 // set on first content_block_delta
+	msgStartNano   atomic.Int64
+	firstTokenNano atomic.Int64
 }
 
 func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string) *ClaudeProvider {
 	return &ClaudeProvider{
 		session:    session,
 		handler:    handler,
+		emitter:    NewEventEmitter(handler),
 		model:      session.Model,
 		directory:  session.Directory,
 		hookSocket: hookSocket,
@@ -220,73 +230,310 @@ func (p *ClaudeProvider) waitForExit() {
 func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 	p.touchActivity()
 
-	// Extract the event type for routing.
 	var envelope struct {
 		Type    string `json:"type"`
 		Subtype string `json:"subtype,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		// Non-JSON output — forward as raw_output.
 		p.handler("raw_output", raw)
 		return
 	}
 
-	// Record first-token time on the first content_block_delta.
-	if envelope.Type == "content_block_delta" {
-		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+	switch envelope.Type {
+	case EvtSystem:
+		p.translateSystem(envelope.Subtype, raw)
+	case EvtAssistant:
+		p.translateAssistant(raw)
+	case "user":
+		p.translateUser(raw)
+	case EvtResult:
+		p.translateResult(raw)
+	default:
+		// Claude-CLI-specific events outside the canonical trio
+		// (permission-mode, ai-title, custom-title). Forward with v stamped.
+		p.emitter.EmitVersionedRaw(raw)
 	}
+}
 
-	// Capture Claude session ID from system.init.
-	if envelope.Type == "system" && envelope.Subtype == "init" {
+func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
+	switch subtype {
+	case SystemInitSubtype:
 		var init struct {
-			SessionID string `json:"session_id"`
+			SessionID  string   `json:"session_id"`
+			Model      string   `json:"model"`
+			Cwd        string   `json:"cwd"`
+			Tools      []string `json:"tools"`
+			MCPServers []string `json:"mcp_servers"`
 		}
-		if err := json.Unmarshal(raw, &init); err == nil && init.SessionID != "" {
+		if json.Unmarshal(raw, &init) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		if init.SessionID != "" {
 			p.mu.Lock()
 			p.claudeSessionID = init.SessionID
 			p.mu.Unlock()
 		}
+		model := init.Model
+		if model == "" {
+			model = p.model
+		}
+		cwd := init.Cwd
+		if cwd == "" {
+			cwd = p.directory
+		}
+		p.emitter.SystemInit(model, cwd, init.Tools, init.MCPServers)
+
+	case SystemPermissionRequestSubtype:
+		var req struct {
+			PermissionID string          `json:"permission_id"`
+			ToolName     string          `json:"tool_name"`
+			ToolUseID    string          `json:"tool_use_id"`
+			ToolInput    json.RawMessage `json:"tool_input"`
+		}
+		if json.Unmarshal(raw, &req) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.PermissionRequest(req.PermissionID, req.ToolName, req.ToolUseID, req.ToolInput)
+
+	case SystemQuestionSubtype:
+		var q struct {
+			Prompt   string          `json:"prompt"`
+			Metadata json.RawMessage `json:"metadata"`
+		}
+		if json.Unmarshal(raw, &q) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.SystemQuestion(q.Prompt, q.Metadata)
+
+	case SystemStatusSubtype:
+		var s struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &s) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.SystemStatus(s.Message)
+
+	case SystemAPIErrorSubtype:
+		var s struct {
+			Message  string `json:"message"`
+			Retrying bool   `json:"retrying"`
+		}
+		if json.Unmarshal(raw, &s) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.SystemAPIError(s.Message, s.Retrying)
+
+	case SystemBridgeStatusSubtype:
+		var s struct {
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(raw, &s) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.SystemBridgeStatus(s.Status, s.Detail)
+
+	case SystemStopHookSummarySubtype:
+		var s struct {
+			Summary string `json:"summary"`
+			IsError bool   `json:"is_error"`
+		}
+		if json.Unmarshal(raw, &s) != nil {
+			p.emitter.EmitVersionedRaw(raw)
+			return
+		}
+		p.emitter.SystemStopHookSummary(s.Summary, s.IsError)
+
+	default:
+		p.emitter.EmitVersionedRaw(raw)
+	}
+}
+
+func (p *ClaudeProvider) translateAssistant(raw json.RawMessage) {
+	var ev struct {
+		Index            *int             `json:"index,omitempty"`
+		Message          *json.RawMessage `json:"message,omitempty"`
+		ContentBlock     *json.RawMessage `json:"content_block,omitempty"`
+		Delta            *json.RawMessage `json:"delta,omitempty"`
+		ContentBlockStop *bool            `json:"content_block_stop,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		p.emitter.EmitVersionedRaw(raw)
+		return
 	}
 
-	// Extract stats from result events.
-	if envelope.Type == "result" {
-		var result struct {
-			Usage *struct {
-				InputTokens              int `json:"input_tokens"`
-				OutputTokens             int `json:"output_tokens"`
-				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-			} `json:"usage"`
-			TotalCostUsd float64 `json:"total_cost_usd"`
-		}
-		if err := json.Unmarshal(raw, &result); err == nil && result.Usage != nil {
-			stats := SessionStats{
-				InputTokens:         result.Usage.InputTokens,
-				OutputTokens:        result.Usage.OutputTokens,
-				CacheReadTokens:     result.Usage.CacheReadInputTokens,
-				CacheCreationTokens: result.Usage.CacheCreationInputTokens,
-				CostUsd:             result.TotalCostUsd,
-			}
+	isStop := ev.ContentBlockStop != nil && *ev.ContentBlockStop
 
-			startNano := p.msgStartNano.Load()
-			firstNano := p.firstTokenNano.Load()
-			nowNano := time.Now().UnixNano()
-			if startNano > 0 && firstNano > 0 {
-				stats.TimeToFirstToken = float64(firstNano-startNano) / 1e9
-				genSecs := float64(nowNano-firstNano) / 1e9
-				if genSecs > 0 && stats.OutputTokens > 0 {
-					stats.TokensPerSecond = float64(stats.OutputTokens) / genSecs
-				}
-			}
-
-			statsData, _ := json.Marshal(stats)
-			p.handler("stats_update", statsData)
+	switch {
+	case ev.Message != nil:
+		var m struct {
+			ID string `json:"id"`
 		}
-		p.handler("message_complete", nil)
+		_ = json.Unmarshal(*ev.Message, &m)
+		p.emitter.MessageStart(m.ID)
+
+	case ev.Delta != nil && ev.Index != nil:
+		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+		p.translateBlockDelta(*ev.Index, *ev.Delta)
+
+	case isStop && ev.Index != nil:
+		p.translateBlockStop(*ev.Index, ev.ContentBlock)
+
+	case !isStop && ev.ContentBlock != nil && ev.Index != nil:
+		p.translateBlockStart(*ev.Index, *ev.ContentBlock)
+
+	default:
+		// message_delta / message_stop and anything else without enough info
+		// to type — result event carries the final state we care about.
+		p.emitter.EmitVersionedRaw(raw)
+	}
+}
+
+// translateBlockStart emits content_block_start, normalizing the legacy variant
+// where a text/thinking start carries inline content (split into start + delta).
+func (p *ClaudeProvider) translateBlockStart(index int, blockRaw json.RawMessage) {
+	var cb struct {
+		Type     string          `json:"type"`
+		ID       string          `json:"id,omitempty"`
+		Name     string          `json:"name,omitempty"`
+		Text     string          `json:"text,omitempty"`
+		Thinking string          `json:"thinking,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}
+	if err := json.Unmarshal(blockRaw, &cb); err != nil {
+		return
 	}
 
-	// Forward all events as llm_event.
-	p.handler("llm_event", raw)
+	switch cb.Type {
+	case BlockText:
+		p.emitter.TextBlockStart(index)
+		if cb.Text != "" {
+			p.emitter.TextDelta(index, cb.Text)
+		}
+	case BlockThinking:
+		p.emitter.ThinkingBlockStart(index)
+		if cb.Thinking != "" {
+			p.emitter.ThinkingDelta(index, cb.Thinking)
+		}
+	case BlockToolUse:
+		p.emitter.ToolUseBlockStart(index, cb.ID, cb.Name)
+		if len(cb.Input) > 0 && string(cb.Input) != "{}" {
+			p.emitter.InputJsonDelta(index, string(cb.Input))
+		}
+	}
+}
+
+func (p *ClaudeProvider) translateBlockDelta(index int, deltaRaw json.RawMessage) {
+	var d struct {
+		Type        string `json:"type"`
+		Text        string `json:"text,omitempty"`
+		Thinking    string `json:"thinking,omitempty"`
+		PartialJSON string `json:"partial_json,omitempty"`
+	}
+	if err := json.Unmarshal(deltaRaw, &d); err != nil {
+		return
+	}
+	switch d.Type {
+	case DeltaText:
+		p.emitter.TextDelta(index, d.Text)
+	case DeltaThinking:
+		p.emitter.ThinkingDelta(index, d.Thinking)
+	case DeltaInputJSON:
+		p.emitter.InputJsonDelta(index, d.PartialJSON)
+	}
+}
+
+func (p *ClaudeProvider) translateBlockStop(index int, blockRaw *json.RawMessage) {
+	if blockRaw == nil {
+		p.emitter.BlockStop(index)
+		return
+	}
+	var cb struct {
+		Type  string          `json:"type"`
+		ID    string          `json:"id,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
+	}
+	if err := json.Unmarshal(*blockRaw, &cb); err != nil || cb.Type != BlockToolUse {
+		p.emitter.BlockStop(index)
+		return
+	}
+	p.emitter.ToolUseBlockStop(index, cb.ID, cb.Name, cb.Input)
+}
+
+// translateUser handles Claude CLI's `user` events, which carry tool_result
+// content blocks. Each tool_result inside the user message is emitted as a
+// canonical result.tool_result event paired by tool_use_id.
+func (p *ClaudeProvider) translateUser(raw json.RawMessage) {
+	var ev struct {
+		Message struct {
+			Content []struct {
+				Type      string          `json:"type"`
+				ToolUseID string          `json:"tool_use_id"`
+				ToolName  string          `json:"tool_name,omitempty"`
+				Content   json.RawMessage `json:"content"`
+				IsError   bool            `json:"is_error"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		p.emitter.EmitVersionedRaw(raw)
+		return
+	}
+
+	for _, block := range ev.Message.Content {
+		if block.Type != "tool_result" {
+			continue
+		}
+		p.emitter.ToolResult(block.ToolUseID, block.ToolName, flattenTextBlocks(block.Content), block.IsError)
+	}
+}
+
+// translateResult handles the terminal `result` event: extracts usage into
+// SessionStats, emits stats_update, then emits message_complete with nil data
+// (Claude CLI owns assistant persistence via its JSONL file — the session
+// layer's fallback-save branch must not fire).
+func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
+	var result struct {
+		Usage *struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+		TotalCostUsd float64 `json:"total_cost_usd"`
+	}
+	if err := json.Unmarshal(raw, &result); err == nil && result.Usage != nil {
+		stats := SessionStats{
+			InputTokens:         result.Usage.InputTokens,
+			OutputTokens:        result.Usage.OutputTokens,
+			CacheReadTokens:     result.Usage.CacheReadInputTokens,
+			CacheCreationTokens: result.Usage.CacheCreationInputTokens,
+			CostUsd:             result.TotalCostUsd,
+		}
+
+		startNano := p.msgStartNano.Load()
+		firstNano := p.firstTokenNano.Load()
+		nowNano := time.Now().UnixNano()
+		if startNano > 0 && firstNano > 0 {
+			stats.TimeToFirstToken = float64(firstNano-startNano) / 1e9
+			genSecs := float64(nowNano-firstNano) / 1e9
+			if genSecs > 0 && stats.OutputTokens > 0 {
+				stats.TokensPerSecond = float64(stats.OutputTokens) / genSecs
+			}
+		}
+
+		statsData, _ := json.Marshal(stats)
+		p.handler("stats_update", statsData)
+	}
+	p.handler("message_complete", nil)
 }
 
 func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error {
