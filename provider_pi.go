@@ -469,10 +469,9 @@ func (p *PiProvider) resetTurnState() {
 	p.streamMu.Unlock()
 }
 
-// rememberToolName records a tool's name for later lookup by id. Pi emits the
-// name on tool_execution_start / tool_execution_end events at the top level;
-// captureToolName scrapes those so the assistantMessageEvent.toolcall_start
-// path can fall back when its nested toolCall payload doesn't include a name.
+// rememberToolName caches (id → name) harvested from tool_execution_* events
+// so resolveToolIdentity can fall back when toolcall_start's nested payload
+// doesn't carry a name.
 func (p *PiProvider) rememberToolName(id, name string) {
 	if id == "" || name == "" {
 		return
@@ -651,10 +650,16 @@ func (p *PiProvider) resolveToolIdentity(ev piContentBlock) (id, name string) {
 	}
 	if name == "" {
 		slog.Warn("pi: toolcall_start missing tool name", "session", p.session.ID, "toolCallId", id)
-		name = "tool"
+		name = piMissingToolNamePlaceholder
 	}
 	return id, name
 }
+
+// piMissingToolNamePlaceholder is the wire-level fallback when none of the
+// pi name channels (nested toolCall, flat fields, harvested cache) yield a
+// value. Surfaces as a generic label in the UI while the slog.Warn captures
+// the toolCallId for investigation.
+const piMissingToolNamePlaceholder = "tool"
 
 func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
 	var msg struct {
