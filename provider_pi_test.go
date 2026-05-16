@@ -110,3 +110,68 @@ func TestBlockInterleaving(t *testing.T) {
 		t.Errorf("allBlocks[1] wrong: %v", p.allBlocks[1])
 	}
 }
+
+// piTestProvider builds a PiProvider wired to a capture handler. Sessions
+// don't need to be real — the translator only reads session.ID for logging.
+func piTestProvider() (*PiProvider, *[]map[string]any) {
+	captured := &[]map[string]any{}
+	handler := func(_ string, data json.RawMessage) {
+		var ev map[string]any
+		_ = json.Unmarshal(data, &ev)
+		*captured = append(*captured, ev)
+	}
+	p := &PiProvider{
+		session:       &Session{ID: "sid-test"},
+		handler:       handler,
+		piIdxToRelay:  make(map[int]int),
+		toolNamesByID: make(map[string]string),
+	}
+	p.emitter = NewEventEmitter(handler)
+	return p, captured
+}
+
+// Name in the nested toolCall object — original pi RPC shape.
+func TestPi_ToolStart_NameFromNestedToolCall(t *testing.T) {
+	p, captured := piTestProvider()
+	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCall":{"id":"call_1","name":"Read"}}}`))
+	if len(*captured) != 1 {
+		t.Fatalf("got %d events", len(*captured))
+	}
+	cb, _ := (*captured)[0]["content_block"].(map[string]any)
+	if cb["name"] != "Read" || cb["id"] != "call_1" {
+		t.Errorf("name/id: %+v", cb)
+	}
+}
+
+// Name in flat top-level fields — newer pi RPC shape.
+func TestPi_ToolStart_NameFromFlatFields(t *testing.T) {
+	p, captured := piTestProvider()
+	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCallId":"call_2","toolName":"Bash"}}`))
+	cb, _ := (*captured)[0]["content_block"].(map[string]any)
+	if cb["name"] != "Bash" || cb["id"] != "call_2" {
+		t.Errorf("name/id: %+v", cb)
+	}
+}
+
+// Name absent from toolcall_start but harvested from a prior
+// tool_execution_start event.
+func TestPi_ToolStart_NameFromHarvestedExecutionStart(t *testing.T) {
+	p, captured := piTestProvider()
+	p.translate("tool_execution_start", json.RawMessage(`{"toolCallId":"call_3","toolName":"Edit"}`))
+	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCallId":"call_3"}}`))
+	cb, _ := (*captured)[0]["content_block"].(map[string]any)
+	if cb["name"] != "Edit" {
+		t.Errorf("name: %+v", cb)
+	}
+}
+
+// Final fallback: if no source supplies a name, use a placeholder so the
+// renderer never shows "undefined".
+func TestPi_ToolStart_FallbackPlaceholder(t *testing.T) {
+	p, captured := piTestProvider()
+	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCallId":"call_4"}}`))
+	cb, _ := (*captured)[0]["content_block"].(map[string]any)
+	if cb["name"] != "tool" {
+		t.Errorf("name: %+v (want \"tool\" placeholder)", cb)
+	}
+}
