@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
+Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
 
 ## Architecture
 
@@ -11,6 +11,8 @@ session.go           Session lifecycle management
 session_store.go     Session persistence to disk
 provider.go          Provider interface + shared types + extractTextContent
 provider_claude.go   Claude CLI provider (stream-json, persistent process)
+provider_pi.go       pi.dev CLI provider (--mode rpc, JSONL → canonical Claude stream-json)
+pi_models.go         pi model discovery via `pi --list-models` (cached)
 provider_ollama.go   Ollama HTTP provider (NDJSON streaming)
 provider_openai.go   OpenAI-compatible HTTP provider (SSE streaming)
 provider_chat_base.go  Base provider: tool-calling loop, MCP + built-in tool dispatch
@@ -23,6 +25,7 @@ comfyui_client.go    ComfyUI HTTP client (queue, poll, fetch, workflow builder)
 builtin_tools.go     Built-in tool registry (generate_image) + dynamic schema
 terminal_template.go Terminal template types + JSON file store (built-in + custom)
 terminal_session.go  Terminal session with PTY management (creack/pty)
+relay_spawn.go       Shared relay-managed spawn prep (skill regen + token + ${SUB} expansion) used by both PTY and pi LLM
 terminal_manager.go  Terminal CRUD + lifecycle management
 terminal_log.go      On-disk head/tail log files for PTY replay after eviction
 api.go               HTTP routes (projects, sessions, terminals, permissions, generated images)
@@ -37,6 +40,7 @@ cmd/hook/            Compiled PreToolUse hook binary
 ## Providers
 
 - **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves).
+- **pi (pi.dev coding agent)**: Persistent process spawned as `pi --mode rpc --provider <upstream> --model <id> --session-dir {dataDir}/pi-sessions [--thinking <level>] [--session <piSessionId>]`. Model identifier convention: `pi/<provider>/<modelId>` (e.g. `pi/anthropic/claude-sonnet-4-20250514`). Resume via `--session <piSessionId>` — pi owns its session JSONL under `{dataDir}/pi-sessions/`. No PreToolUse hook: pi runs in its no-permission-popups default and auto-executes tools; `CapabilitiesForProvider("pi")` therefore omits `SupportsPermissions`. Auth (API keys, OAuth tokens) is inherited from the user's environment / `~/.pi/agent/auth.json`. `PI_OFFLINE=1` + `PI_SKIP_VERSION_CHECK=1` are set at spawn to suppress pi's startup network calls. Pi's RPC event stream (`message_update` with `assistantMessageEvent`, `tool_execution_*`, `agent_end`) is canonicalized into the Claude `content_block_start`/`delta`/`stop` + `result` envelope inside `provider_pi.go:translate`, so Eve renders pi sessions with the existing Claude renderer. Mid-session capabilities: `PUT /api/sessions/:id/model` (sends `set_model` RPC), `PUT /api/sessions/:id/thinking-level` (sends `set_thinking_level`). `StopGeneration` uses pi's in-band `abort` RPC instead of process kill, so the subprocess survives stop/resume cycles. Per-session settings: `thinkingLevel` (off/minimal/low/medium/high/xhigh).
 - **Ollama**: HTTP client with NDJSON streaming. Base URL via `--ollama-url` / `OLLAMA_URL` (default `http://localhost:11434`). Sends full conversation history per request; relies on Ollama's automatic KV cache prefix reuse. Per-session settings: `temperature`, `top_p`, `top_k`, `min_p`, `think` (bool), `num_ctx`. Explicitly sends `think: false` to suppress built-in reasoning on thinking models (e.g. Gemma 4). Supports image attachments via base64.
 - **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `config.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
 - **llama.cpp**: Managed llama-server processes via `LlamaServerManager`. Configured via `config.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances across sessions. Communicates via OpenAI-compatible API (reuses `OpenAIChatTransport`). Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias` which is the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel. Per-session settings: same as OpenAI (temperature, top_p, top_k, min_p, etc.) — override server-level defaults set in the config.
@@ -62,6 +66,8 @@ GET            /api/models         — list available models (Claude + Ollama + 
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session
+PUT            /api/sessions/:id/model           — pi only: mid-session model switch
+PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
 GET/POST       /api/terminal/templates     — list/create terminal templates
 GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
 GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
@@ -102,6 +108,7 @@ PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via We
 Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Support/relayLLM/`, on Linux `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
 - `projects.json` — project definitions
 - `sessions/` — per-session JSON files
+- `pi-sessions/` — pi.dev session JSONLs (one per pi session, owned by pi via `--session-dir`)
 - `terminals/templates.json` — custom terminal templates
 - `config.json` — unified provider config (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
   ```json
@@ -123,10 +130,18 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
         "cache-type-k": "q8_0", "cache-type-v": "q8_0",
         "temp": 0.6, "top-p": 0.95, "top-k": 20, "min-p": 0.0
       }]
+    },
+    "pi": {
+      "binaryPath": "~/.npm-global/bin/pi",
+      "extraArgs": ["--no-context-files"],
+      "useRelayToken": true,
+      "autoRegenSkills": "always",
+      "skillPath": "${project.path}/.claude/skills/relay",
+      "env_passthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
     }
   }
   ```
-  Each llama-server model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths. `--openai-config` flag overrides the `openai` section.
+  Each llama-server model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths. `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` injects a project-scoped `RELAY_TOKEN` env var; `autoRegenSkills` (`"always"`/`"skipIfExists"`/`"never"`) regenerates the project skill via relay's bridge; `skillPath` (supports `${project.path}`) tells relay where to write SKILL.md; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. When `skillPath` resolves to a real path, relayLLM auto-appends `--skill <path>` to argv (skipped if `extraArgs` already contains `--skill`). Fail-closed: `autoRegenSkills != "never"` with empty `skillPath` errors before spawn.
 - `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
 
 ## Build

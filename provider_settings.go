@@ -161,10 +161,22 @@ func ProviderSettings() map[string][]SettingField {
 		},
 	}
 
+	piFields := []SettingField{
+		{
+			Key:     "thinkingLevel",
+			Label:   "Thinking Level",
+			Type:    "select",
+			Default: "medium",
+			Options: []string{"off", "minimal", "low", "medium", "high", "xhigh"},
+			Hint:    "Reasoning depth for models that support it. xhigh is OpenAI codex-max only.",
+		},
+	}
+
 	return map[string][]SettingField{
 		"claude": {},
 		"ollama": ollamaFields,
 		"openai": openaiFields,
 		"llama":  openaiFields,
+		"pi":     piFields,
 	}
 }
