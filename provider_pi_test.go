@@ -171,7 +171,7 @@ func TestPi_ToolStart_FallbackPlaceholder(t *testing.T) {
 	p, captured := piTestProvider()
 	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCallId":"call_4"}}`))
 	cb, _ := (*captured)[0]["content_block"].(map[string]any)
-	if cb["name"] != "tool" {
-		t.Errorf("name: %+v (want \"tool\" placeholder)", cb)
+	if cb["name"] != piMissingToolNamePlaceholder {
+		t.Errorf("name: %+v (want placeholder %q)", cb, piMissingToolNamePlaceholder)
 	}
 }
