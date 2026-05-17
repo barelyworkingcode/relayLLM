@@ -137,11 +137,19 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
       "useRelayToken": true,
       "autoRegenSkills": "always",
       "skillPath": "${project.path}/.claude/skills/relay",
-      "env_passthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
+      "env_passthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"],
+      "projectOverlay": {
+        "mode": "always",
+        "defaultProvider": "relay-llama",
+        "defaultModel": "qwen3-8b",
+        "defaultThinking": "medium"
+      }
     }
   }
   ```
   Each llama-server model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths. `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` injects a project-scoped `RELAY_TOKEN` env var; `autoRegenSkills` (`"always"`/`"skipIfExists"`/`"never"`) regenerates the project skill via relay's bridge; `skillPath` (supports `${project.path}`) tells relay where to write SKILL.md; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. When `skillPath` resolves to a real path, relayLLM auto-appends `--skill <path>` to argv (skipped if `extraArgs` already contains `--skill`). Fail-closed: `autoRegenSkills != "never"` with empty `skillPath` errors before spawn.
+
+  **`projectOverlay`** (optional) writes a per-project `<projectDir>/.pi/` directory before each pi spawn (both `--mode rpc` and PTY `pi` templates) and sets `PI_CODING_AGENT_DIR` so pi reads from it. Pi's global `~/.pi/agent/` is never written to. Materialized files: `models.json` containing relayLLM's curated providers (`relay-llama` pointing at the `--llama-proxy-port` proxy + one entry per configured `openai.endpoints[]`); `settings.json` with `defaultProvider`/`defaultModel`/`defaultThinkingLevel` and a `skills` array (project `.claude/skills/` + `extraSkillDirs`); `auth.json` symlinked to `~/.pi/agent/auth.json` so credentials stay centrally managed (OAuth refresh writes through). Modes: `"never"` (default — feature off), `"always"` (rewrite on every spawn), `"skipIfExists"` (write missing files only). User's global `models.json` providers and `settings.json` keys are merged underneath by default (turn off via `excludeUserProviders`/`excludeUserSettings`). Set `authStrategy: "none"` if pi credentials are managed out-of-band. `gitignore: true` opt-in appends the overlay dir to the project's `.gitignore`. Fails closed at spawn if global `auth.json` is missing while symlink strategy is active — run `pi auth login` once globally first.
 - `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
 
 ## Build
