@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -49,12 +50,22 @@ type SpawnSubs struct {
 	RelayToken  string // project plaintext token (empty if !UseRelayToken)
 }
 
-// Expand substitutes ${PROJECT_PATH}, ${SKILL_PATH}, ${RELAY_TOKEN} and
-// the lowercase ${project.path} into s.
+// Expand substitutes ${PROJECT_PATH}, ${SKILL_PATH}, ${SKILLS_ROOT},
+// ${RELAY_TOKEN} and the lowercase ${project.path} into s.
+//
+// ${SKILLS_ROOT} resolves to the parent directory of ${SKILL_PATH}. Pi (and
+// Claude Code) discover skills recursively under any directory passed to
+// --skill, so pointing at the parent surfaces every sibling skill alongside
+// the relay-managed one in a single flag.
 func (s SpawnSubs) Expand(in string) string {
+	skillsRoot := ""
+	if s.SkillPath != "" {
+		skillsRoot = filepath.Dir(s.SkillPath)
+	}
 	r := strings.NewReplacer(
 		"${PROJECT_PATH}", s.ProjectPath,
 		"${SKILL_PATH}", s.SkillPath,
+		"${SKILLS_ROOT}", skillsRoot,
 		"${RELAY_TOKEN}", s.RelayToken,
 		"${project.path}", s.ProjectPath,
 	)
