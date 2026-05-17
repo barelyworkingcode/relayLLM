@@ -13,7 +13,7 @@ import (
 
 // TerminalTemplate defines a launchable terminal type.
 //
-// On disk inside config.json's `pty` map the entries omit `id` (the map key
+// On disk inside settings.json's `pty` map the entries omit `id` (the map key
 // IS the id) and `builtIn` (computed from protectedTemplateIDs at API time).
 // In-memory copies returned by Get/List have both populated for consumers.
 //
@@ -41,7 +41,7 @@ type TerminalTemplate struct {
 }
 
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
-// via the API. Users can still hand-edit config.json to fully remove them.
+// via the API. Users can still hand-edit settings.json to fully remove them.
 // This set also drives the `builtIn` field on API responses.
 var protectedTemplateIDs = map[string]bool{
 	"claude-code": true,
@@ -65,7 +65,7 @@ func (t TerminalTemplate) ResolveCommand() string {
 	}
 }
 
-// seedDefaultPTYConfig returns the initial pty map written to config.json on
+// seedDefaultPTYConfig returns the initial pty map written to settings.json on
 // first run. Lean shape — only the fields users care to see and edit.
 func seedDefaultPTYConfig() map[string]TerminalTemplate {
 	return map[string]TerminalTemplate{
@@ -83,7 +83,7 @@ func resolveShell() string {
 	return "/bin/zsh"
 }
 
-// TemplateStore manages terminal templates persisted in config.json's pty section.
+// TemplateStore manages terminal templates persisted in settings.json's pty section.
 type TemplateStore struct {
 	mu        sync.RWMutex
 	dataDir   string
@@ -97,7 +97,7 @@ func NewTemplateStore(dataDir string) *TemplateStore {
 	}
 }
 
-// Load initializes the store from the pty map loaded out of config.json.
+// Load initializes the store from the pty map loaded out of settings.json.
 // If the map is nil/empty, the store seeds defaults and persists them.
 func (s *TemplateStore) Load(initial map[string]TerminalTemplate) error {
 	s.mu.Lock()
@@ -118,13 +118,13 @@ func (s *TemplateStore) Load(initial map[string]TerminalTemplate) error {
 	if err := s.persist(); err != nil {
 		return fmt.Errorf("seed pty config: %w", err)
 	}
-	slog.Info("seeded default pty templates into config.json", "count", len(s.templates))
+	slog.Info("seeded default pty templates into settings.json", "count", len(s.templates))
 	return nil
 }
 
-// persist writes the current pty map back to config.json.
+// persist writes the current pty map back to settings.json.
 // MUST be called with s.mu held — serializes the read-modify-write to
-// config.json so concurrent Creates/Updates/Deletes can't lose each other.
+// settings.json so concurrent Creates/Updates/Deletes can't lose each other.
 func (s *TemplateStore) persist() error {
 	return WriteConfigPTY(s.dataDir, s.templates)
 }

@@ -32,7 +32,7 @@ This builds both binaries and registers the service with Relay (`relay service r
 | `--port` | `RELAY_LLM_PORT` | `3001` | HTTP/WebSocket listen port |
 | `--data-dir` | `RELAY_LLM_DATA` | `~/.config/relayLLM` | Data directory |
 | `--ollama-url` | `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
-| `--openai-config` | `OPENAI_CONFIG` | *(none, uses config.json)* | Override OpenAI endpoints config file |
+| `--openai-config` | `OPENAI_CONFIG` | *(none, uses settings.json)* | Override OpenAI endpoints config file |
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | Path to llama-server binary |
 | `--llama-proxy-port` | `LLAMA_PROXY_PORT` | *(empty, disabled)* | Port for OpenAI-compatible llama proxy |
 | `--token` | `RELAY_LLM_TOKEN` | *(empty, no auth)* | Bearer token for API auth |
@@ -129,7 +129,7 @@ Response `200`: `{"success": true}`.
 
 ### Models
 
-**`GET /api/models`** -- List available models from all providers. Discovers models concurrently from Ollama (`/api/tags`) and each configured OpenAI-compatible endpoint (`/v1/models`). llama.cpp models are listed statically from the `llama-server` section of `config.json`.
+**`GET /api/models`** -- List available models from all providers. Discovers models concurrently from Ollama (`/api/tags`) and each configured OpenAI-compatible endpoint (`/v1/models`). llama.cpp models are listed statically from the `llama-server` section of `settings.json`.
 
 Response `200`:
 ```json
@@ -265,7 +265,7 @@ Used by relayScheduler for scheduled tasks. Interactive sessions from Eve don't 
 
 ## Provider Configuration
 
-All provider configuration lives in a single `{data-dir}/config.json`:
+All provider configuration lives in a single `{data-dir}/settings.json`:
 
 ```json
 {
@@ -304,7 +304,7 @@ All provider configuration lives in a single `{data-dir}/config.json`:
 }
 ```
 
-Both sections are optional. If `config.json` is absent, falls back to separate `openai_endpoints.json` + `llama_models.json` files, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars.
+Both sections are optional. If `settings.json` is absent, falls back to separate `openai_endpoints.json` + `llama_models.json` files, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars.
 
 ### OpenAI-compatible Endpoints
 
@@ -362,7 +362,7 @@ Default is `os.UserConfigDir()/relayLLM`:
 
 Override with `--data-dir` or `RELAY_LLM_DATA`.
 
-- `config.json` -- unified provider config (see [Provider Configuration](#provider-configuration))
+- `settings.json` -- unified provider config (see [Provider Configuration](#provider-configuration))
 - `projects.json` -- project definitions
 - `sessions/<id>.json` -- per-session state (messages, stats, provider state)
 - `terminals/templates.json` -- custom terminal templates

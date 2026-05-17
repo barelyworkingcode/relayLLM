@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tidwall/jsonc"
 )
 
-// relayConfig is the unified config.json structure. Each top-level key is
+// relayConfig is the unified settings.json structure. Each top-level key is
 // optional; missing sections produce empty (non-nil) configs.
 type relayConfig struct {
 	OpenAI      *OpenAIConfig               `json:"openai,omitempty"`
@@ -40,19 +42,19 @@ type PiConfig struct {
 
 // LoadConfig loads provider configuration. It tries sources in order:
 //
-//  1. {dataDir}/config.json — unified config (preferred)
+//  1. {dataDir}/settings.json — unified config (preferred)
 //  2. Separate files — {dataDir}/openai_endpoints.json, {dataDir}/llama_models.json
 //  3. Environment variables — OPENAI_BASE_URL / OPENAI_API_KEY (OpenAI only)
 //
 // The openaiConfigOverride flag (--openai-config) bypasses all of the above
 // for the OpenAI section and reads that file directly.
 //
-// The returned pty map is the raw config.json `pty` section (may be nil if
+// The returned pty map is the raw settings.json `pty` section (may be nil if
 // absent). Seeding happens in TemplateStore.Load, not here.
 func LoadConfig(dataDir string, openaiConfigOverride string) (*OpenAIConfig, *LlamaConfig, *PiConfig, map[string]TerminalTemplate, error) {
-	configPath := filepath.Join(dataDir, "config.json")
+	configPath := filepath.Join(dataDir, "settings.json")
 
-	// Try unified config.json first.
+	// Try unified settings.json first.
 	data, err := os.ReadFile(configPath)
 	if err == nil {
 		openaiCfg, llamaCfg, piCfg, ptyCfg, err := parseUnifiedConfig(data, configPath)
@@ -69,14 +71,14 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*OpenAIConfig, *Ll
 			}
 		}
 
-		slog.Info("loaded config.json", "path", configPath)
+		slog.Info("loaded settings.json", "path", configPath)
 		return openaiCfg, llamaCfg, piCfg, ptyCfg, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, nil, nil, nil, fmt.Errorf("read %s: %w", configPath, err)
 	}
 
-	// config.json not found — fall back to separate files + env vars.
+	// settings.json not found — fall back to separate files + env vars.
 	openaiPath := openaiConfigOverride
 	if openaiPath == "" {
 		openaiPath = filepath.Join(dataDir, "openai_endpoints.json")
@@ -94,7 +96,9 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*OpenAIConfig, *Ll
 	return openaiCfg, llamaCfg, &PiConfig{}, nil, nil
 }
 
-// parseUnifiedConfig parses the unified config.json into separate configs.
+// parseUnifiedConfig parses the unified settings.json into separate configs.
+// Strips JSONC comments (// and /* */) before unmarshalling so users can
+// toggle sections with comment blocks. Comments don't survive writes.
 func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig, *PiConfig, map[string]TerminalTemplate, error) {
 	// Use a raw intermediate so llama-server's model entries stay as
 	// map[string]any for the generic CLI flag translation.
@@ -104,7 +108,7 @@ func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig
 		Pi          *PiConfig                   `json:"pi"`
 		PTY         map[string]TerminalTemplate `json:"pty"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(jsonc.ToJSON(data), &raw); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("parse %s: %w", source, err)
 	}
 
@@ -133,16 +137,27 @@ func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig
 	return openaiCfg, llamaCfg, piCfg, raw.PTY, nil
 }
 
+// readJSONCFile reads path and unmarshals into out, stripping JSONC comments
+// first so users can hand-edit with comment toggles. The raw os.ReadFile error
+// is returned unwrapped (callers use os.IsNotExist); parse errors are wrapped
+// with the source path since json errors don't include it.
+func readJSONCFile(path string, out any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(jsonc.ToJSON(data), out); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	return nil
+}
+
 // loadOpenAIConfigFile reads an OpenAI config from a specific file path.
 // Does not fall back to env vars.
 func loadOpenAIConfigFile(path string) (*OpenAIConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	var cfg OpenAIConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	if err := readJSONCFile(path, &cfg); err != nil {
+		return nil, err
 	}
 	normalizeOpenAI(&cfg)
 	return &cfg, nil
@@ -150,16 +165,12 @@ func loadOpenAIConfigFile(path string) (*OpenAIConfig, error) {
 
 // loadLlamaConfigFile reads a standalone llama_models.json file.
 func loadLlamaConfigFile(path string) (*LlamaConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	var cfg LlamaConfig
+	if err := readJSONCFile(path, &cfg); err != nil {
 		if os.IsNotExist(err) {
 			return &LlamaConfig{}, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	var cfg LlamaConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, err
 	}
 	if err := parseLlamaRawModels(&cfg, path); err != nil {
 		return nil, err
@@ -169,20 +180,17 @@ func loadLlamaConfigFile(path string) (*LlamaConfig, error) {
 
 // LoadOpenAIConfig reads OpenAI config from a file path, falling back to
 // OPENAI_BASE_URL / OPENAI_API_KEY env vars if the file is absent.
-// Used by the fallback path when config.json doesn't exist.
+// Used by the fallback path when settings.json doesn't exist.
 func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
 	if path != "" {
-		data, err := os.ReadFile(path)
+		var cfg OpenAIConfig
+		err := readJSONCFile(path, &cfg)
 		if err == nil {
-			var cfg OpenAIConfig
-			if err := json.Unmarshal(data, &cfg); err != nil {
-				return nil, fmt.Errorf("parse %s: %w", path, err)
-			}
 			normalizeOpenAI(&cfg)
 			return &cfg, nil
 		}
 		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read %s: %w", path, err)
+			return nil, err
 		}
 	}
 
@@ -219,19 +227,21 @@ func normalizeOpenAI(cfg *OpenAIConfig) {
 	}
 }
 
-// WriteConfigPTY persists the pty section of config.json atomically. Other
+// WriteConfigPTY persists the pty section of settings.json atomically. Other
 // top-level sections (openai, llama-server, future unknown keys) are read as
 // raw JSON and re-emitted untouched so this writer never loses data it doesn't
 // understand. Values are stripped of their ID (it's the map key) and BuiltIn
 // (computed at API time) before serialization.
 func WriteConfigPTY(dataDir string, pty map[string]TerminalTemplate) error {
-	configPath := filepath.Join(dataDir, "config.json")
+	configPath := filepath.Join(dataDir, "settings.json")
 
-	// Preserve unknown sections by reading into a raw map.
+	// Preserve unknown sections by reading into a raw map. Strip JSONC
+	// comments first — they'll be erased anyway since we re-marshal below,
+	// but parsing must not fail when the user has comment blocks in place.
 	raw := make(map[string]json.RawMessage)
 	if data, err := os.ReadFile(configPath); err == nil {
 		if len(data) > 0 {
-			if err := json.Unmarshal(data, &raw); err != nil {
+			if err := json.Unmarshal(jsonc.ToJSON(data), &raw); err != nil {
 				return fmt.Errorf("parse %s: %w", configPath, err)
 			}
 		}
