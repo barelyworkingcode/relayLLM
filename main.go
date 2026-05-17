@@ -170,6 +170,8 @@ func main() {
 		llamaProxyAddr = ":" + *llamaProxyPort
 	}
 	llamaProxy := StartLlamaProxy(llamaProxyAddr, llamaManager)
+	sessions.SetLlamaProxyPort(*llamaProxyPort)
+	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
 
 	// Image generation via ComfyUI (optional).
 	if *comfyuiURL != "" {

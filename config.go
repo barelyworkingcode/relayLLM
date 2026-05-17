@@ -38,6 +38,52 @@ type PiConfig struct {
 	AutoRegenSkills string   `json:"autoRegenSkills,omitempty"` // "always" | "skipIfExists" | "never"
 	SkillPath       string   `json:"skillPath,omitempty"`       // supports ${project.path}
 	EnvPassthrough  []string `json:"env_passthrough,omitempty"` // env keys copied from os.Environ() into pi
+
+	// ProjectOverlay opts a relay-managed project into a per-project pi
+	// config dir at <projectDir>/.pi/. When enabled, relayLLM materializes
+	// models.json + settings.json reflecting our curated providers and
+	// symlinks auth.json back to the user's global ~/.pi/agent/auth.json,
+	// then spawns pi with PI_CODING_AGENT_DIR pointing at the overlay.
+	// Pi's global ~/.pi/agent/ is never written to. See pi_overlay.go.
+	ProjectOverlay PiProjectOverlay `json:"projectOverlay,omitempty"`
+}
+
+// PiAuthStrategy* values for PiProjectOverlay.AuthStrategy.
+const (
+	PiAuthStrategySymlink = "symlink"
+	PiAuthStrategyNone    = "none"
+)
+
+// PiProjectOverlay controls per-project pi config materialization.
+// Mode == "never" (default) disables the feature entirely.
+type PiProjectOverlay struct {
+	Mode            string   `json:"mode,omitempty"`            // "always" | "skipIfExists" | "never" (default "never")
+	DirName         string   `json:"dirName,omitempty"`         // default ".pi"
+	AuthStrategy    string   `json:"authStrategy,omitempty"`    // "symlink" | "none" (default "symlink")
+	DefaultProvider string   `json:"defaultProvider,omitempty"` // e.g. "relay-llama"
+	DefaultModel    string   `json:"defaultModel,omitempty"`    // e.g. "qwen3-8b"
+	DefaultThinking string   `json:"defaultThinking,omitempty"` // off | minimal | low | medium | high | xhigh
+	ExtraSkillDirs  []string `json:"extraSkillDirs,omitempty"`  // appended to skills array
+	Gitignore       bool     `json:"gitignore,omitempty"`       // auto-append overlay dir to project .gitignore
+
+	// Negative-semantics bools: zero-value = "merge user's global config in".
+	// Set to true only to fully isolate the overlay from the user's existing
+	// global pi setup.
+	ExcludeUserProviders bool `json:"excludeUserProviders,omitempty"` // skip merging ~/.pi/agent/models.json providers
+	ExcludeUserSettings  bool `json:"excludeUserSettings,omitempty"`  // skip basing settings.json on ~/.pi/agent/settings.json
+
+	// ExcludeProviders names specific providers from the user's global
+	// models.json to drop on the merge. Use when our overlay supersedes a
+	// user-defined provider (e.g. they registered "llama-cpp" pointing at
+	// individual llama-server ports and our "relay-llama" proxy now covers
+	// the same models). Less invasive than ExcludeUserProviders, which
+	// strips everything.
+	ExcludeProviders []string `json:"excludeProviders,omitempty"`
+}
+
+// Enabled reports whether the overlay should be materialized for a spawn.
+func (o PiProjectOverlay) Enabled() bool {
+	return o.Mode != "" && o.Mode != AutoRegenNever
 }
 
 // LoadConfig loads provider configuration. It tries sources in order:

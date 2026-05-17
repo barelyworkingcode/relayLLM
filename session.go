@@ -89,6 +89,11 @@ type SessionManager struct {
 	builtinTools *BuiltinToolRegistry
 	dataDir      string
 	piConfig     *PiConfig
+
+	// llamaProxyPort is the OpenAI-compatible reverse-proxy port (empty when
+	// --llama-proxy-port was unset). Consumed by the pi project overlay to
+	// expose llama-server aliases as a pi provider entry; see pi_overlay.go.
+	llamaProxyPort string
 }
 
 func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -146,6 +151,26 @@ func (m *SessionManager) SetDataDir(dir string) {
 // extra args, …). Pass nil for defaults.
 func (m *SessionManager) SetPiConfig(cfg *PiConfig) {
 	m.piConfig = cfg
+}
+
+// SetLlamaProxyPort records the OpenAI-compatible llama-proxy port so the pi
+// project overlay can register a "relay-llama" provider entry pointing at it.
+// Empty string disables the overlay's llama provider entry.
+func (m *SessionManager) SetLlamaProxyPort(port string) {
+	m.llamaProxyPort = port
+}
+
+// piOverlayInputs builds a snapshot of the pi overlay inputs from the current
+// SessionManager state. Returned by-value so callers don't mutate live config.
+func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
+	inputs := PiOverlayInputs{
+		OpenAI:         m.openaiConfig,
+		LlamaProxyPort: m.llamaProxyPort,
+	}
+	if m.llamaManager != nil && m.llamaManager.config != nil {
+		inputs.LlamaModels = m.llamaManager.config.Models
+	}
+	return inputs
 }
 
 // llamaConfig returns the LlamaConfig from the manager, or nil if no
@@ -321,7 +346,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 				session.ThinkingLevel = s.ThinkingLevel
 			}
 		}
-		p := NewPiProvider(session, handler, upstreamProvider, modelID, m.dataDir, m.piConfig)
+		p := NewPiProvider(session, handler, upstreamProvider, modelID, m.dataDir, m.piConfig, m.piOverlayInputs())
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
