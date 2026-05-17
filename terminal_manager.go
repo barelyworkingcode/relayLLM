@@ -20,6 +20,13 @@ type TerminalManager struct {
 	// disk logging (used by tests that don't need replay).
 	logDir string
 
+	// piConfig + overlayInputsFn supply the project-overlay shape for any
+	// terminal template whose command is `pi`. The PTY launcher consults
+	// these only when the template carries a RelayManagedSpec; non-pi or
+	// non-relay-managed templates spawn exactly as before.
+	piConfig        *PiConfig
+	overlayInputsFn func() PiOverlayInputs
+
 	onOutput func(terminalID string, data []byte)
 	onExit   func(terminalID string, exitCode int)
 }
@@ -38,6 +45,15 @@ func NewTerminalManager(templates *TemplateStore, logDir string) *TerminalManage
 // by the /api/terminals/{id}/log handler to read post-exit replays.
 func (m *TerminalManager) LogDir() string {
 	return m.logDir
+}
+
+// SetPiOverlay supplies the pi project-overlay config + inputs accessor so
+// PTY templates that run `pi` against a relay-managed directory get the same
+// per-project models.json/settings.json/auth.json the LLM provider uses. Pass
+// (nil, nil) to disable the overlay for PTY sessions.
+func (m *TerminalManager) SetPiOverlay(cfg *PiConfig, inputsFn func() PiOverlayInputs) {
+	m.piConfig = cfg
+	m.overlayInputsFn = inputsFn
 }
 
 func (m *TerminalManager) SetOutputHandler(fn func(terminalID string, data []byte)) {
@@ -72,19 +88,21 @@ func (m *TerminalManager) Create(templateID, name, directory string, cols, rows 
 	}
 
 	session := &TerminalSession{
-		ID:          uuid.New().String(),
-		TemplateID:  templateID,
-		Name:        name,
-		Directory:   directory,
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-		cols:        cols,
-		rows:        rows,
-		idleTimeout: time.Duration(idleMinutes) * time.Minute,
-		extraArgs:   extraArgs,
-		logDir:      m.logDir,
-		onOutput:    m.onOutput,
-		onExit:      m.onExit,
-		onIdle:      func(id string) { m.Close(id) },
+		ID:              uuid.New().String(),
+		TemplateID:      templateID,
+		Name:            name,
+		Directory:       directory,
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		cols:            cols,
+		rows:            rows,
+		idleTimeout:     time.Duration(idleMinutes) * time.Minute,
+		extraArgs:       extraArgs,
+		logDir:          m.logDir,
+		piConfig:        m.piConfig,
+		overlayInputsFn: m.overlayInputsFn,
+		onOutput:        m.onOutput,
+		onExit:          m.onExit,
+		onIdle:          func(id string) { m.Close(id) },
 	}
 
 	if err := session.Start(tmpl); err != nil {

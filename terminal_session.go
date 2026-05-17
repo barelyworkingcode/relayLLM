@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -50,6 +51,11 @@ type TerminalSession struct {
 	// in-memory scrollback is gone. nil disables disk logging.
 	logDir string
 	logger *terminalLogger
+
+	// Pi project-overlay hooks (set by TerminalManager.SetPiOverlay). Only
+	// consulted when the template runs `pi`; non-pi templates ignore them.
+	piConfig        *PiConfig
+	overlayInputsFn func() PiOverlayInputs
 
 	// Idle timeout: kills terminal after no viewers for this duration.
 	idleTimeout time.Duration
@@ -97,6 +103,19 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
 	}
 	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
+
+	// Pi project-overlay: when the template runs `pi` in a relay-managed
+	// project and the overlay is enabled in PiConfig, materialize
+	// <projectDir>/.pi/{models,settings,auth}.json and inject
+	// PI_CODING_AGENT_DIR. Same hook the LLM provider uses, so PTY and RPC
+	// pi sessions see the same models/skills inside the project.
+	if isPiCommand(command) && s.piConfig != nil && s.overlayInputsFn != nil {
+		var err error
+		cmd.Env, err = applyPiOverlayEnv(cmd.Env, s.Directory, s.piConfig, s.overlayInputsFn())
+		if err != nil {
+			return fmt.Errorf("terminal pi overlay: %w", err)
+		}
+	}
 
 	cols := s.cols
 	rows := s.rows
@@ -373,6 +392,13 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+// isPiCommand reports whether command's basename is "pi". Used to gate the
+// project-overlay only on templates that actually launch the pi CLI, leaving
+// shell / claude / opencode templates untouched.
+func isPiCommand(command string) bool {
+	return command != "" && filepath.Base(command) == "pi"
 }
 
 // resolveTemplateSubs is a thin adapter that builds a RelayManagedSpec from

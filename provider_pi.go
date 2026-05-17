@@ -53,6 +53,13 @@ type PiProvider struct {
 	skillPathTpl    string
 	envPassthrough  []string
 
+	// Pi project-overlay config + inputs needed to translate relayLLM's
+	// curated providers into the overlay's models.json. When overlay is
+	// disabled (Mode == "never" or unset) Start() skips materialization
+	// and pi falls back to its global ~/.pi/agent/ config as before.
+	piConfig      *PiConfig
+	overlayInputs PiOverlayInputs
+
 	// RPC request/response correlation. pi commands carry an optional `id`
 	// field; the matching response echoes the same `id`. We register a
 	// channel per outstanding request so set_model/get_state/etc. can block
@@ -98,7 +105,7 @@ type PiProvider struct {
 	firstTokenNano atomic.Int64
 }
 
-func NewPiProvider(session *Session, handler EventHandler, provider, modelID, dataDir string, cfg *PiConfig) *PiProvider {
+func NewPiProvider(session *Session, handler EventHandler, provider, modelID, dataDir string, cfg *PiConfig, overlayInputs PiOverlayInputs) *PiProvider {
 	p := &PiProvider{
 		session:       session,
 		handler:       handler,
@@ -110,6 +117,8 @@ func NewPiProvider(session *Session, handler EventHandler, provider, modelID, da
 		rpcPending:    make(map[string]chan json.RawMessage),
 		piIdxToRelay:  make(map[int]int),
 		toolNamesByID: make(map[string]string),
+		piConfig:      cfg,
+		overlayInputs: overlayInputs,
 	}
 	p.emitter = NewEventEmitter(handler)
 	if cfg != nil {
@@ -225,6 +234,10 @@ func (p *PiProvider) Start() error {
 		"PI_OFFLINE=1",
 		"PI_SKIP_VERSION_CHECK=1",
 	)
+	cmd.Env, err = applyPiOverlayEnv(cmd.Env, p.directory, p.piConfig, p.overlayInputs)
+	if err != nil {
+		return fmt.Errorf("pi: %w", err)
+	}
 	if subs.RelayToken != "" {
 		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
 	}
