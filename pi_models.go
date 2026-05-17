@@ -118,7 +118,7 @@ func parsePiListModels(raw []byte) []ModelInfo {
 		}
 		seen[value] = true
 		models = append(models, ModelInfo{
-			Label:    modelID,
+			Label:    value,
 			Value:    value,
 			Group:    "Pi · " + provider,
 			Provider: "pi",
