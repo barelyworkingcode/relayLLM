@@ -190,10 +190,25 @@ func (p *PiProvider) Start() error {
 		args = append(args, "--append-system-prompt", p.session.SystemPrompt)
 	}
 
-	// Auto-append --skill when the bridge resolved one. Skip if the user
-	// already wired it via extraArgs (avoid duplicate flags).
-	if subs.SkillPath != "" && !hasArg(p.extraArgs, "--skill") {
-		args = append(args, "--skill", subs.SkillPath)
+	// Auto-append --skill <skills-root> so pi recursively discovers every
+	// sibling skill at once (e.g. .claude/skills/ containing relay/, tbo-email/,
+	// import-meeting/ — one flag, all three loaded). When relay-managed, use
+	// the parent of the resolved skill path; otherwise fall back to
+	// <project>/.claude/skills if present. Skip when the user wired --skill
+	// themselves via extraArgs (avoid duplicate flags).
+	if !hasArg(p.extraArgs, "--skill") {
+		skillsRoot := ""
+		if subs.SkillPath != "" {
+			skillsRoot = filepath.Dir(subs.SkillPath)
+		} else if p.directory != "" {
+			candidate := filepath.Join(p.directory, ".claude", "skills")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				skillsRoot = candidate
+			}
+		}
+		if skillsRoot != "" {
+			args = append(args, "--skill", skillsRoot)
+		}
 	}
 
 	// Expand placeholders in user extraArgs so power users can still
