@@ -1094,11 +1094,25 @@ func (p *PiProvider) DeleteSession() error {
 		return nil
 	}
 
-	// Pi paths look like: {sessionDir}/--<cwd-with-slashes-as-dashes>--/<timestamp>_<uuid>.jsonl
-	pattern := filepath.Join(p.sessionDir(), "*", "*_"+sid+".jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return fmt.Errorf("glob pi session: %w", err)
+	// Pi has used both layouts for its session directory: a flat
+	// {sessionDir}/<timestamp>_<uuid>.jsonl (current observed behavior) and
+	// a nested {sessionDir}/<cwd-as-dashes>/<timestamp>_<uuid>.jsonl
+	// (older versions). Glob both so we stay correct whichever pi picks.
+	patterns := []string{
+		filepath.Join(p.sessionDir(), "*_"+sid+".jsonl"),
+		filepath.Join(p.sessionDir(), "*", "*_"+sid+".jsonl"),
+	}
+	var matches []string
+	for _, pat := range patterns {
+		m, err := filepath.Glob(pat)
+		if err != nil {
+			return fmt.Errorf("glob pi session: %w", err)
+		}
+		matches = append(matches, m...)
+	}
+	if len(matches) == 0 {
+		slog.Warn("pi DeleteSession: no matching file found", "piSessionId", sid, "dir", p.sessionDir())
+		return nil
 	}
 	for _, path := range matches {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

@@ -107,8 +107,8 @@ PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via We
 
 Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Support/relayLLM/`, on Linux `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
 - `projects.json` — project definitions
-- `sessions/` — per-session JSON files
-- `pi-sessions/` — pi.dev session JSONLs (one per pi session, owned by pi via `--session-dir`)
+- `sessions/` — per-session JSON files. A daily sweeper deletes files where `headless: true` and mtime is older than 7 days; non-headless (Eve-owned) sessions are never touched.
+- `pi-sessions/` — pi.dev session JSONLs (one per pi session, owned by pi via `--session-dir`). Daily sweeper deletes files whose `piSessionId` is no longer referenced by any `sessions/*.json` (with a 1h minAge cushion to avoid racing live pi processes).
 - `terminals/templates.json` — custom terminal templates
 - `settings.json` — unified provider config (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
   ```json
