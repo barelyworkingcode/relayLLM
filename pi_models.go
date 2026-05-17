@@ -30,7 +30,7 @@ var piModels piModelsCache
 //
 // configuredPath, if non-empty, overrides the well-known-location lookup —
 // useful when pi is installed under a Node version manager or non-standard
-// prefix and recorded in config.json's `pi.binaryPath`.
+// prefix and recorded in settings.json's `pi.binaryPath`.
 //
 // If pi is not on PATH, returns nil — the /api/models endpoint silently
 // drops the pi section.
