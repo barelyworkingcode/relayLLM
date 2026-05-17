@@ -97,6 +97,35 @@ func main() {
 		}
 	}()
 
+	// Daily GC: drop headless sessions/*.json older than 7d, then drop
+	// pi-sessions/*.jsonl whose piSessionId is no longer referenced by
+	// any survivor (1h cushion so we don't race a live pi writer).
+	go func() {
+		const (
+			headlessAge   = 7 * 24 * time.Hour
+			piOrphanAge   = 1 * time.Hour
+			sweepInterval = 24 * time.Hour
+		)
+		sessionsDir := filepath.Join(*dataDir, "sessions")
+		piDir := filepath.Join(*dataDir, "pi-sessions")
+		for {
+			removed, livePi, err := sweepSessions(sessionsDir, headlessAge)
+			if err != nil {
+				slog.Warn("session sweep failed", "error", err)
+			} else if removed > 0 {
+				slog.Info("session sweep", "removed", removed)
+			}
+			if livePi != nil {
+				if removed, err := sweepOrphanedPiSessions(piDir, livePi, piOrphanAge); err != nil {
+					slog.Warn("pi orphan sweep failed", "error", err)
+				} else if removed > 0 {
+					slog.Info("pi orphan sweep", "removed", removed)
+				}
+			}
+			time.Sleep(sweepInterval)
+		}
+	}()
+
 	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
 	perms.SetEventSink(wsHub)
