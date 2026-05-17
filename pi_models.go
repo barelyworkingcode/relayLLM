@@ -77,39 +77,56 @@ func FetchPiModels(ctx context.Context, configuredPath string) []ModelInfo {
 	return models
 }
 
-// parsePiListModels scans `pi --list-models` output. Pi prints a whitespace-
-// separated table:
+// parsePiListModels scans `pi --list-models` output. Pi prints a
+// fixed-width, space-padded table whose model column can contain spaces:
 //
-//	provider   model                  context  max-out  thinking  images
-//	llama-cpp  Qwen3.6-35B-A3B-UD-Q4  128K     16.4K    no        no
-//	anthropic  claude-sonnet-4-...    200K     16K      yes       yes
+//	provider   model               context  max-out  thinking  images
+//	llama-cpp  Qwen3.6 27B Q4      128K     16.4K    no        no
+//	llama-cpp  Qwen3.6 27B Q6 MTP  128K     16.4K    no        no
+//	anthropic  claude-sonnet-4-... 200K     16K      yes       yes
 //
-// We skip the header row (first field == "provider"), take the first two
-// fields of each subsequent row as <provider> <model>, and wrap them in
-// the relayLLM ModelInfo shape.
+// We can't tokenize on whitespace because `Qwen3.6 27B Q4` is one model
+// name, not three. Instead we read the header row, locate the byte offsets
+// of `provider`, `model`, and `context`, and slice each subsequent row
+// against those offsets.
 func parsePiListModels(raw []byte) []ModelInfo {
 	seen := make(map[string]bool)
 	var models []ModelInfo
 
+	var providerStart, modelStart, modelEnd int
+	headerParsed := false
+
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(stripANSI(scanner.Text()))
-		if line == "" {
+		line := stripANSI(scanner.Text())
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		if !headerParsed {
+			providerStart = strings.Index(line, "provider")
+			modelStart = strings.Index(line, "model")
+			modelEnd = strings.Index(line, "context")
+			// Without these three landmarks we can't slice rows safely.
+			if providerStart < 0 || modelStart <= providerStart || modelEnd <= modelStart {
+				return nil
+			}
+			headerParsed = true
 			continue
 		}
-		provider := strings.ToLower(fields[0])
-		// Skip the column header.
-		if provider == "provider" {
+
+		if len(line) <= modelStart {
 			continue
 		}
-		modelID := fields[1]
-		// Defensive: skip non-table lines (e.g. error messages, blank rows).
-		if !looksLikeProvider(provider) || !looksLikeModelID(modelID) {
+		provider := strings.ToLower(strings.TrimSpace(line[providerStart:modelStart]))
+		// Be defensive about short rows (e.g. footer text) so we don't
+		// panic if a line ends before the context column.
+		end := modelEnd
+		if end > len(line) {
+			end = len(line)
+		}
+		modelID := strings.TrimSpace(line[modelStart:end])
+		if !looksLikeProvider(provider) || !looksLikeModelName(modelID) {
 			continue
 		}
 		value := "pi/" + provider + "/" + modelID
@@ -146,9 +163,10 @@ func looksLikeProvider(s string) bool {
 	return true
 }
 
-// looksLikeModelID accepts the broad set of characters pi model handles use
-// (alphanumerics, `-`, `_`, `.`, `:`, `/`).
-func looksLikeModelID(s string) bool {
+// looksLikeModelName accepts the broad set of characters pi model handles use
+// (alphanumerics, `-`, `_`, `.`, `:`, `/`) plus spaces — pi's llama-cpp
+// provider exposes human-readable names like `Qwen3.6 27B Q4`.
+func looksLikeModelName(s string) bool {
 	if s == "" {
 		return false
 	}
@@ -157,7 +175,7 @@ func looksLikeModelID(s string) bool {
 		case r >= 'a' && r <= 'z':
 		case r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9':
-		case r == '-' || r == '_' || r == '.' || r == ':' || r == '/':
+		case r == '-' || r == '_' || r == '.' || r == ':' || r == '/' || r == ' ':
 		default:
 			return false
 		}
