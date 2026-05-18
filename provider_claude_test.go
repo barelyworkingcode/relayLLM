@@ -432,27 +432,24 @@ func TestClaudeTranslate_NonJsonOutput(t *testing.T) {
 func TestClaudeTranslate_SnapshotPerBlock_ThinkingThenText(t *testing.T) {
 	p, captured := claudeTestProvider()
 
-	// Event 1: thinking block.
 	p.processLine(json.RawMessage(`{
 		"type":"assistant",
 		"message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"let me count..."}]}
 	}`))
-	// Event 2: text block at a NEW global index (text len < thinking len —
-	// the regressing-length case that caught us once).
 	p.processLine(json.RawMessage(`{
 		"type":"assistant",
 		"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"1, 2, 3"}]}
 	}`))
 	p.processLine(json.RawMessage(`{"type":"result","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}`))
 
-	// Expected sequence:
+	// Expected sequence (each block emits start+delta+stop inline):
 	//   1. message_start
 	//   2. content_block_start (idx=0, thinking)
 	//   3. thinking_delta "let me count..."
-	//   4. content_block_stop (idx=0)        (auto-close before idx=1 opens)
+	//   4. content_block_stop (idx=0)
 	//   5. content_block_start (idx=1, text)
 	//   6. text_delta "1, 2, 3"
-	//   7. content_block_stop (idx=1)        (synthesized at finalize)
+	//   7. content_block_stop (idx=1)
 	//   8. stats_update
 	//   9. message_complete
 	if len(*captured) != 9 {
