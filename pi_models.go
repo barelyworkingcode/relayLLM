@@ -23,22 +23,42 @@ type piModelsCache struct {
 
 var piModels piModelsCache
 
-// FetchPiModels returns the list of models advertised by the pi CLI, wrapped
-// as relayLLM ModelInfo entries with the `pi/<provider>/<modelId>` value
-// convention. Results are cached for 5 minutes; the cache also clears
-// whenever the configured binary path changes.
+// FetchPiModels returns the list of models offered by the pi provider,
+// wrapped as relayLLM ModelInfo entries with the `pi/<provider>/<modelId>`
+// value convention.
 //
-// configuredPath, if non-empty, overrides the well-known-location lookup —
-// useful when pi is installed under a Node version manager or non-standard
-// prefix and recorded in settings.json's `pi.binaryPath`.
+// When the project overlay is enabled, the listing reflects what pi will
+// actually have access to in a spawned RPC session: providers in
+// ExcludeProviders are filtered out (otherwise users would pick a model
+// that pi rejects on launch), and a synthetic `relay-llama` entry per
+// llama-server model is added (pi would otherwise not see those until
+// after spawn-time overlay materialization).
+//
+// The upstream `pi --list-models` exec is cached for 5 minutes; the
+// filter/augment pass runs on every call (cheap) so overlay changes take
+// effect immediately.
 //
 // If pi is not on PATH, returns nil — the /api/models endpoint silently
 // drops the pi section.
-func FetchPiModels(ctx context.Context, configuredPath string) []ModelInfo {
+func FetchPiModels(ctx context.Context, piCfg *PiConfig, inputs PiOverlayInputs) []ModelInfo {
+	var configuredPath string
+	if piCfg != nil {
+		configuredPath = piCfg.BinaryPath
+	}
+	raw := fetchPiListModelsCached(ctx, configuredPath)
+
+	if piCfg == nil || !piCfg.ProjectOverlay.Enabled() {
+		return raw
+	}
+	return applyPiOverlayToModelList(raw, piCfg.ProjectOverlay, inputs)
+}
+
+// fetchPiListModelsCached runs `pi --list-models` (with TTL caching) and
+// parses the output into ModelInfo entries. Returns nil if pi is missing or
+// the exec fails — callers degrade gracefully.
+func fetchPiListModelsCached(ctx context.Context, configuredPath string) []ModelInfo {
 	piPath := resolvePiPath(configuredPath)
 
-	// Cheap path: TTL still valid and binary path unchanged → serve cached.
-	// Skips the os.Stat and the upstream exec on the common hot path.
 	piModels.mu.Lock()
 	if !piModels.expiresAt.IsZero() &&
 		time.Now().Before(piModels.expiresAt) &&
@@ -50,7 +70,6 @@ func FetchPiModels(ctx context.Context, configuredPath string) []ModelInfo {
 	piModels.mu.Unlock()
 
 	if _, err := os.Stat(piPath); err != nil {
-		// Pi not installed; degrade gracefully.
 		return nil
 	}
 
@@ -75,6 +94,57 @@ func FetchPiModels(ctx context.Context, configuredPath string) []ModelInfo {
 	piModels.mu.Unlock()
 
 	return models
+}
+
+// applyPiOverlayToModelList drops providers the overlay excludes and appends
+// overlay-added providers (currently: relay-llama proxy entries). Keeps
+// ordering stable so the UI picker stays predictable.
+func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []ModelInfo {
+	excluded := make(map[string]bool, len(overlay.ExcludeProviders))
+	for _, name := range overlay.ExcludeProviders {
+		excluded[name] = true
+	}
+
+	out := make([]ModelInfo, 0, len(raw)+len(inputs.LlamaModels))
+	for _, m := range raw {
+		if provider := piProviderFromValue(m.Value); provider != "" && excluded[provider] {
+			continue
+		}
+		out = append(out, m)
+	}
+
+	// relay-llama: one synthetic entry per llama-server model. Pi won't list
+	// these via --list-models (they only exist in the per-project overlay
+	// materialized at spawn time), so we add them ourselves so the picker
+	// reflects what the user can actually pick.
+	if inputs.LlamaProxyPort != "" {
+		for _, llama := range inputs.LlamaModels {
+			value := "pi/" + piRelayLlamaProvider + "/" + llama.Alias
+			out = append(out, ModelInfo{
+				Label:    value,
+				Value:    value,
+				Group:    "Pi · " + piRelayLlamaProvider,
+				Provider: "pi",
+			})
+		}
+	}
+	return out
+}
+
+// piProviderFromValue extracts the provider segment from a `pi/<provider>/<model>`
+// value string. Returns "" for malformed values rather than misclassifying.
+func piProviderFromValue(value string) string {
+	const prefix = "pi/"
+	if len(value) <= len(prefix) || value[:len(prefix)] != prefix {
+		return ""
+	}
+	rest := value[len(prefix):]
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == '/' {
+			return rest[:i]
+		}
+	}
+	return ""
 }
 
 // parsePiListModels scans `pi --list-models` output. Pi prints a

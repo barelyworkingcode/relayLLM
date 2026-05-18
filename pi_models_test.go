@@ -81,3 +81,61 @@ func TestParsePiListModels_Empty(t *testing.T) {
 		t.Fatalf("want nil, got %#v", got)
 	}
 }
+
+func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayLlama(t *testing.T) {
+	raw := parsePiListModels([]byte(piListSample))
+	overlay := PiProjectOverlay{
+		Mode:             AutoRegenAlways,
+		ExcludeProviders: []string{"llama-cpp"},
+	}
+	inputs := PiOverlayInputs{
+		LlamaProxyPort: "8180",
+		LlamaModels: []LlamaModelConfig{
+			{Alias: "Qwen3.6 MoE 35"},
+			{Alias: "Qwen3.6 27B Q4"},
+		},
+	}
+
+	got := applyPiOverlayToModelList(raw, overlay, inputs)
+
+	wantValues := map[string]bool{
+		"pi/anthropic/claude-sonnet-4":     true,
+		"pi/openai/gpt-4o":                 true,
+		"pi/relay-llama/Qwen3.6 MoE 35":    true,
+		"pi/relay-llama/Qwen3.6 27B Q4":    true,
+	}
+	for _, m := range got {
+		if strings.HasPrefix(m.Value, "pi/llama-cpp/") {
+			t.Errorf("excluded provider leaked through: %q", m.Value)
+		}
+		delete(wantValues, m.Value)
+	}
+	for v := range wantValues {
+		t.Errorf("missing expected entry: %q", v)
+	}
+}
+
+func TestApplyPiOverlayToModelList_NoOpWhenNoExclusionsAndNoProxy(t *testing.T) {
+	raw := parsePiListModels([]byte(piListSample))
+	got := applyPiOverlayToModelList(raw, PiProjectOverlay{Mode: AutoRegenAlways}, PiOverlayInputs{})
+	if len(got) != len(raw) {
+		t.Fatalf("expected pass-through, got %d entries (want %d)", len(got), len(raw))
+	}
+}
+
+func TestPiProviderFromValue(t *testing.T) {
+	cases := map[string]string{
+		"pi/anthropic/claude-haiku":     "anthropic",
+		"pi/llama-cpp/Qwen3.6 MoE 35":   "llama-cpp",
+		"pi/relay-llama/Qwen3.6 MoE 35": "relay-llama",
+		"":            "",
+		"haiku":       "",
+		"pi/":         "",
+		"pi/onlyprov": "", // no '/' after provider
+	}
+	for in, want := range cases {
+		if got := piProviderFromValue(in); got != want {
+			t.Errorf("piProviderFromValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
