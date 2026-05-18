@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+var emptyJSONObject = []byte("{}")
 
 const claudeIdleTimeout = 15 * time.Minute
 
@@ -295,12 +298,6 @@ func claudeMCPServerNames(entries []json.RawMessage) []string {
 func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 	switch subtype {
 	case SystemInitSubtype:
-		// Claude CLI 2.1.x changed mcp_servers from []string to
-		// []{name,status,...} objects. Decode into json.RawMessage and
-		// project name out so we tolerate either shape — and so an
-		// mcp_servers schema change can never abort the entire init parse
-		// (which would also drop the session_id capture and break
-		// --resume / history replay across browser refreshes).
 		var init struct {
 			SessionID  string            `json:"session_id"`
 			Model      string            `json:"model"`
@@ -497,8 +494,8 @@ func (p *ClaudeProvider) translateAssistantSnapshot(messageRaw json.RawMessage) 
 		case BlockToolUse:
 			p.emitter.ToolUseBlockStart(idx, block.ID, block.Name)
 			input := block.Input
-			if s := string(input); s != "" && s != "{}" {
-				p.emitter.InputJsonDelta(idx, s)
+			if len(input) > 0 && !bytes.Equal(input, emptyJSONObject) {
+				p.emitter.InputJsonDelta(idx, string(input))
 			}
 			p.emitter.ToolUseBlockStop(idx, block.ID, block.Name, input)
 		}
