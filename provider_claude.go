@@ -50,6 +50,16 @@ type ClaudeProvider struct {
 
 	msgStartNano   atomic.Int64
 	firstTokenNano atomic.Int64
+
+	// Per-turn snapshot state. Claude CLI 2.1.x ships one `assistant` event
+	// per fully-completed content block (each event's message.content[]
+	// carries the just-finalized block, not a cumulative snapshot). Events
+	// sharing the same message.id belong to one turn. We allocate monotonic
+	// global block indices across events so block N+1's start/delta/stop
+	// don't collide with block N.
+	snapMu        sync.Mutex
+	snapMessageID string // message.id of the in-progress turn
+	snapNextIdx   int    // next global block index to assign
 }
 
 func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string) *ClaudeProvider {
@@ -255,17 +265,50 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 	}
 }
 
+// claudeMCPServerNames extracts the `name` field from each entry in
+// mcp_servers. Tolerates both the legacy []string shape (Claude CLI <=2.0,
+// raw is a bare JSON string) and the 2.1.x []{name,status,...} shape
+// (raw is a JSON object); silently drops entries with neither.
+func claudeMCPServerNames(entries []json.RawMessage) []string {
+	names := make([]string, 0, len(entries))
+	for _, raw := range entries {
+		if len(raw) == 0 {
+			continue
+		}
+		if raw[0] == '"' {
+			var s string
+			if json.Unmarshal(raw, &s) == nil && s != "" {
+				names = append(names, s)
+			}
+			continue
+		}
+		var obj struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &obj) == nil && obj.Name != "" {
+			names = append(names, obj.Name)
+		}
+	}
+	return names
+}
+
 func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 	switch subtype {
 	case SystemInitSubtype:
+		// Claude CLI 2.1.x changed mcp_servers from []string to
+		// []{name,status,...} objects. Decode into json.RawMessage and
+		// project name out so we tolerate either shape — and so an
+		// mcp_servers schema change can never abort the entire init parse
+		// (which would also drop the session_id capture and break
+		// --resume / history replay across browser refreshes).
 		var init struct {
-			SessionID  string   `json:"session_id"`
-			Model      string   `json:"model"`
-			Cwd        string   `json:"cwd"`
-			Tools      []string `json:"tools"`
-			MCPServers []string `json:"mcp_servers"`
+			SessionID  string            `json:"session_id"`
+			Model      string            `json:"model"`
+			Cwd        string            `json:"cwd"`
+			Tools      []string          `json:"tools"`
+			MCPServers []json.RawMessage `json:"mcp_servers"`
 		}
-		if json.Unmarshal(raw, &init) != nil {
+		if err := json.Unmarshal(raw, &init); err != nil {
 			p.emitter.EmitVersionedRaw(raw)
 			return
 		}
@@ -282,7 +325,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		if cwd == "" {
 			cwd = p.directory
 		}
-		p.emitter.SystemInit(model, cwd, init.Tools, init.MCPServers)
+		p.emitter.SystemInit(model, cwd, init.Tools, claudeMCPServerNames(init.MCPServers))
 
 	case SystemPermissionRequestSubtype:
 		var req struct {
@@ -373,11 +416,11 @@ func (p *ClaudeProvider) translateAssistant(raw json.RawMessage) {
 
 	switch {
 	case ev.Message != nil:
-		var m struct {
-			ID string `json:"id"`
-		}
-		_ = json.Unmarshal(*ev.Message, &m)
-		p.emitter.MessageStart(m.ID)
+		// Claude CLI 2.1.x ships full-message snapshots here; older CLIs
+		// shipped a bare `message_start` with no content. Both are routed
+		// through translateAssistantSnapshot, which is a no-op for empty
+		// content arrays.
+		p.translateAssistantSnapshot(*ev.Message)
 
 	case ev.Delta != nil && ev.Index != nil:
 		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
@@ -393,6 +436,72 @@ func (p *ClaudeProvider) translateAssistant(raw json.RawMessage) {
 		// message_delta / message_stop and anything else without enough info
 		// to type — result event carries the final state we care about.
 		p.emitter.EmitVersionedRaw(raw)
+	}
+}
+
+// claudeSnapContentBlock mirrors the fields we read out of a snapshot's
+// message.content[] entry. Claude CLI puts the streaming-style block kind
+// and full accumulated payload directly on each entry.
+type claudeSnapContentBlock struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	Thinking string          `json:"thinking,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+}
+
+// translateAssistantSnapshot processes one `assistant` event from Claude
+// CLI 2.1.x. Each event's message.content[] holds fully-completed block(s)
+// for the current turn (identified by message.id), so we emit
+// start/delta/stop in one shot per block and allocate a fresh global index
+// per content[] entry across events. A change in message.id resets the
+// per-turn index and emits a new MessageStart.
+func (p *ClaudeProvider) translateAssistantSnapshot(messageRaw json.RawMessage) {
+	var m struct {
+		ID      string                   `json:"id"`
+		Content []claudeSnapContentBlock `json:"content"`
+	}
+	if err := json.Unmarshal(messageRaw, &m); err != nil {
+		p.emitter.EmitVersionedRaw(messageRaw)
+		return
+	}
+
+	p.snapMu.Lock()
+	defer p.snapMu.Unlock()
+
+	if m.ID != p.snapMessageID {
+		p.snapMessageID = m.ID
+		p.snapNextIdx = 0
+		p.emitter.MessageStart(m.ID)
+	}
+
+	for _, block := range m.Content {
+		idx := p.snapNextIdx
+		p.snapNextIdx++
+		switch block.Type {
+		case BlockText:
+			p.emitter.TextBlockStart(idx)
+			if block.Text != "" {
+				p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+				p.emitter.TextDelta(idx, block.Text)
+			}
+			p.emitter.BlockStop(idx)
+		case BlockThinking:
+			p.emitter.ThinkingBlockStart(idx)
+			if block.Thinking != "" {
+				p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+				p.emitter.ThinkingDelta(idx, block.Thinking)
+			}
+			p.emitter.BlockStop(idx)
+		case BlockToolUse:
+			p.emitter.ToolUseBlockStart(idx, block.ID, block.Name)
+			input := block.Input
+			if s := string(input); s != "" && s != "{}" {
+				p.emitter.InputJsonDelta(idx, s)
+			}
+			p.emitter.ToolUseBlockStop(idx, block.ID, block.Name, input)
+		}
 	}
 }
 

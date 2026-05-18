@@ -168,7 +168,7 @@ type ModelInfo struct {
 	SupportsAttachments bool   `json:"supportsAttachments"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager, piCfg *PiConfig) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *LlamaServerManager, piCfg *PiConfig, piOverlay func() PiOverlayInputs) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -209,11 +209,11 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var piPathOverride string
-			if piCfg != nil {
-				piPathOverride = piCfg.BinaryPath
+			var overlay PiOverlayInputs
+			if piOverlay != nil {
+				overlay = piOverlay()
 			}
-			pi = FetchPiModels(r.Context(), piPathOverride)
+			pi = FetchPiModels(r.Context(), piCfg, overlay)
 		}()
 
 		wg.Wait()

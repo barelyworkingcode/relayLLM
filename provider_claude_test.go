@@ -62,6 +62,38 @@ func assertVersion(t *testing.T, events []capturedEvent) {
 	}
 }
 
+// Claude CLI 2.1.x changed mcp_servers from []string to []{name,status,...}.
+// The init parse must tolerate that — otherwise it fails silently, dropping
+// session_id capture and breaking --resume / history replay on refresh.
+func TestClaudeTranslate_SystemInit_MCPServersAsObjects(t *testing.T) {
+	p, captured := claudeTestProvider()
+	raw := json.RawMessage(`{
+		"type": "system",
+		"subtype": "init",
+		"session_id": "sid_obj",
+		"model": "claude-haiku-4-5",
+		"cwd": "/tmp",
+		"tools": ["Read"],
+		"mcp_servers": [
+			{"name":"claude.ai Krisp","status":"needs-auth"},
+			{"name":"claude.ai Google Calendar","status":"needs-auth"}
+		]
+	}`)
+	p.processLine(raw)
+
+	if p.claudeSessionID != "sid_obj" {
+		t.Errorf("claudeSessionID = %q, want sid_obj (parse must not abort on the new mcp_servers shape)", p.claudeSessionID)
+	}
+	if len(*captured) != 1 {
+		t.Fatalf("got %d events: %+v", len(*captured), *captured)
+	}
+	ev := (*captured)[0]
+	servers, _ := ev.payload["mcp_servers"].([]any)
+	if len(servers) != 2 || servers[0] != "claude.ai Krisp" {
+		t.Errorf("mcp_servers projection = %v, want [\"claude.ai Krisp\", ...]", servers)
+	}
+}
+
 func TestClaudeTranslate_SystemInit(t *testing.T) {
 	p, captured := claudeTestProvider()
 	raw := json.RawMessage(`{
@@ -389,6 +421,104 @@ func TestClaudeTranslate_NonJsonOutput(t *testing.T) {
 	}
 	if (*captured)[0].eventType != "raw_output" {
 		t.Errorf("eventType = %s, want raw_output", (*captured)[0].eventType)
+	}
+}
+
+// Claude CLI 2.1.x ships one `assistant` event per fully-completed content
+// block; each event's message.content[] holds the freshly-finalized block,
+// not a cumulative snapshot. We allocate a new global block index per
+// content[] entry across events sharing the same message.id, and emit
+// canonical content_block_start/delta/stop events for each.
+func TestClaudeTranslate_SnapshotPerBlock_ThinkingThenText(t *testing.T) {
+	p, captured := claudeTestProvider()
+
+	// Event 1: thinking block.
+	p.processLine(json.RawMessage(`{
+		"type":"assistant",
+		"message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"let me count..."}]}
+	}`))
+	// Event 2: text block at a NEW global index (text len < thinking len —
+	// the regressing-length case that caught us once).
+	p.processLine(json.RawMessage(`{
+		"type":"assistant",
+		"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"1, 2, 3"}]}
+	}`))
+	p.processLine(json.RawMessage(`{"type":"result","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}`))
+
+	// Expected sequence:
+	//   1. message_start
+	//   2. content_block_start (idx=0, thinking)
+	//   3. thinking_delta "let me count..."
+	//   4. content_block_stop (idx=0)        (auto-close before idx=1 opens)
+	//   5. content_block_start (idx=1, text)
+	//   6. text_delta "1, 2, 3"
+	//   7. content_block_stop (idx=1)        (synthesized at finalize)
+	//   8. stats_update
+	//   9. message_complete
+	if len(*captured) != 9 {
+		for i, ev := range *captured {
+			t.Logf("event[%d]: %s %s", i, ev.eventType, ev.raw)
+		}
+		t.Fatalf("got %d events, want 9", len(*captured))
+	}
+
+	td0, _ := (*captured)[2].payload["delta"].(map[string]any)
+	if td0["type"] != "thinking_delta" || td0["thinking"] != "let me count..." {
+		t.Errorf("event[2] delta = %+v, want thinking_delta", td0)
+	}
+	stop0 := (*captured)[3]
+	if stop0.payload["index"] != float64(0) || stop0.payload["content_block_stop"] != true {
+		t.Errorf("event[3] should be stop(idx=0); got %v", stop0.payload)
+	}
+	start1 := (*captured)[4]
+	cb1, _ := start1.payload["content_block"].(map[string]any)
+	if start1.payload["index"] != float64(1) || cb1["type"] != "text" {
+		t.Errorf("event[4] should be text start(idx=1); got %v", start1.payload)
+	}
+	td1, _ := (*captured)[5].payload["delta"].(map[string]any)
+	if td1["type"] != "text_delta" || td1["text"] != "1, 2, 3" {
+		t.Errorf("event[5] delta = %+v, want text_delta '1, 2, 3'", td1)
+	}
+	stop1 := (*captured)[6]
+	if stop1.payload["index"] != float64(1) || stop1.payload["content_block_stop"] != true {
+		t.Errorf("event[6] should be stop(idx=1); got %v", stop1.payload)
+	}
+
+	assertVersion(t, *captured)
+}
+
+// A second user turn (new message.id) must reset block indexing back to 0
+// so block streams from successive turns don't accumulate indexes.
+func TestClaudeTranslate_SnapshotPerBlock_NewTurnResetsIndex(t *testing.T) {
+	p, captured := claudeTestProvider()
+
+	p.processLine(json.RawMessage(`{
+		"type":"assistant",
+		"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"first"}]}
+	}`))
+	p.processLine(json.RawMessage(`{"type":"result","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}`))
+	// New turn — different message.id.
+	p.processLine(json.RawMessage(`{
+		"type":"assistant",
+		"message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"second"}]}
+	}`))
+	p.processLine(json.RawMessage(`{"type":"result","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}`))
+
+	// Find the two text_delta events and assert they were emitted at idx 0.
+	var textDeltas []map[string]any
+	for _, ev := range *captured {
+		if d, ok := ev.payload["delta"].(map[string]any); ok && d["type"] == "text_delta" {
+			textDeltas = append(textDeltas, ev.payload)
+		}
+	}
+	if len(textDeltas) != 2 {
+		t.Fatalf("want 2 text_delta events, got %d", len(textDeltas))
+	}
+	if textDeltas[0]["index"] != float64(0) {
+		t.Errorf("first delta index = %v, want 0", textDeltas[0]["index"])
+	}
+	if textDeltas[1]["index"] != float64(0) {
+		t.Errorf("second-turn delta index = %v, want 0 (turn reset)", textDeltas[1]["index"])
 	}
 }
 
