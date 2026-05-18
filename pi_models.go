@@ -100,15 +100,17 @@ func fetchPiListModelsCached(ctx context.Context, configuredPath string) []Model
 // overlay-added providers (currently: relay-llama proxy entries). Keeps
 // ordering stable so the UI picker stays predictable.
 func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []ModelInfo {
-	excluded := make(map[string]bool, len(overlay.ExcludeProviders))
+	excluded := make(map[string]struct{}, len(overlay.ExcludeProviders))
 	for _, name := range overlay.ExcludeProviders {
-		excluded[name] = true
+		excluded[name] = struct{}{}
 	}
 
 	out := make([]ModelInfo, 0, len(raw)+len(inputs.LlamaModels))
 	for _, m := range raw {
-		if provider := piProviderFromValue(m.Value); provider != "" && excluded[provider] {
-			continue
+		if provider := piProviderFromValue(m.Value); provider != "" {
+			if _, drop := excluded[provider]; drop {
+				continue
+			}
 		}
 		out = append(out, m)
 	}
@@ -119,7 +121,7 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 	// reflects what the user can actually pick.
 	if inputs.LlamaProxyPort != "" {
 		for _, llama := range inputs.LlamaModels {
-			value := "pi/" + piRelayLlamaProvider + "/" + llama.Alias
+			value := piModelString(piRelayLlamaProvider, llama.Alias)
 			out = append(out, ModelInfo{
 				Label:    value,
 				Value:    value,
@@ -134,17 +136,15 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 // piProviderFromValue extracts the provider segment from a `pi/<provider>/<model>`
 // value string. Returns "" for malformed values rather than misclassifying.
 func piProviderFromValue(value string) string {
-	const prefix = "pi/"
-	if len(value) <= len(prefix) || value[:len(prefix)] != prefix {
+	rest, ok := strings.CutPrefix(value, "pi/")
+	if !ok {
 		return ""
 	}
-	rest := value[len(prefix):]
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == '/' {
-			return rest[:i]
-		}
+	prov, _, ok := strings.Cut(rest, "/")
+	if !ok {
+		return ""
 	}
-	return ""
+	return prov
 }
 
 // parsePiListModels scans `pi --list-models` output. Pi prints a
