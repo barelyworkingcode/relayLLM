@@ -585,6 +585,8 @@ func (h *WSHub) handleTerminalList(wc *wsConn) {
 func (h *WSHub) handleTerminalReconnect(wc *wsConn, msgBytes []byte, boundTerminals map[string]bool) {
 	var req struct {
 		TerminalID string `json:"terminalId"`
+		Cols       uint16 `json:"cols"`
+		Rows       uint16 `json:"rows"`
 	}
 	json.Unmarshal(msgBytes, &req)
 	if req.TerminalID == "" {
@@ -596,6 +598,22 @@ func (h *WSHub) handleTerminalReconnect(wc *wsConn, msgBytes []byte, boundTermin
 		sendWSError(wc, "terminal not found: "+req.TerminalID)
 		return
 	}
+
+	// Match the PTY to the client's viewport before capturing scrollback.
+	// This prevents the visible-duplicate-screen artifact: if we send
+	// scrollback at the old size and the client then resizes, TUI apps
+	// (Claude Code, etc.) repaint via SIGWINCH on top of the already-rendered
+	// scrollback, leaving two copies of the UI in the buffer. Resizing first
+	// means xterm and the bytes it replays agree on dimensions from the start.
+	if req.Cols > 0 && req.Rows > 0 {
+		curCols, curRows := session.Size()
+		if req.Cols != curCols || req.Rows != curRows {
+			if err := session.Resize(req.Cols, req.Rows); err != nil {
+				slog.Debug("terminal reconnect resize failed", "id", req.TerminalID, "error", err)
+			}
+		}
+	}
+
 	h.joinTerminalConn(wc, session, boundTerminals)
 }
 
