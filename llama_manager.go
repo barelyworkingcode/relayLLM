@@ -358,6 +358,21 @@ func (m *LlamaServerManager) Aliases() []string {
 	return aliases
 }
 
+// HasAlias reports whether the given name matches a configured llama-server
+// alias. The router's request dispatch uses this to pick the llama branch
+// before falling through to the OpenAI-endpoint branch.
+func (m *LlamaServerManager) HasAlias(name string) bool {
+	if m == nil || m.config == nil {
+		return false
+	}
+	for _, cfg := range m.config.Models {
+		if cfg.Alias == name {
+			return true
+		}
+	}
+	return false
+}
+
 // waitForHealth polls llama-server's /health endpoint until it responds
 // with status 200, or the timeout expires.
 func waitForHealth(port int, timeout time.Duration) error {

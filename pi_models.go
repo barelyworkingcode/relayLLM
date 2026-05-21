@@ -30,7 +30,7 @@ var piModels piModelsCache
 // When the project overlay is enabled, the listing reflects what pi will
 // actually have access to in a spawned RPC session: providers in
 // ExcludeProviders are filtered out (otherwise users would pick a model
-// that pi rejects on launch), and a synthetic `relay-llama` entry per
+// that pi rejects on launch), and a synthetic `relay-router` entry per
 // llama-server model is added (pi would otherwise not see those until
 // after spawn-time overlay materialization).
 //
@@ -97,7 +97,7 @@ func fetchPiListModelsCached(ctx context.Context, configuredPath string) []Model
 }
 
 // applyPiOverlayToModelList drops providers the overlay excludes and appends
-// overlay-added providers (currently: relay-llama proxy entries). Keeps
+// overlay-added providers (currently: relay-router proxy entries). Keeps
 // ordering stable so the UI picker stays predictable.
 func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []ModelInfo {
 	excluded := make(map[string]struct{}, len(overlay.ExcludeProviders))
@@ -115,17 +115,17 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 		out = append(out, m)
 	}
 
-	// relay-llama: one synthetic entry per llama-server model. Pi won't list
+	// relay-router: one synthetic entry per llama-server model. Pi won't list
 	// these via --list-models (they only exist in the per-project overlay
 	// materialized at spawn time), so we add them ourselves so the picker
 	// reflects what the user can actually pick.
-	if inputs.LlamaProxyPort != "" {
+	if inputs.RouterPort != "" {
 		for _, llama := range inputs.LlamaModels {
-			value := piModelString(piRelayLlamaProvider, llama.Alias)
+			value := piModelString(piRelayRouterProvider, llama.Alias)
 			out = append(out, ModelInfo{
 				Label:    value,
 				Value:    value,
-				Group:    "Pi · " + piRelayLlamaProvider,
+				Group:    "Pi · " + piRelayRouterProvider,
 				Provider: "pi",
 			})
 		}
