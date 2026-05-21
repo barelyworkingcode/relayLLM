@@ -23,7 +23,7 @@ func main() {
 	internalToken := flag.String("token", envOrDefault("RELAY_LLM_INTERNAL_TOKEN", ""), "Internal bearer token. Validated on every request as defense-in-depth on top of the socket's 0600 permissions. Empty = trust filesystem perms only.")
 	comfyuiURL := flag.String("comfyui-url", envOrDefault("COMFYUI_URL", ""), "ComfyUI base URL for image generation (empty to disable)")
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
-	llamaProxyPort := flag.String("llama-proxy-port", envOrDefault("LLAMA_PROXY_PORT", ""), "Port for OpenAI-compatible llama proxy (empty to disable)")
+	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting llama-server + OpenAI endpoints (empty to disable)")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -163,14 +163,28 @@ func main() {
 	}
 	sessions.SetLlamaManager(llamaManager)
 
-	// Separate TCP surface called by relayLLM's own provider code, not by
-	// external clients — keep it.
-	var llamaProxyAddr string
-	if *llamaProxyPort != "" && llamaManager != nil {
-		llamaProxyAddr = ":" + *llamaProxyPort
+	var proxyRegistry *ProxyRegistry
+	if len(openaiCfg.Endpoints) > 0 {
+		proxyRegistry = NewProxyRegistry(openaiCfg)
 	}
-	llamaProxy := StartLlamaProxy(llamaProxyAddr, llamaManager)
-	sessions.SetLlamaProxyPort(*llamaProxyPort)
+	sessions.SetProxyRegistry(proxyRegistry)
+
+	// Llama wins on collision in the router's dispatch order; an OpenAI
+	// endpoint sharing a llama alias would be unreachable via the router.
+	if llamaManager != nil && proxyRegistry != nil {
+		for _, ep := range openaiCfg.Endpoints {
+			if llamaManager.HasAlias(ep.Name) {
+				slog.Warn("router: openai endpoint name collides with llama alias; endpoint will be unreachable via the router", "name", ep.Name)
+			}
+		}
+	}
+
+	var routerAddr string
+	if *routerPort != "" {
+		routerAddr = ":" + *routerPort
+	}
+	relayRouter := StartRelayRouter(routerAddr, llamaManager, proxyRegistry)
+	sessions.SetRouterPort(*routerPort)
 	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
 
 	// Image generation via ComfyUI (optional).
@@ -265,8 +279,8 @@ func main() {
 	// Server stopped — clean up background resources.
 	schedulerWS.Close()
 	sessions.StopAll()
-	if llamaProxy != nil {
-		llamaProxy.Close()
+	if relayRouter != nil {
+		relayRouter.Close()
 	}
 	if llamaManager != nil {
 		llamaManager.StopAll()

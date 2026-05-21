@@ -82,14 +82,14 @@ func TestParsePiListModels_Empty(t *testing.T) {
 	}
 }
 
-func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayLlama(t *testing.T) {
+func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayRouter(t *testing.T) {
 	raw := parsePiListModels([]byte(piListSample))
 	overlay := PiProjectOverlay{
 		Mode:             AutoRegenAlways,
 		ExcludeProviders: []string{"llama-cpp"},
 	}
 	inputs := PiOverlayInputs{
-		LlamaProxyPort: "8180",
+		RouterPort: "8180",
 		LlamaModels: []LlamaModelConfig{
 			{Alias: "Qwen3.6 MoE 35"},
 			{Alias: "Qwen3.6 27B Q4"},
@@ -99,10 +99,10 @@ func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayLlama(t *testing.T) {
 	got := applyPiOverlayToModelList(raw, overlay, inputs)
 
 	wantValues := map[string]bool{
-		"pi/anthropic/claude-sonnet-4":     true,
-		"pi/openai/gpt-4o":                 true,
-		"pi/relay-llama/Qwen3.6 MoE 35":    true,
-		"pi/relay-llama/Qwen3.6 27B Q4":    true,
+		"pi/anthropic/claude-sonnet-4":   true,
+		"pi/openai/gpt-4o":               true,
+		"pi/relay-router/Qwen3.6 MoE 35": true,
+		"pi/relay-router/Qwen3.6 27B Q4": true,
 	}
 	for _, m := range got {
 		if strings.HasPrefix(m.Value, "pi/llama-cpp/") {
@@ -125,9 +125,9 @@ func TestApplyPiOverlayToModelList_NoOpWhenNoExclusionsAndNoProxy(t *testing.T) 
 
 func TestPiProviderFromValue(t *testing.T) {
 	cases := map[string]string{
-		"pi/anthropic/claude-haiku":     "anthropic",
-		"pi/llama-cpp/Qwen3.6 MoE 35":   "llama-cpp",
-		"pi/relay-llama/Qwen3.6 MoE 35": "relay-llama",
+		"pi/anthropic/claude-haiku":      "anthropic",
+		"pi/llama-cpp/Qwen3.6 MoE 35":    "llama-cpp",
+		"pi/relay-router/Qwen3.6 MoE 35": "relay-router",
 		"":            "",
 		"haiku":       "",
 		"pi/":         "",

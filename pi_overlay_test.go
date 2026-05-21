@@ -33,20 +33,18 @@ func TestPiOverlayMaterialize(t *testing.T) {
 	cfg := &PiConfig{
 		ProjectOverlay: PiProjectOverlay{
 			Mode:            AutoRegenAlways,
-			DefaultProvider: piRelayLlamaProvider,
+			DefaultProvider: piRelayRouterProvider,
 			DefaultModel:    "qwen3-8b",
 			DefaultThinking: "medium",
 		},
 	}
 	inputs := PiOverlayInputs{
-		OpenAI: &OpenAIConfig{Endpoints: []OpenAIEndpoint{
-			{Name: "lmstudio", BaseURL: "http://localhost:1234/v1", APIKey: "sk-lm-xxx"},
-		}},
 		LlamaModels: []LlamaModelConfig{
 			{Alias: "qwen3-8b"},
 			{Alias: "deepseek-r1"},
 		},
-		LlamaProxyPort: "8091",
+		RouterPort:   "8091",
+		RouterModels: []string{"qwen3-8b", "deepseek-r1", "lmstudio/Qwen3.5-27B"},
 	}
 
 	overlayDir, err := MaterializePiOverlay(projectDir, cfg, inputs)
@@ -58,21 +56,39 @@ func TestPiOverlayMaterialize(t *testing.T) {
 	}
 
 	var models struct {
-		Providers map[string]map[string]any `json:"providers"`
+		Providers map[string]struct {
+			BaseURL string `json:"baseUrl"`
+			Models  []struct {
+				ID string `json:"id"`
+			} `json:"models"`
+		} `json:"providers"`
 	}
 	mustReadJSON(t, filepath.Join(overlayDir, "models.json"), &models)
-	for _, want := range []string{piRelayLlamaProvider, "lmstudio", "user-ollama"} {
+	for _, want := range []string{piRelayRouterProvider, "user-ollama"} {
 		if _, ok := models.Providers[want]; !ok {
 			t.Errorf("models.json missing provider %q", want)
 		}
 	}
-	if got := models.Providers[piRelayLlamaProvider]["baseUrl"]; got != "http://localhost:8091/v1" {
-		t.Errorf("relay-llama baseUrl=%v", got)
+	if _, ok := models.Providers["lmstudio"]; ok {
+		t.Errorf("per-endpoint provider leaked into overlay; expected consolidation under relay-router")
+	}
+	router := models.Providers[piRelayRouterProvider]
+	if router.BaseURL != "http://localhost:8091/v1" {
+		t.Errorf("relay-router baseUrl=%q", router.BaseURL)
+	}
+	gotIDs := make(map[string]bool, len(router.Models))
+	for _, m := range router.Models {
+		gotIDs[m.ID] = true
+	}
+	for _, want := range []string{"qwen3-8b", "deepseek-r1", "lmstudio/Qwen3.5-27B"} {
+		if !gotIDs[want] {
+			t.Errorf("relay-router models missing %q (got %v)", want, gotIDs)
+		}
 	}
 
 	var settings map[string]any
 	mustReadJSON(t, filepath.Join(overlayDir, "settings.json"), &settings)
-	if settings["defaultProvider"] != piRelayLlamaProvider {
+	if settings["defaultProvider"] != piRelayRouterProvider {
 		t.Errorf("defaultProvider=%v", settings["defaultProvider"])
 	}
 	if settings["defaultModel"] != "qwen3-8b" {

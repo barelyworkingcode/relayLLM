@@ -34,7 +34,7 @@ This builds both binaries and registers the service with Relay (`relay service r
 | `--ollama-url` | `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
 | `--openai-config` | `OPENAI_CONFIG` | *(none, uses settings.json)* | Override OpenAI endpoints config file |
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | Path to llama-server binary |
-| `--llama-proxy-port` | `LLAMA_PROXY_PORT` | *(empty, disabled)* | Port for OpenAI-compatible llama proxy |
+| `--router-port` | `RELAY_ROUTER_PORT` | *(empty, disabled)* | Port for the unified OpenAI-compatible relay-router fronting llama-server + OpenAI endpoints |
 | `--token` | `RELAY_LLM_TOKEN` | *(empty, no auth)* | Bearer token for API auth |
 | `--socket` | `RELAY_LLM_SOCKET` | *(empty, disabled)* | Unix domain socket path |
 | `--scheduler-url` | `RELAY_SCHEDULER_URL` | `http://localhost:3002` | relayScheduler URL for task proxy |
@@ -336,23 +336,29 @@ Top-level `llama-server` fields:
 - **Instance sharing**: Multiple sessions using the same model share one llama-server process
 - **Crash recovery**: Dead processes are relaunched on the next request
 
-### llama Proxy
+### Relay Router
 
-An optional OpenAI-compatible reverse proxy for external tools. Enable with `--llama-proxy-port`:
+A unified OpenAI-compatible router fronting both llama-server and every configured OpenAI endpoint. Enable with `--router-port`:
 
 ```bash
-./relayllm --llama-proxy-port 8080
+./relayllm --router-port 8080
 ```
 
-Any OpenAI client can point at `http://localhost:8080/v1` and use the model alias directly:
+Any OpenAI client can point at `http://localhost:8080/v1` and use either a llama alias (bare) or an OpenAI endpoint model (prefixed `endpoint.Name/`):
 
 ```bash
+# Llama branch
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "qwen3-8b", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
+
+# OpenAI-endpoint branch (e.g. an OMLX endpoint named "omlx")
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "omlx/Qwen3.5-27B", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
 ```
 
-The proxy reads the `model` field, launches or reuses the right llama-server, and proxies the request with SSE streaming. `GET /v1/models` lists all configured aliases.
+The router reads the `model` field, launches or reuses the right llama-server (or rewrites the body's `model` to the bare upstream id and reverse-proxies to the matching OpenAI endpoint with its API key), and streams SSE responses back. `GET /v1/models` lists every llama alias plus every reachable OpenAI endpoint model. Endpoint reachability is probed on demand with a 15 s TTL cache; offline endpoints disappear from the listing until the next probe succeeds.
 
 ## Data Storage
 

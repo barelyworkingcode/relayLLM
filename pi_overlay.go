@@ -10,22 +10,26 @@ import (
 )
 
 // PiOverlayInputs bundles everything MaterializePiOverlay needs to translate
-// relayLLM's curated provider set into pi's models.json schema. Built once at
-// startup in main.go and threaded to both the LLM and PTY spawn paths.
+// relayLLM's curated provider set into pi's models.json schema.
+//
+// Pi's ModelRegistry treats providers without an explicit `models` array as
+// override-only (no /v1/models auto-discovery), so RouterModels must be
+// snapshotted from the router's currently-routable set at spawn time —
+// llama aliases bare, OpenAI endpoint models prefixed with the endpoint name.
 type PiOverlayInputs struct {
-	OpenAI         *OpenAIConfig
-	LlamaModels    []LlamaModelConfig
-	LlamaProxyPort string // e.g. "8091"; empty disables the relay-llama provider entry
+	LlamaModels  []LlamaModelConfig // consumed by pi_models.go to synthesize Eve picker entries
+	RouterPort   string             // empty disables the relay-router provider entry
+	RouterModels []string
 }
 
 // piOverlayFileMode is 0o600 to match pi's own auth.json perms — these files
 // can hold API keys when IncludeUserProviders=true copies them over.
 const piOverlayFileMode = 0o600
 
-// piRelayLlamaProvider is the canonical name relayLLM registers for its
-// llama-server proxy in the overlay's models.json. Exposed as a constant so
+// piRelayRouterProvider is the canonical name relayLLM registers for its
+// router in the overlay's models.json. Exposed as a constant so
 // settings.DefaultProvider can be set to this without typos.
-const piRelayLlamaProvider = "relay-llama"
+const piRelayRouterProvider = "relay-router"
 
 // applyPiOverlayEnv materializes the overlay and, when one is written, sets
 // PI_CODING_AGENT_DIR in env. Returned env replaces the caller's. Single
@@ -130,16 +134,16 @@ func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInpu
 	return overlayDir, nil
 }
 
-// buildPiModelsJSON emits the {providers: {...}} shape pi's model-registry.js
-// expects. Each relayLLM endpoint becomes one provider; the user's global
-// providers are merged in (relayLLM's entries win on key collision) unless
-// ExcludeUserProviders is set.
+// buildPiModelsJSON emits the {providers: {...}} shape pi's ModelRegistry
+// expects. User-global providers are merged underneath (ours wins on
+// collision) unless ExcludeUserProviders is set; an empty RouterPort means
+// relayLLM contributes nothing and globals carry through unchanged.
 func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalAgent string) map[string]any {
 	providers := map[string]any{}
 
 	// 1. Start from user's global models.json (so their custom providers
 	//    stay reachable in relay projects). ExcludeProviders names specific
-	//    entries to drop — useful when our relay-llama supersedes a
+	//    entries to drop — useful when our relay-router supersedes a
 	//    user-defined "llama-cpp" pointing at the same models.
 	if !overlay.ExcludeUserProviders {
 		excluded := make(map[string]bool, len(overlay.ExcludeProviders))
@@ -156,37 +160,19 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 		}
 	}
 
-	// 2. relay-llama: the OpenAI-compat proxy in front of llama-server.
-	if inputs.LlamaProxyPort != "" && len(inputs.LlamaModels) > 0 {
-		models := make([]map[string]any, 0, len(inputs.LlamaModels))
-		for _, m := range inputs.LlamaModels {
-			models = append(models, map[string]any{"id": m.Alias})
+	// 2. relay-router: the unified OpenAI-compat router fronting llama-server
+	//    aliases + reachable OpenAI endpoints. Models must be enumerated
+	//    explicitly — pi treats an empty models array as override-only.
+	if inputs.RouterPort != "" {
+		models := make([]map[string]any, 0, len(inputs.RouterModels))
+		for _, id := range inputs.RouterModels {
+			models = append(models, map[string]any{"id": id})
 		}
-		providers[piRelayLlamaProvider] = map[string]any{
-			"baseUrl": fmt.Sprintf("http://localhost:%s/v1", strings.TrimPrefix(inputs.LlamaProxyPort, ":")),
+		providers[piRelayRouterProvider] = map[string]any{
+			"baseUrl": fmt.Sprintf("http://localhost:%s/v1", inputs.RouterPort),
 			"api":     "openai-completions",
 			"apiKey":  "none",
 			"models":  models,
-		}
-	}
-
-	// 3. One provider per configured OpenAI-compatible endpoint.
-	if inputs.OpenAI != nil {
-		for _, ep := range inputs.OpenAI.Endpoints {
-			name := sanitizePiProviderName(ep.Name)
-			if name == "" {
-				continue
-			}
-			entry := map[string]any{
-				"baseUrl": ep.BaseURL,
-				"api":     "openai-completions",
-			}
-			if ep.APIKey != "" {
-				entry["apiKey"] = ep.APIKey
-			} else {
-				entry["apiKey"] = "none"
-			}
-			providers[name] = entry
 		}
 	}
 
@@ -379,26 +365,6 @@ func writePiOverlayJSON(path string, v any) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// sanitizePiProviderName strips characters pi's registry would reject. The
-// schema requires minLength:1, no other constraints documented, but our
-// endpoint names sometimes contain spaces or slashes that confuse the model
-// picker. Be conservative.
-func sanitizePiProviderName(name string) string {
-	name = strings.TrimSpace(name)
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		case r == ' ', r == '/':
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
 }
 
 // appendUnique returns the slice with v appended only if it isn't already

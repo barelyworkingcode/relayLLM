@@ -60,7 +60,7 @@ type PiProjectOverlay struct {
 	Mode            string   `json:"mode,omitempty"`            // "always" | "skipIfExists" | "never" (default "never")
 	DirName         string   `json:"dirName,omitempty"`         // default ".pi"
 	AuthStrategy    string   `json:"authStrategy,omitempty"`    // "symlink" | "none" (default "symlink")
-	DefaultProvider string   `json:"defaultProvider,omitempty"` // e.g. "relay-llama"
+	DefaultProvider string   `json:"defaultProvider,omitempty"` // e.g. "relay-router"
 	DefaultModel    string   `json:"defaultModel,omitempty"`    // e.g. "qwen3-8b"
 	DefaultThinking string   `json:"defaultThinking,omitempty"` // off | minimal | low | medium | high | xhigh
 	ExtraSkillDirs  []string `json:"extraSkillDirs,omitempty"`  // appended to skills array
@@ -75,7 +75,7 @@ type PiProjectOverlay struct {
 	// ExcludeProviders names specific providers from the user's global
 	// models.json to drop on the merge. Use when our overlay supersedes a
 	// user-defined provider (e.g. they registered "llama-cpp" pointing at
-	// individual llama-server ports and our "relay-llama" proxy now covers
+	// individual llama-server ports and our "relay-router" now covers
 	// the same models). Less invasive than ExcludeUserProviders, which
 	// strips everything.
 	ExcludeProviders []string `json:"excludeProviders,omitempty"`
