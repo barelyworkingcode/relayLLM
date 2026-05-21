@@ -69,7 +69,16 @@ func (t TerminalTemplate) ResolveCommand() string {
 // first run. Lean shape — only the fields users care to see and edit.
 func seedDefaultPTYConfig() map[string]TerminalTemplate {
 	return map[string]TerminalTemplate{
-		"claude-code": {Name: "Claude Code", Command: "claude", Icon: "terminal", Description: "Claude Code CLI agent"},
+		"claude-code": {
+			Name:            "Claude Code",
+			Command:         "claude",
+			Icon:            "terminal",
+			Description:     "Claude Code CLI agent (relay-managed: token + skills injected at launch)",
+			UseRelayToken:   true,
+			AutoRegenSkills: AutoRegenAlways,
+			SkillPath:       "${project.path}/.claude/skills/relay",
+			EnvPassthrough:  []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"},
+		},
 		"opencode":    {Name: "OpenCode", Command: "opencode", Icon: "terminal", Description: "OpenCode CLI agent"},
 		"shell":       {Name: "Shell", Icon: "shell", Description: "Default system shell"},
 	}
