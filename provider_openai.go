@@ -532,6 +532,42 @@ func buildOpenAIToolCallEntries(scope string, toolCalls []NormalizedToolCall) []
 	return out
 }
 
+// FetchOpenAIModelIDs queries /v1/models on the endpoint and returns the raw
+// upstream model IDs (no endpoint prefix). The error return distinguishes
+// "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
+// ProxyRegistry can record online/offline state accurately.
+func FetchOpenAIModelIDs(ctx context.Context, endpoint OpenAIEndpoint) ([]string, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if endpoint.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("non-OK status %d", resp.StatusCode)
+	}
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode body: %w", err)
+	}
+	ids := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 // FetchOpenAIModels queries /v1/models on the endpoint and returns ModelInfo
 // entries. Model values are prefixed with the endpoint name so the session
 // layer can route them back to the right endpoint at session-create time.
@@ -541,37 +577,14 @@ func buildOpenAIToolCallEntries(scope string, toolCalls []NormalizedToolCall) []
 // a hard error, since the model picker fans out across many endpoints in
 // parallel and one being down shouldn't break the others.
 func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) []ModelInfo {
-	client := &http.Client{Timeout: 3 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
+	ids, err := FetchOpenAIModelIDs(ctx, endpoint)
 	if err != nil {
-		slog.Warn("openai: model discovery: build request", "endpoint", endpoint.Name, "error", err)
+		slog.Warn("openai: model discovery failed", "endpoint", endpoint.Name, "error", err)
 		return nil
 	}
-	if endpoint.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Warn("openai: model discovery: unreachable", "endpoint", endpoint.Name, "error", err)
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		slog.Warn("openai: model discovery: non-OK status", "endpoint", endpoint.Name, "status", resp.StatusCode)
-		return nil
-	}
-	var result struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.Warn("openai: model discovery: decode body", "endpoint", endpoint.Name, "error", err)
-		return nil
-	}
-	models := make([]ModelInfo, 0, len(result.Data))
-	for _, m := range result.Data {
-		value := endpoint.Name + "/" + m.ID
+	models := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		value := endpoint.Name + "/" + id
 		models = append(models, ModelInfo{
 			Label:    value,
 			Value:    value,

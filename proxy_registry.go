@@ -1,0 +1,163 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+)
+
+// proxyRegistryTTL is how long a probe result is trusted before the next
+// inbound request triggers a fresh probe. Picked to balance freshness
+// against load — upstreams (LM Studio, OMLX, etc.) are local processes that
+// can take a beat to spin up and we don't want to hammer them.
+const proxyRegistryTTL = 15 * time.Second
+
+// EndpointStatus is one entry in the registry's snapshot. Models holds the
+// upstream IDs (no endpoint prefix); the router prefixes them when emitting
+// the aggregated /v1/models list.
+type EndpointStatus struct {
+	Endpoint    OpenAIEndpoint
+	Online      bool
+	Models      []string
+	LastChecked time.Time
+	Err         string // last probe error, for diagnostics; empty when Online
+}
+
+// ProxyRegistry tracks reachability + model lists for the configured OpenAI
+// endpoints. The cache is natural-expiry (15s TTL) — no background goroutine.
+// The first Snapshot() call after expiry triggers parallel probes; per-endpoint
+// single-flight keeps concurrent misses from stampeding the upstream.
+type ProxyRegistry struct {
+	cfg *OpenAIConfig
+	ttl time.Duration
+
+	mu       sync.Mutex
+	status   map[string]*EndpointStatus
+	inflight map[string]chan struct{}
+}
+
+// NewProxyRegistry returns a registry seeded with the given endpoint config.
+// Nil cfg or empty Endpoints yields a registry whose Snapshot returns nil and
+// LookupModel always misses — safe to instantiate unconditionally.
+func NewProxyRegistry(cfg *OpenAIConfig) *ProxyRegistry {
+	return &ProxyRegistry{
+		cfg:      cfg,
+		ttl:      proxyRegistryTTL,
+		status:   make(map[string]*EndpointStatus),
+		inflight: make(map[string]chan struct{}),
+	}
+}
+
+// Snapshot returns the current per-endpoint status. For any entry whose
+// LastChecked is older than the TTL (or missing), it triggers a probe and
+// blocks for the result. Probes for distinct endpoints run in parallel.
+func (r *ProxyRegistry) Snapshot(ctx context.Context) []EndpointStatus {
+	if r == nil || r.cfg == nil || len(r.cfg.Endpoints) == 0 {
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	for i := range r.cfg.Endpoints {
+		ep := r.cfg.Endpoints[i]
+		if r.isFresh(ep.Name) {
+			continue
+		}
+		wg.Add(1)
+		go func(ep OpenAIEndpoint) {
+			defer wg.Done()
+			r.probe(ctx, ep)
+		}(ep)
+	}
+	wg.Wait()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]EndpointStatus, 0, len(r.cfg.Endpoints))
+	for _, ep := range r.cfg.Endpoints {
+		if s, ok := r.status[ep.Name]; ok {
+			dup := *s
+			dup.Models = append([]string(nil), s.Models...)
+			out = append(out, dup)
+		}
+	}
+	return out
+}
+
+// LookupModel parses "endpoint.Name/upstreamID" and resolves the endpoint
+// from the registry, returning the upstream id with the prefix stripped. Only
+// returns ok when the endpoint is currently believed online — the router
+// responds 400 rather than forwarding to a known-down upstream.
+func (r *ProxyRegistry) LookupModel(modelID string) (OpenAIEndpoint, string, bool) {
+	if r == nil {
+		return OpenAIEndpoint{}, "", false
+	}
+	name, upstreamID, ok := strings.Cut(modelID, "/")
+	if !ok || name == "" || upstreamID == "" {
+		return OpenAIEndpoint{}, "", false
+	}
+	ep := r.cfg.Find(name)
+	if ep == nil {
+		return OpenAIEndpoint{}, "", false
+	}
+	r.mu.Lock()
+	s, known := r.status[name]
+	r.mu.Unlock()
+	if !known || !s.Online {
+		return OpenAIEndpoint{}, "", false
+	}
+	return *ep, upstreamID, true
+}
+
+func (r *ProxyRegistry) isFresh(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.status[name]
+	if !ok || s.LastChecked.IsZero() {
+		return false
+	}
+	return time.Since(s.LastChecked) < r.ttl
+}
+
+// probe runs (or waits for) a single network probe of one endpoint and
+// writes the result back into the registry. Single-flight per endpoint.
+func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
+	r.mu.Lock()
+	if ch, ok := r.inflight[ep.Name]; ok {
+		r.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+		return
+	}
+	ch := make(chan struct{})
+	r.inflight[ep.Name] = ch
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		delete(r.inflight, ep.Name)
+		r.mu.Unlock()
+		close(ch)
+	}()
+
+	ids, err := FetchOpenAIModelIDs(ctx, ep)
+	status := &EndpointStatus{
+		Endpoint:    ep,
+		LastChecked: time.Now(),
+	}
+	if err != nil {
+		status.Online = false
+		status.Err = err.Error()
+		slog.Warn("proxy registry: endpoint offline", "endpoint", ep.Name, "error", err)
+	} else {
+		status.Online = true
+		status.Models = ids
+	}
+
+	r.mu.Lock()
+	r.status[ep.Name] = status
+	r.mu.Unlock()
+}

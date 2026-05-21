@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -90,10 +91,8 @@ type SessionManager struct {
 	dataDir      string
 	piConfig     *PiConfig
 
-	// llamaProxyPort is the OpenAI-compatible reverse-proxy port (empty when
-	// --llama-proxy-port was unset). Consumed by the pi project overlay to
-	// expose llama-server aliases as a pi provider entry; see pi_overlay.go.
-	llamaProxyPort string
+	routerPort    string
+	proxyRegistry *ProxyRegistry
 }
 
 func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -153,22 +152,36 @@ func (m *SessionManager) SetPiConfig(cfg *PiConfig) {
 	m.piConfig = cfg
 }
 
-// SetLlamaProxyPort records the OpenAI-compatible llama-proxy port so the pi
-// project overlay can register a "relay-llama" provider entry pointing at it.
-// Empty string disables the overlay's llama provider entry.
-func (m *SessionManager) SetLlamaProxyPort(port string) {
-	m.llamaProxyPort = port
+func (m *SessionManager) SetRouterPort(port string) {
+	m.routerPort = port
 }
 
-// piOverlayInputs builds a snapshot of the pi overlay inputs from the current
-// SessionManager state. Returned by-value so callers don't mutate live config.
+func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
+	m.proxyRegistry = r
+}
+
+// piOverlayInputs snapshots the inputs the pi overlay needs at spawn time.
+// The Snapshot call may block ≤3s per stale endpoint after the registry's
+// 15s TTL has expired.
 func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
-	inputs := PiOverlayInputs{
-		OpenAI:         m.openaiConfig,
-		LlamaProxyPort: m.llamaProxyPort,
-	}
+	inputs := PiOverlayInputs{RouterPort: m.routerPort}
 	if m.llamaManager != nil && m.llamaManager.config != nil {
 		inputs.LlamaModels = m.llamaManager.config.Models
+		for _, cfg := range m.llamaManager.config.Models {
+			inputs.RouterModels = append(inputs.RouterModels, cfg.Alias)
+		}
+	}
+	if m.proxyRegistry != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, status := range m.proxyRegistry.Snapshot(ctx) {
+			if !status.Online {
+				continue
+			}
+			for _, id := range status.Models {
+				inputs.RouterModels = append(inputs.RouterModels, status.Endpoint.Name+"/"+id)
+			}
+		}
 	}
 	return inputs
 }
