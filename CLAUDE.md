@@ -1,41 +1,46 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-managed service.
+Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-enhanced service.
+
+Under relay, relayLLM registers a [service manifest](../relay/plans/service-manifest-spec.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
 
 ## Architecture
 
 ```
-main.go              Entry point, flag parsing, server wiring
-project.go           Project CRUD + JSON file storage
-session.go           Session lifecycle management
-session_store.go     Session persistence to disk
-provider.go          Provider interface + shared types + extractTextContent
-provider_claude.go   Claude CLI provider (stream-json, persistent process)
-provider_pi.go       pi.dev CLI provider (--mode rpc, JSONL → canonical Claude stream-json)
-pi_models.go         pi model discovery via `pi --list-models` (cached)
-provider_ollama.go   Ollama HTTP provider (NDJSON streaming)
-provider_openai.go   OpenAI-compatible HTTP provider (SSE streaming)
-provider_chat_base.go  Base provider: tool-calling loop, MCP + built-in tool dispatch
-provider_settings.go Per-provider settings schema for Eve UI
-response_collector.go  Headless response accumulation for HTTP clients
-config.go            Unified config loader (settings.json → OpenAI + llama-server configs)
-llama_manager.go     llama-server process manager (launch, health check, port allocation)
-relay_router.go      Unified OpenAI-compatible router fronting llama-server + OpenAI endpoints
-proxy_registry.go    Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
-comfyui_client.go    ComfyUI HTTP client (queue, poll, fetch, workflow builder)
-builtin_tools.go     Built-in tool registry (generate_image) + dynamic schema
-terminal_template.go Terminal template types + JSON file store (built-in + custom)
-terminal_session.go  Terminal session with PTY management (creack/pty)
-relay_spawn.go       Shared relay-managed spawn prep (skill regen + token + ${SUB} expansion) used by both PTY and pi LLM
-terminal_manager.go  Terminal CRUD + lifecycle management
-terminal_log.go      On-disk head/tail log files for PTY replay after eviction
-api.go               HTTP routes (projects, sessions, terminals, permissions, generated images)
-ws.go                WebSocket server (streaming events to Eve, terminal I/O)
-permission.go        Permission request/response tracking
-scheduler_client.go  HTTP client for relayScheduler
-scheduler_proxy.go   Task API proxy routes (GET/POST/PUT/DELETE /api/tasks/*)
-scheduler_ws.go      WebSocket forwarding of scheduler events (task_started, etc.)
-cmd/hook/            Compiled PreToolUse hook binary
+main.go                   Entry point, flag parsing, server wiring, manifest registration
+manifest.go               Service manifest declaration + maybeRegisterManifest
+relay_bridge_client.go    Bridge socket transport (sendBridgeRequest helper) +
+                          PtyEnv resolution. RELAY_BRIDGE_SOCKET env var detection.
+api_status.go             GET /api/status, GET /api/llama/instances,
+                          DELETE /api/llama/instances/{alias}
+project.go                Project CRUD + JSON file storage
+session.go                Session lifecycle management
+session_store.go          Session persistence to disk
+provider.go               Provider interface + shared types + extractTextContent
+provider_claude.go        Claude CLI provider (stream-json, persistent process)
+provider_pi.go            pi.dev CLI provider (--mode rpc, JSONL → canonical Claude stream-json)
+pi_models.go              pi model discovery via `pi --list-models` (cached)
+provider_ollama.go        Ollama HTTP provider (NDJSON streaming)
+provider_openai.go        OpenAI-compatible HTTP provider (SSE streaming)
+provider_chat_base.go     Base provider: tool-calling loop, MCP + built-in tool dispatch
+provider_settings.go      Per-provider settings schema for Eve UI
+response_collector.go     Headless response accumulation for HTTP clients
+config.go                 Unified config loader (settings.json → OpenAI + llama-server configs)
+llama_manager.go          llama-server process manager (launch, health check, port allocation,
+                          per-alias stop, instance listing)
+relay_router.go           Unified OpenAI-compatible router fronting llama-server + OpenAI endpoints
+proxy_registry.go         Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
+comfyui_client.go         ComfyUI HTTP client (queue, poll, fetch, workflow builder)
+builtin_tools.go          Built-in tool registry (generate_image) + dynamic schema
+terminal_template.go      Terminal template types + JSON file store (built-in + custom)
+terminal_session.go       Terminal session with PTY management (creack/pty)
+relay_spawn.go            Shared relay-managed spawn prep (skill regen + token + ${SUB} expansion)
+terminal_manager.go       Terminal CRUD + lifecycle management
+terminal_log.go           On-disk head/tail log files for PTY replay after eviction
+api.go                    HTTP routes (sessions, terminals, permissions, generated images)
+ws.go                     WebSocket server (streaming events to Eve, terminal I/O)
+permission.go             Permission request/response tracking
+cmd/hook/                 Compiled PreToolUse hook binary
 ```
 
 ## Providers
@@ -71,18 +76,19 @@ Tool dispatch order in `runToolLoop()`: built-in tools are checked first (`built
 
 ## API
 
-HTTP on `--port` (default 3001). WebSocket at `/ws`.
+Unix socket at `--socket` (defaults to `{data-dir}/relayllm.sock`). WebSocket at `/ws`.
 
 ### HTTP Endpoints
 ```
-GET/POST       /api/projects       — list/create projects
-GET/PUT/DELETE /api/projects/:id   — get/update/delete project
 GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp)
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session
 PUT            /api/sessions/:id/model           — pi only: mid-session model switch
 PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
+GET            /api/status         — runtime status (uptime, session/terminal/llama-instance counts)
+GET            /api/llama/instances        — list running llama-server instances
+DELETE         /api/llama/instances/{alias} — stop a specific llama-server instance
 GET/POST       /api/terminal/templates     — list/create terminal templates
 GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
 GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
@@ -90,17 +96,14 @@ DELETE         /api/terminals/:id          — close terminal
 GET            /api/terminals/:id/log      — stitched head+tail of PTY's raw byte stream (works after session eviction)
 POST           /api/permission     — hook binary posts here, held open until user decides
 GET            /api/generated/:filename — serve generated images (ComfyUI output)
-GET/POST       /api/tasks          — list/create tasks (proxy to relayScheduler)
-GET/PUT/DELETE /api/tasks/:id      — get/update/delete task (proxy to relayScheduler)
-POST           /api/tasks/:id/run  — trigger task execution (proxy to relayScheduler)
-GET            /api/tasks/:id/history — task execution history (proxy to relayScheduler)
-GET            /api/tasks/project/:projectId — tasks by project (proxy to relayScheduler)
 ```
+
+Project endpoints (`/api/projects/*`) and scheduler/task endpoints (`/api/tasks/*`) live in relay and relayScheduler respectively. Under relay's front-door dispatcher, Eve reaches them through relay directly — relayLLM never proxies foreign services.
 
 ### WebSocket Protocol
 ```
 Client → Server: join_session, send_message, end_session, permission_response
-Server → Client: session_joined, llm_event, stats_update, message_complete, permission_request, task_started, task_completed, task_error, task_status, error
+Server → Client: session_joined, llm_event, stats_update, message_complete, permission_request, error
 
 Terminal messages:
 Client → Server: terminal_create, join_terminal, leave_terminal, terminal_input (base64), terminal_resize, terminal_close, terminal_list, terminal_reconnect, terminal_templates
@@ -176,29 +179,25 @@ go build ./cmd/hook                 # permission hook binary
 
 ## Ecosystem
 
-relayLLM is the LLM engine for the Relay ecosystem. It proxies task API and WebSocket events from relayScheduler. Eve connects only to relayLLM as its single backend for all operations including tasks.
+relayLLM is one of several relay-enhanced services. It serves session/provider operations only — projects live in relay, scheduled tasks live in relayScheduler. Eve reaches every backend through relay's front door.
 
-- `../relay/` -- MCP orchestrator. Manages relayLLM as a background service.
-- `../eve/` -- Browser-based LLM frontend. Single-backend client to relayLLM for all operations including tasks.
-- `../relayScheduler/` -- Task scheduler. Runs LLM prompts on schedule. relayLLM proxies its task API and forwards its WebSocket events.
-- `../relayTelegram/` -- Telegram bot. Bridges messages to relayLLM sessions.
-- `../relayComfy/` -- ComfyUI service. Manages ComfyUI as a subprocess for image/video generation. relayLLM talks to its HTTP API on port 8188.
+- `../relay/` -- macOS tray orchestrator. Hosts the front-door dispatcher that routes inbound traffic per each enhanced service's registered manifest.
+- `../eve/` -- Browser-based LLM frontend. Talks to relay's frontend socket; relay dispatches `/api/sessions`, `/api/terminals`, etc. to relayLLM.
+- `../relayScheduler/` -- Task scheduler. Registers its own manifest with relay; relay dispatches `/api/tasks/*` to it directly (relayLLM does not proxy).
+- `../relayTelegram/` -- Telegram bot bridge.
+- `../relayComfy/` -- ComfyUI service. Manages ComfyUI as a subprocess for image/video generation; relayLLM talks to its HTTP API on port 8188.
 
-## Eve ↔ relayLLM Channel Security
+## Service Manifest Integration
 
-relayLLM authenticates every inbound connection (HTTP and WebSocket) with a bearer token and optionally serves through a `0600` Unix domain socket. This ensures Eve is the only client that can reach relayLLM:
+relayLLM detects its run mode from `RELAY_BRIDGE_SOCKET`:
 
-**New listener (Unix socket mode — preferred).** When `RELAY_LLM_SOCKET` is set in the environment (injected by the `relay` orchestrator at spawn time), relayLLM binds a Unix domain socket at that path with mode `0600` in addition to (or instead of) its TCP listener. Both HTTP routes and the `/ws` WebSocket upgrade are served from this socket. The orchestrator unlinks the socket on graceful shutdown.
+- **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct HTTP/WS clients.
+- **Enhanced** (env set): same listener + same wire language, plus it dials the bridge socket and sends a `RegisterManifest` payload declaring its routes, status endpoint, and actions. Relay's dispatcher then forwards matching front-door requests over the internal socket using the same bearer token relayLLM declared in the manifest.
 
-**Bearer token.** `RELAY_LLM_TOKEN` is read from the environment at startup and compared (constant-time) against the `Authorization: Bearer <token>` header on **every** HTTP request and on the WebSocket upgrade. Missing or mismatched tokens return `401` and the WS upgrade is rejected before protocol-switching — no half-open session allocation. This validation runs in both socket mode (as defense-in-depth on top of FS permissions) and TCP mode.
+The mode switch is a deployment fact, not a code fork — one config loader, two sources. Both `manifest.go` (what relayLLM exposes) and `relay_bridge_client.go` (how it talks to relay) are small and self-contained.
 
-**TCP mode** (split-host fallback only): the TCP listener must be wrapped in TLS (operator provides cert + key), and the same bearer-token check applies. Plain `http://` off loopback must be refused at startup with a clear error.
+See `../relay/plans/service-manifest-spec.md` for the full protocol contract.
 
-**Scope.** `RELAY_LLM_TOKEN` is **not** the same token as `RELAY_MCP_TOKEN`. The MCP bridge socket (`relay.sock`) and the Eve↔relayLLM channel are separate trust boundaries and must not share credentials — multiplexing them means leaking either token grants access to both.
+## Local Auth
 
-**Implementation:**
-- `auth.go` — `bearerAuth(token, next)` middleware uses `crypto/subtle.ConstantTimeCompare`. No-op pass-through when token is empty (dev mode, with a startup warning).
-- `main.go` — reads `--token` / `RELAY_LLM_TOKEN` and `--socket` / `RELAY_LLM_SOCKET`. Wraps the mux with `bearerAuth(recoverMiddleware(mux))` so HTTP and the `/ws` upgrade share the same auth check (unauthenticated WS upgrades are rejected with 401 before protocol-switching). When `RELAY_LLM_SOCKET` is set, creates the parent directory `0o700`, binds `net.Listen("unix", path)`, `os.Chmod(path, 0o600)`, and serves via `server.Serve(ln)` alongside the TCP listener. Socket is unlinked on SIGTERM/SIGINT and post-`ListenAndServe`.
-- `session.go`, `provider_claude.go`, `cmd/hook/main.go` — token is plumbed through `SessionManager` → `ClaudeProvider` → hook child env as `RELAY_LLM_HOOK_TOKEN`. The hook binary reads it and adds `Authorization: Bearer <token>` to its `/api/permission` POST.
-
-See `../relay/CLAUDE.md` ("Eve ↔ relayLLM internal channel") for the orchestrator side of the contract and `../eve/plans/cozy-honking-toast.md` for the full design rationale and end-to-end verification results.
+`auth.go::bearerAuth` validates every HTTP/WS request against `--token` / `RELAY_LLM_TOKEN`. Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The same token is plumbed through `SessionManager` → `ClaudeProvider` → hook child env as `RELAY_LLM_HOOK_TOKEN`; the hook binary uses it on its `/api/permission` POST.
