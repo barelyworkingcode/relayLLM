@@ -15,6 +15,7 @@ import (
 )
 
 func main() {
+	startTime := time.Now()
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
 	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
@@ -228,6 +229,7 @@ func main() {
 	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager, piCfg, sessions.piOverlayInputs)
 	RegisterSchedulerProxyRoutes(mux, schedulerClient)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
+	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, startTime)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Forward scheduler WebSocket events to all connected clients.

@@ -95,12 +95,24 @@ func expandHome(path string) string {
 
 // llamaInstance tracks a running llama-server process.
 type llamaInstance struct {
-	config  LlamaModelConfig
-	port    int
-	cmd     *exec.Cmd
-	exited  atomic.Bool
-	ready   chan struct{} // closed when health check passes (or fails)
-	healthy bool         // set before ready is closed
+	config    LlamaModelConfig
+	port      int
+	cmd       *exec.Cmd
+	exited    atomic.Bool
+	ready     chan struct{} // closed when health check passes (or fails)
+	healthy   bool          // set before ready is closed
+	startTime time.Time
+}
+
+// LlamaInstanceInfo is a JSON-friendly snapshot of a running llama-server
+// instance. Returned by ListInstances() to the relay menubar UI.
+type LlamaInstanceInfo struct {
+	Alias     string `json:"alias"`
+	Port      int    `json:"port"`
+	Pid       int    `json:"pid"`
+	StartedAt int64  `json:"startedAt"` // unix seconds
+	Healthy   bool   `json:"healthy"`
+	Exited    bool   `json:"exited"`
 }
 
 // LlamaServerManager launches and manages llama-server processes.
@@ -194,10 +206,11 @@ func (m *LlamaServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) 
 	}
 
 	inst := &llamaInstance{
-		config: *cfg,
-		port:   port,
-		cmd:    cmd,
-		ready:  make(chan struct{}),
+		config:    *cfg,
+		port:      port,
+		cmd:       cmd,
+		ready:     make(chan struct{}),
+		startTime: time.Now(),
 	}
 	m.instances[alias] = inst
 
@@ -250,27 +263,84 @@ func (m *LlamaServerManager) ListModels() []ModelInfo {
 	return models
 }
 
-// StopAll sends SIGTERM to all managed processes, waits briefly, then
-// force-kills any stragglers.
-func (m *LlamaServerManager) StopAll() {
+// ListInstances returns a snapshot of all currently-tracked llama-server
+// instances. Includes only aliases that have actually been launched, not
+// every configured alias.
+func (m *LlamaServerManager) ListInstances() []LlamaInstanceInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	out := make([]LlamaInstanceInfo, 0, len(m.instances))
 	for alias, inst := range m.instances {
-		if inst.cmd.Process != nil && !inst.exited.Load() {
-			slog.Info("llama: stopping server", "alias", alias, "port", inst.port)
-			inst.cmd.Process.Signal(syscall.SIGTERM)
+		pid := 0
+		if inst.cmd != nil && inst.cmd.Process != nil {
+			pid = inst.cmd.Process.Pid
 		}
+		out = append(out, LlamaInstanceInfo{
+			Alias:     alias,
+			Port:      inst.port,
+			Pid:       pid,
+			StartedAt: inst.startTime.Unix(),
+			Healthy:   inst.healthy,
+			Exited:    inst.exited.Load(),
+		})
 	}
+	return out
+}
+
+// StopInstance gracefully terminates a single llama-server (SIGTERM, 3s
+// grace, SIGKILL) and removes it from the manager's map. Returns an error
+// if the alias is not currently running. The 3s grace sleep happens outside
+// the manager lock so other launches/lookups are not blocked.
+func (m *LlamaServerManager) StopInstance(alias string) error {
+	m.mu.Lock()
+	inst, ok := m.instances[alias]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("llama: no running instance for alias %q", alias)
+	}
+	delete(m.instances, alias)
+	m.mu.Unlock()
+
+	if inst.cmd == nil || inst.cmd.Process == nil {
+		return nil
+	}
+	if inst.exited.Load() {
+		return nil
+	}
+
+	slog.Info("llama: stopping server", "alias", alias, "port", inst.port)
+	_ = inst.cmd.Process.Signal(syscall.SIGTERM)
 
 	time.Sleep(3 * time.Second)
 
-	for _, inst := range m.instances {
-		if inst.cmd.Process != nil && !inst.exited.Load() {
-			inst.cmd.Process.Kill()
-		}
+	if !inst.exited.Load() {
+		_ = inst.cmd.Process.Kill()
 	}
-	m.instances = make(map[string]*llamaInstance)
+	return nil
+}
+
+// StopAll terminates every managed process concurrently. Each alias is
+// stopped via StopInstance so the SIGTERM/grace/SIGKILL logic lives in one
+// place; running them in parallel keeps total shutdown bounded by the 3s
+// grace regardless of how many instances are alive.
+func (m *LlamaServerManager) StopAll() {
+	m.mu.Lock()
+	aliases := make([]string, 0, len(m.instances))
+	for alias := range m.instances {
+		aliases = append(aliases, alias)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, alias := range aliases {
+		wg.Add(1)
+		go func(a string) {
+			defer wg.Done()
+			_ = m.StopInstance(a)
+		}(alias)
+	}
+	wg.Wait()
 }
 
 // allocatePort finds the next free TCP port starting from m.nextPort.
