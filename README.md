@@ -29,16 +29,16 @@ This builds both binaries and registers the service with Relay (`relay service r
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--port` | `RELAY_LLM_PORT` | `3001` | HTTP/WebSocket listen port |
 | `--data-dir` | `RELAY_LLM_DATA` | `~/.config/relayLLM` | Data directory |
+| `--socket` | `RELAY_LLM_SOCKET` | `{data-dir}/relayllm.sock` | Unix domain socket relayLLM listens on |
+| `--token` | `RELAY_LLM_TOKEN` | *(auto-generated)* | Bearer token for API auth. Auto-generated 64-char hex if unset (not logged; set the env var to pin) |
 | `--ollama-url` | `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
-| `--openai-config` | `OPENAI_CONFIG` | *(none, uses settings.json)* | Override OpenAI endpoints config file |
+| `--openai-config` | `OPENAI_CONFIG` | *(uses settings.json)* | Override OpenAI endpoints config file |
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | Path to llama-server binary |
 | `--router-port` | `RELAY_ROUTER_PORT` | *(empty, disabled)* | Port for the unified OpenAI-compatible relay-router fronting llama-server + OpenAI endpoints |
-| `--token` | `RELAY_LLM_TOKEN` | *(empty, no auth)* | Bearer token for API auth |
-| `--socket` | `RELAY_LLM_SOCKET` | *(empty, disabled)* | Unix domain socket path |
-| `--scheduler-url` | `RELAY_SCHEDULER_URL` | `http://localhost:3002` | relayScheduler URL for task proxy |
 | `--comfyui-url` | `COMFYUI_URL` | *(empty, disabled)* | ComfyUI base URL for image generation |
+
+When spawned by relay, relayLLM additionally observes `RELAY_BRIDGE_SOCKET`, `RELAY_SERVICE_ID`, and `RELAY_MCP_TOKEN`. Their presence triggers manifest registration with relay — see [Service Manifest Integration](#service-manifest-integration).
 
 ## HTTP API
 
@@ -73,7 +73,9 @@ Request: partial object with fields to update (`name`, `path`, `model`, `allowed
 
 Response `200`: updated project object. `404` if not found.
 
-**`DELETE /api/projects/:id`** -- Delete a project. Also deletes any associated tasks in relayScheduler (via scheduler proxy).
+**`DELETE /api/projects/:id`** -- Delete a project.
+
+(Project endpoints are owned by relay when running enhanced. When running standalone, relayLLM stores its own minimal project records under `{data-dir}/projects.json` for direct callers.)
 
 Response `200`: `{"success": true}`. `404` if not found.
 
@@ -159,25 +161,13 @@ Response `200`:
 ```
 `decision` is `"allow"` or `"deny"`. Defaults to `"deny"` with reason `"timeout"` after 60s.
 
-### Tasks (Scheduler Proxy)
+### Status
 
-All task endpoints proxy to relayScheduler. Returns `502` if relayScheduler is unavailable.
+**`GET /api/status`** -- Runtime status (uptime, session count, terminal count, llama-instance count).
 
-**`GET /api/tasks`** -- List all tasks.
+**`GET /api/llama/instances`** -- List currently-running llama-server instances (alias, port, pid, started-at, healthy).
 
-**`POST /api/tasks`** -- Create a task.
-
-**`GET /api/tasks/:id`** -- Get a task.
-
-**`PUT /api/tasks/:id`** -- Update a task.
-
-**`DELETE /api/tasks/:id`** -- Delete a task.
-
-**`POST /api/tasks/:id/run`** -- Trigger immediate execution of a task.
-
-**`GET /api/tasks/:id/history`** -- Get execution history for a task.
-
-**`GET /api/tasks/project/:projectId`** -- List tasks for a specific project.
+**`DELETE /api/llama/instances/{alias}`** -- Gracefully stop a single llama-server instance (SIGTERM, 3 s grace, SIGKILL). Next session for that alias re-launches on demand.
 
 ## WebSocket Protocol
 
@@ -235,11 +225,9 @@ Connect to `/ws`. All messages are JSON with a `type` field.
 | `process_exited` | `sessionId` | Provider process died |
 | `raw_output` | `sessionId`, `text` | Non-JSON provider output |
 | `system_message` | `sessionId`, `message` | System notification |
-| `task_started` | `taskId`, `projectId` | Task execution started (forwarded from relayScheduler) |
-| `task_completed` | `taskId`, `projectId`, `result` | Task execution completed (forwarded from relayScheduler) |
-| `task_error` | `taskId`, `projectId`, `error` | Task execution failed (forwarded from relayScheduler) |
-| `task_status` | `taskId`, `projectId`, `status` | Task status changed (forwarded from relayScheduler) |
 | `error` | `message` | Error message |
+
+Task lifecycle events (`task_started`, `task_completed`, etc.) are emitted by relayScheduler and reach Eve through relay's front-door dispatcher directly — relayLLM no longer proxies them.
 
 ## Permission Flow
 
@@ -385,13 +373,22 @@ go test ./...            # all tests (requires claude CLI + API key)
 ./smoketest.sh http://localhost:4000  # custom URL
 ```
 
+## Service Manifest Integration
+
+relayLLM is one of several relay-enhanced services. It detects its run mode from `RELAY_BRIDGE_SOCKET`:
+
+- **Standalone** (env unset): binds its own Unix socket, auto-generates a bearer token if `--token` is unset, serves direct HTTP/WS clients.
+- **Enhanced** (env set): same listener and same wire language, plus it dials relay's bridge with a `RegisterManifest` payload declaring the routes it serves, its internal socket + token, and its status endpoint. Relay's front-door dispatcher then forwards matching front-door traffic over that socket.
+
+The mode switch is a deployment fact, not a code fork. Same config loader, two sources. Tasks (`/api/tasks/*`) are served by relayScheduler — Eve reaches them through relay's dispatcher directly; relayLLM no longer carries foreign routes.
+
+See [`../relay/plans/service-manifest-spec.md`](../relay/plans/service-manifest-spec.md) for the protocol contract.
+
 ## Ecosystem
 
-relayLLM is the LLM engine for the Relay ecosystem. It serves as the single backend for Eve and relayTelegram, and proxies task operations to relayScheduler. Eve, relayScheduler, and relayTelegram all connect to its HTTP/WS API.
-
-- **[Relay](https://github.com/barelyworkingcode/relay)** -- MCP orchestrator. Manages relayLLM as a background service.
-- **[Eve](https://github.com/barelyworkingcode/eve)** -- Browser-based LLM frontend. Single-backend client to relayLLM for all operations including tasks.
-- **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** -- Task scheduler. Runs LLM prompts on schedule. relayLLM proxies task API and forwards scheduler WebSocket events.
+- **[Relay](https://github.com/barelyworkingcode/relay)** -- Orchestrator and front-door dispatcher. Spawns relayLLM, routes inbound traffic per registered manifests.
+- **[Eve](https://github.com/barelyworkingcode/eve)** -- Browser-based LLM frontend. Dials relay's frontend socket; relay dispatches `/api/sessions`, `/api/terminals`, etc. to relayLLM.
+- **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** -- Task scheduler. Registers its own manifest with relay; dispatched directly.
 - **[relayTelegram](https://github.com/barelyworkingcode/relayTelegram)** -- Telegram bot bridge to relayLLM sessions.
 
 ## License
