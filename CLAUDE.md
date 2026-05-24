@@ -264,3 +264,7 @@ See `../relay/plans/service-manifest-spec.md` for the full protocol contract.
 ## Local Auth
 
 `auth.go::bearerAuth` validates every HTTP/WS request against `--token` / `RELAY_LLM_TOKEN`. Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The same token is plumbed through `SessionManager` → `ClaudeProvider` → hook child env as `RELAY_LLM_HOOK_TOKEN`; the hook binary uses it on its `/api/permission` POST.
+
+### Relay-side token rotation
+
+The `RELAY_TOKEN` env var carried into chat-provider MCP spawns and pi sessions is a *relay project token*, not relayLLM's local bearer. Relay's tray Settings UI (and Eve's project dialog) can rotate that token at any time via `RotateProjectToken`. Existing sessions continue to use the in-process token they captured at spawn — they fail their next call into relay with 401, the user re-auths on the relay side, and new sessions pick up the new token automatically via `ResolvePtyEnv`. No changes needed in this repo; flagging it so a future "session suddenly stopped working" investigation lands here quickly. See `../relay/docs/decisions/004-project-mgmt-in-relay.md`.
