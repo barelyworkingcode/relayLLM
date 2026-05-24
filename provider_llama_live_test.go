@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -180,7 +181,56 @@ func TestLlamaLive_HTTPMessage_RoundTripsRealLLM(t *testing.T) {
 
 func TestLlamaLive_ToolCall_RoundTripsWithFakeMCP(t *testing.T) {
 	requireLive(t)
-	t.Skip("TODO: wiring a FakeMCP into a session through the public API requires either an mcpServers setting that routes to a stub binary, or a SessionManager seam to inject the MCP client directly. The chat_base provider builds MCP from session.Settings, so the cleanest path is to add a test-only `mcpClientFactory` hook on SessionManager. Deferred — non-LLM tool_loop_test covers the logic; this test would only validate that the model emits a syntactically correct tool_call JSON.")
+
+	// Inject a FakeMCP exposing one tool. The model gets the tool definition
+	// in its tools list and (if it complies with the prompt) calls it with
+	// JSON args; the fake returns "42", and we assert the model's next turn
+	// references it.
+	addCalls := atomic.Int32{}
+	tool := FakeTool{
+		Name:        "add",
+		Description: "Adds two integers and returns their sum",
+		Schema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"a": map[string]interface{}{"type": "integer"},
+				"b": map[string]interface{}{"type": "integer"},
+			},
+			"required": []string{"a", "b"},
+		},
+		Handler: func(_ json.RawMessage) (string, error) {
+			addCalls.Add(1)
+			return "42", nil
+		},
+	}
+	fakeMCP := NewFakeMCPClient(tool)
+
+	srv := newLiveTestServer(t)
+	srv.Sessions.SetMCPClientFactory(func(*Session) MCPClient { return fakeMCP })
+
+	sessionID := srv.CreateSession(map[string]interface{}{
+		"providerType": "llama",
+		"model":        "llama/" + liveTestAlias,
+		"directory":    srv.DataDir,
+		"settings":     json.RawMessage(`{"temperature": 0.0, "top_k": 1}`),
+	})
+
+	var resp struct {
+		Response string       `json:"response"`
+		Stats    SessionStats `json:"stats"`
+	}
+	httpResp := srv.PostJSON("/api/sessions/"+sessionID+"/message",
+		map[string]interface{}{"text": "Use the add tool to compute 17+25 and tell me the answer."},
+		&resp)
+	if httpResp.StatusCode != 200 {
+		t.Fatalf("status: got %d, body=%s", httpResp.StatusCode, resp.Response)
+	}
+	if addCalls.Load() == 0 {
+		t.Errorf("model did not invoke the add tool; response=%q", resp.Response)
+	}
+	if !strings.Contains(resp.Response, "42") {
+		t.Errorf("expected the tool result (42) in final response; got %q", resp.Response)
+	}
 }
 
 // ---------------------------------------------------------------------------
