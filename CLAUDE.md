@@ -96,7 +96,7 @@ POST           /api/sessions/:id/message — send message (sync, for HTTP client
 DELETE         /api/sessions/:id   — end session
 PUT            /api/sessions/:id/model           — pi only: mid-session model switch
 PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
-GET            /api/status         — runtime status (uptime, session/terminal/llama-instance counts)
+GET            /api/status         — runtime status (uptime + sessions + terminals + embedded `instances` array). Drives relay's Service Inspector via the manifest; rows in `instances` feed the declared `stop-llama` action's `{alias}` placeholder.
 GET            /api/llama/instances        — list running llama-server instances
 DELETE         /api/llama/instances/{alias} — stop a specific llama-server instance
 GET/POST       /api/terminal/templates     — list/create terminal templates
