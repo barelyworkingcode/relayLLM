@@ -4,6 +4,15 @@ Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama
 
 Under relay, relayLLM registers a [service manifest](../relay/plans/service-manifest-spec.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
 
+## For open-ended / lead-developer requests
+
+When the user gives an open-ended ask (e.g. "what's next", "act as lead developer", "improve this codebase") — not a specific task — start by reading:
+
+1. [`ROADMAP.md`](ROADMAP.md) — prioritized backlog, survives session compaction.
+2. [`docs/decisions/`](docs/decisions/) — the *why* behind current architecture (manifest protocol, three-tier testing, test seams, no-carveouts rule).
+
+Propose a plan before executing. For specific tasks ("fix this bug", "add X"), do the task — don't read ROADMAP first.
+
 ## Architecture
 
 ```
