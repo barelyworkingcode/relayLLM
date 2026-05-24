@@ -143,14 +143,14 @@ func main() {
 	// Wire terminal I/O to WebSocket hub.
 	terminalMgr.SetOutputHandler(func(terminalID string, data []byte) {
 		wsHub.SendToTerminal(terminalID, map[string]interface{}{
-			"type":       "terminal_output",
+			"type":       WSMsgTerminalOutput,
 			"terminalId": terminalID,
 			"data":       base64.StdEncoding.EncodeToString(data),
 		})
 	})
 	terminalMgr.SetExitHandler(func(terminalID string, exitCode int) {
 		wsHub.SendToTerminal(terminalID, map[string]interface{}{
-			"type":       "terminal_exit",
+			"type":       WSMsgTerminalExit,
 			"terminalId": terminalID,
 			"exitCode":   exitCode,
 		})

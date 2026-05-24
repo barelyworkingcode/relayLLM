@@ -19,7 +19,6 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 | Priority | Item | Rough size | Notes |
 |----------|------|-----------|-------|
-| Low | Pre-existing stringly-typed event types beyond the 3 migrated (`terminal_*`, `permission_request`, `error`, `session_*`) | medium | Migrated `HandlerLLMEvent`/`HandlerStatsUpdate`/`HandlerMessageComplete`. The rest still float as literals; extract next time someone touches the WS surface. |
 | Low | `LlamaServerManager.StopAll` on test cleanup may terminate orphan llama-server | small | Edge case. Detect by PID provenance if it becomes a real annoyance. |
 
 ## Open — process / infra
@@ -38,6 +37,7 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 ## Closed (recent — for context)
 
+- WS event-type constants migration finished (`ws_messages.go`) — all 36 inbound/outbound envelope strings now go through `WSMsg*` constants in production code; tests intentionally keep literals as wire-contract pins
 - CLAUDE.md: "Releases & consumers" section — release model (continuous from main), consumers (Eve, scheduler, standalone CLI), "done" definition, coordinated-PR breaking-change protocol
 - Test suite overhaul: hermetic default tier, three-tier convention (ADR-002), 166+ tests
 - `waitForHealth`-adopts-external-process bug fix (preflight port check)

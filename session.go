@@ -554,7 +554,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.mu.Unlock()
 
 		msg = map[string]interface{}{
-			"type":      "process_exited",
+			"type":      WSMsgProcessExited,
 			"sessionId": session.ID,
 		}
 
@@ -562,7 +562,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 
 	case "raw_output":
 		msg = map[string]interface{}{
-			"type":      "raw_output",
+			"type":      WSMsgRawOutput,
 			"sessionId": session.ID,
 			"text":      string(data),
 		}
@@ -573,7 +573,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.mu.Unlock()
 
 		msg = map[string]interface{}{
-			"type":      "error",
+			"type":      WSMsgError,
 			"sessionId": session.ID,
 			"message":   string(data),
 		}
@@ -638,7 +638,7 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	// and transition to the "generating" UI state before the first LLM token.
 	if m.sink != nil {
 		m.sink.SendToSession(session.ID, map[string]interface{}{
-			"type":      "user_message",
+			"type":      WSMsgUserMessage,
 			"sessionId": session.ID,
 			"text":      text,
 		})
@@ -861,7 +861,7 @@ func (m *SessionManager) ClearSession(id string) error {
 	// Send clear events to WS client
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      "clear_messages",
+			"type":      WSMsgClearMessages,
 			"sessionId": id,
 		})
 		m.sink.SendToSession(id, map[string]interface{}{
@@ -870,7 +870,7 @@ func (m *SessionManager) ClearSession(id string) error {
 			"stats":     SessionStats{},
 		})
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      "system_message",
+			"type":      WSMsgSystemMessage,
 			"sessionId": id,
 			"message":   "Conversation history cleared",
 		})
@@ -901,7 +901,7 @@ func (m *SessionManager) SetPiModel(id, upstreamProvider, modelID string) error 
 	m.saveSession(session)
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      "model_changed",
+			"type":      WSMsgModelChanged,
 			"sessionId": id,
 			"model":     session.Model,
 		})
@@ -928,7 +928,7 @@ func (m *SessionManager) SetPiThinkingLevel(id, level string) error {
 	m.saveSession(session)
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":          "thinking_level_changed",
+			"type":          WSMsgThinkingLevelChanged,
 			"sessionId":     id,
 			"thinkingLevel": level,
 		})
@@ -955,7 +955,7 @@ func (m *SessionManager) RenameSession(id, name string) error {
 	// Notify WS clients
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      "session_renamed",
+			"type":      WSMsgSessionRenamed,
 			"sessionId": id,
 			"name":      name,
 		})
