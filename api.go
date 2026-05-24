@@ -428,7 +428,7 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 		select {
 		case decision := <-ch:
 			writeJSON(w, 200, decision)
-		case <-time.After(60 * time.Second):
+		case <-perms.clock.After(60 * time.Second):
 			perms.Cleanup(req.ID)
 			writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "timeout"})
 		}

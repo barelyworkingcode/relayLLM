@@ -29,6 +29,16 @@ const (
 	EvtResult    = "result"
 )
 
+// HandlerEvent values are the type-tags passed to EventHandler functions to
+// route provider output to the session layer. Distinct from the wire-envelope
+// EvtSystem/Assistant/Result constants above — those appear inside the JSON
+// payload, while these are the outer dispatch keys on the in-process channel.
+const (
+	HandlerLLMEvent        = "llm_event"        // payload is a canonical event (system/assistant/result)
+	HandlerStatsUpdate     = "stats_update"     // payload is SessionStats JSON
+	HandlerMessageComplete = "message_complete" // turn finished; payload nil
+)
+
 const (
 	ResultToolResultSubtype   = "tool_result"
 	ResultToolProgressSubtype = "tool_progress"
@@ -401,7 +411,7 @@ func (e *EventEmitter) emit(event any) {
 	if err != nil {
 		panic(fmt.Sprintf("event emitter: marshal failed: %v", err))
 	}
-	e.handler("llm_event", data)
+	e.handler(HandlerLLMEvent, data)
 }
 
 // EmitVersionedRaw forwards a pre-shaped event after stamping the protocol
@@ -428,7 +438,7 @@ func (e *EventEmitter) EmitVersionedRaw(raw json.RawMessage) {
 		slog.Warn("event emitter: re-marshal failed; dropping", "error", err)
 		return
 	}
-	e.handler("llm_event", out)
+	e.handler(HandlerLLMEvent, out)
 }
 
 // SynthesizeToolUseID produces a deterministic id for tool_use blocks emitted

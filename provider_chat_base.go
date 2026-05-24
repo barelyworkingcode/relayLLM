@@ -150,7 +150,7 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 // RELAY_MCP_TOKEN (service-level fallback).
 //
 // Returns nil if no MCP servers are configured (tool calling disabled).
-func buildMCPManagerFromSettings(s BaseChatSettings, mcpToken string) *MCPManager {
+func buildMCPManagerFromSettings(s BaseChatSettings, mcpToken string) MCPClient {
 	servers := s.MCPServers
 	if s.UseRelayTools != nil && *s.UseRelayTools {
 		if cmd := os.Getenv("RELAY_MCP_COMMAND"); cmd != "" {
@@ -183,7 +183,7 @@ type BaseChatProvider struct {
 	session      *Session
 	handler      EventHandler
 	transport    ChatTransport
-	mcpManager   *MCPManager
+	mcpManager   MCPClient
 	builtinTools *BuiltinToolRegistry
 
 	mu         sync.Mutex
@@ -227,8 +227,8 @@ func (p *BaseChatProvider) Start() error {
 	}
 
 	toolCount := 0
-	if p.mcpManager != nil && p.mcpManager.HasTools() {
-		toolCount = len(p.mcpManager.tools)
+	if p.mcpManager != nil {
+		toolCount = p.mcpManager.ToolCount()
 	}
 	slog.Info("chat provider started",
 		"transport", p.transport.Name(), "session", p.session.ID,
@@ -336,12 +336,12 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		}
 		var mcpNames []string
 		if p.mcpManager != nil && p.mcpManager.HasTools() {
-			for _, t := range p.mcpManager.tools {
-				toolNames = append(toolNames, t.Name)
+			if toolNames == nil {
+				toolNames = p.mcpManager.ToolNames()
+			} else {
+				toolNames = append(toolNames, p.mcpManager.ToolNames()...)
 			}
-			for name := range p.mcpManager.servers {
-				mcpNames = append(mcpNames, name)
-			}
+			mcpNames = p.mcpManager.ServerNames()
 		}
 		guardedEmitter.SystemInit(p.session.Model, p.session.Directory, toolNames, mcpNames)
 	}
@@ -398,7 +398,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		// Terminal condition: no more tool calls, no tool handlers, or cap hit.
 		if len(toolCalls) == 0 || (p.mcpManager == nil && p.builtinTools == nil) || iteration == maxIterations {
 			statsData, _ := json.Marshal(result.Stats)
-			guardedHandler("stats_update", statsData)
+			guardedHandler(HandlerStatsUpdate, statsData)
 
 			if len(state.blocks) > 0 {
 				toolMessages = append(toolMessages, Message{
@@ -415,7 +415,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 
 			// Nil payload tells session.go's handler to skip its fallback
 			// text-only save — we already persisted the canonical blocks above.
-			guardedHandler("message_complete", nil)
+			guardedHandler(HandlerMessageComplete, nil)
 			return
 		}
 
