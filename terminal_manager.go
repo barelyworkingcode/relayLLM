@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -123,6 +124,40 @@ func (m *TerminalManager) Get(id string) (*TerminalSession, bool) {
 	s, ok := m.terminals[id]
 	m.mu.RUnlock()
 	return s, ok
+}
+
+// TerminalSummary is the slim per-row shape relay's Service Inspector
+// renders. `id` feeds the manifest-declared `stop-terminal` action's
+// {id} placeholder; the other fields are display-only.
+type TerminalSummary struct {
+	ID         string `json:"id"`
+	TemplateID string `json:"templateId"` // matches the key used by List()/Eve
+	Name       string `json:"name"`
+	State      string `json:"state"`     // "running" or "stopped"
+	StartedAt  string `json:"startedAt"` // RFC3339; UI renders as relative time
+}
+
+// ListSummary returns one TerminalSummary per session, sorted by ID for
+// stable UI iteration. Distinct from List() (which Eve consumes with a
+// richer per-terminal payload) so neither caller's wire shape constrains
+// the other.
+func (m *TerminalManager) ListSummary() []TerminalSummary {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]TerminalSummary, 0, len(m.terminals))
+	for _, s := range m.terminals {
+		state, _ := s.Snapshot()
+		out = append(out, TerminalSummary{
+			ID:         s.ID,
+			TemplateID: s.TemplateID,
+			Name:       s.Name,
+			State:      state,
+			StartedAt:  s.CreatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // List returns metadata for all terminal sessions.

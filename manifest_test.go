@@ -177,6 +177,32 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 	if m.Status == nil || m.Status.Path != "/api/status" {
 		t.Errorf("status: got %+v, want path=/api/status", m.Status)
 	}
+
+	// Actions are part of the wire contract: the relay UI builds buttons
+	// from this declaration. Adding/removing one is a coordinated change.
+	wantActions := map[string]ActionDecl{
+		"stop-llama": {
+			ID: "stop-llama", Label: "Stop", Method: "DELETE",
+			PathTemplate: "/api/llama/instances/{alias}", ForEach: "instances",
+		},
+		"stop-terminal": {
+			ID: "stop-terminal", Label: "Kill", Method: "DELETE",
+			PathTemplate: "/api/terminals/{id}", ForEach: "terminals",
+		},
+	}
+	if len(m.Actions) != len(wantActions) {
+		t.Fatalf("Actions count: got %d (%+v), want %d", len(m.Actions), m.Actions, len(wantActions))
+	}
+	for _, got := range m.Actions {
+		want, ok := wantActions[got.ID]
+		if !ok {
+			t.Errorf("unexpected action %q", got.ID)
+			continue
+		}
+		if got != want {
+			t.Errorf("action %q: got %+v, want %+v", got.ID, got, want)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +257,11 @@ func TestManifest_MaybeRegister_SendsCorrectPayload(t *testing.T) {
 	}
 	if len(args.Manifest.Routes) == 0 {
 		t.Errorf("Manifest.Routes empty: %+v", args.Manifest)
+	}
+	// Actions ride along on registration — relay needs them to render
+	// buttons and to validate dispatch requests against the whitelist.
+	if len(args.Manifest.Actions) == 0 {
+		t.Errorf("Manifest.Actions empty — relay can't render action buttons: %+v", args.Manifest)
 	}
 }
 

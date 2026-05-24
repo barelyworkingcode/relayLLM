@@ -24,6 +24,10 @@ type ActionDecl struct {
 	Label        string `json:"label"`
 	Method       string `json:"method"`
 	PathTemplate string `json:"pathTemplate"`
+	// ForEach names a top-level array key in the status payload. When set,
+	// the UI renders one button per row in that array and substitutes the
+	// row's keys into PathTemplate's {placeholders}. Empty = global action.
+	ForEach string `json:"forEach,omitempty"`
 }
 
 // registerManifestRequest is the Arguments payload for ReqRegisterManifest.
@@ -54,6 +58,22 @@ func buildManifest() Manifest {
 		},
 		Status: &StatusDecl{
 			Path: "/api/status",
+		},
+		Actions: []ActionDecl{
+			{
+				ID:           "stop-llama",
+				Label:        "Stop",
+				Method:       "DELETE",
+				PathTemplate: "/api/llama/instances/{alias}",
+				ForEach:      "instances",
+			},
+			{
+				ID:           "stop-terminal",
+				Label:        "Kill",
+				Method:       "DELETE",
+				PathTemplate: "/api/terminals/{id}",
+				ForEach:      "terminals",
+			},
 		},
 	}
 }

@@ -195,7 +195,10 @@ func TestAPI_GetStatus_ReturnsShape(t *testing.T) {
 	srv := NewTestServer(t, nil)
 	var status map[string]interface{}
 	srv.GetJSON("/api/status", &status)
-	for _, k := range []string{"uptimeSeconds", "sessions", "terminals", "llamaInstances"} {
+	// instances replaces the old llamaInstances count — the relay UI's
+	// stop-llama action declares `forEach: "instances"` and substitutes
+	// {alias} from row entries. See api_status_test.go for the shape pin.
+	for _, k := range []string{"uptimeSeconds", "sessions", "terminals", "instances"} {
 		if _, ok := status[k]; !ok {
 			t.Errorf("status missing %q: %v", k, status)
 		}

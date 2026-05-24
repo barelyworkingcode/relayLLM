@@ -110,7 +110,7 @@ type LlamaInstanceInfo struct {
 	Alias     string `json:"alias"`
 	Port      int    `json:"port"`
 	Pid       int    `json:"pid"`
-	StartedAt int64  `json:"startedAt"` // unix seconds
+	StartedAt string `json:"startedAt"` // RFC3339; UI renders as relative "5m ago"
 	Healthy   bool   `json:"healthy"`
 	Exited    bool   `json:"exited"`
 }
@@ -292,7 +292,7 @@ func (m *LlamaServerManager) ListInstances() []LlamaInstanceInfo {
 			Alias:     alias,
 			Port:      inst.port,
 			Pid:       pid,
-			StartedAt: inst.startTime.Unix(),
+			StartedAt: inst.startTime.UTC().Format(time.RFC3339),
 			Healthy:   inst.healthy,
 			Exited:    inst.exited.Load(),
 		})
