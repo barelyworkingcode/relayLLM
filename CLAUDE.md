@@ -177,6 +177,30 @@ go build .                          # main binary
 go build ./cmd/hook                 # permission hook binary
 ```
 
+## Testing
+
+Three tiers, gated by build tag:
+
+```bash
+go test ./...                       # default: hermetic, no external deps, <2 s
+go test -tags=live ./...            # opt-in: requires Ollama / LM Studio / OMLX / relay binary running locally
+go test -tags=llm ./...             # opt-in: requires Qwen3.6 MoE 35 in settings.json (see below)
+```
+
+Default tier covers WS protocol, HTTP API, session lifecycle, tool-call loop, pi event translation, and manifest registration — all driven by fakes in `support_test.go` / `support_server_test.go`. No real LLM, no subprocess, no network.
+
+The `llm` tier (`provider_llama_live_test.go`) drives the real `LlamaServerManager` against an installed model. **Prerequisite**: `Qwen3.6 MoE 35` registered in `~/Library/Application Support/relayLLM/settings.json` under `llama-server.models` with the model file present at the configured `modelDir`. Skips gracefully if absent. Validates SSE chunking, llama-server lifecycle, and mid-stream stop — the surface fakes can't reach.
+
+The `live` tier is for legacy integration tests that depend on third-party services. Kept for manual smoke; never run in default CI.
+
+### Adding tests
+
+- Need an HTTP/WS surface to drive? Use `NewTestServer(t, nil)` from `support_server_test.go`.
+- Need a scripted LLM stream? `srv.SetFakeProvider()` then `fp.ScriptText(...)` / `fp.ScriptResult(...)`.
+- Need deterministic timing? `NewFakeClock(t0)` + `clock.Advance(d)`. Wire via `TestServerOptions{Clock: ...}`.
+- Need fake tool calls? `NewFakeMCPClient(FakeTool{Name, Handler})`.
+- Need to validate the relay bridge handshake? `NewFakeBridge(t)` + `withBridgeEnv(t, ...)`.
+
 ## Ecosystem
 
 relayLLM is one of several relay-enhanced services. It serves session/provider operations only — projects live in relay, scheduled tasks live in relayScheduler. Eve reaches every backend through relay's front door.

@@ -366,12 +366,20 @@ Sessions are persisted on message completion and session end. Restored on server
 
 ## Testing
 
+Three tiers, gated by build tag:
+
 ```bash
-go test -short ./...     # unit + integration tests that don't need claude CLI
-go test ./...            # all tests (requires claude CLI + API key)
-./smoketest.sh           # end-to-end against a running instance (default: localhost:3001)
-./smoketest.sh http://localhost:4000  # custom URL
+go test ./...                       # default: hermetic, no external deps, ~1.3 s
+go test -tags=live ./...            # legacy integration; requires Ollama/LM Studio/OMLX/relay running
+go test -tags=llm ./...             # real llama.cpp against an installed model (see below)
+./smoketest.sh                      # ad-hoc end-to-end against a running instance
 ```
+
+The default suite covers the WebSocket protocol, HTTP API, session lifecycle, tool-call loop, pi event translation, and relay manifest registration — all driven by fakes in `support_test.go` / `support_server_test.go`. No LLM calls, no subprocesses, no network.
+
+The `llm` tier (`provider_llama_live_test.go`) requires `Qwen3.6 MoE 35` registered in `~/Library/Application Support/relayLLM/settings.json` under `llama-server.models`, with the model file at the configured `modelDir`. Skips gracefully if absent. Validates SSE chunking, llama-server lifecycle, mid-stream stop — the surface fakes can't reach.
+
+The `live` tier is for legacy integration tests that depend on third-party services; run only on demand.
 
 ## Service Manifest Integration
 
