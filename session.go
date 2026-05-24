@@ -97,6 +97,12 @@ type SessionManager struct {
 	// providerFactory, when non-nil, fully replaces the built-in provider
 	// switch in initProvider. Test-only seam — production never sets this.
 	providerFactory func(session *Session, handler EventHandler) (Provider, error)
+
+	// mcpClientFactory, when non-nil, overrides the MCPClient that
+	// BaseChatProvider would otherwise build from session settings. Lets
+	// tests inject a FakeMCP without going through the settings JSON.
+	// Test-only seam — production never sets this.
+	mcpClientFactory func(session *Session) MCPClient
 }
 
 // SetProviderFactory installs a function that constructs the Provider for a
@@ -104,6 +110,13 @@ type SessionManager struct {
 // session.ProviderType. Test-only.
 func (m *SessionManager) SetProviderFactory(f func(*Session, EventHandler) (Provider, error)) {
 	m.providerFactory = f
+}
+
+// SetMCPClientFactory installs a function that produces the MCPClient for
+// each chat-based session. When set, BaseChatProvider's settings-driven MCP
+// is replaced after construction. Test-only.
+func (m *SessionManager) SetMCPClientFactory(f func(*Session) MCPClient) {
+	m.mcpClientFactory = f
 }
 
 func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -394,6 +407,14 @@ func (m *SessionManager) initProvider(session *Session) error {
 			p.RestoreState(session.ProviderState)
 		}
 		provider = p
+	}
+
+	// Test-only MCP injection: replace the settings-driven MCP client on
+	// chat-based providers before Start runs (Start dials MCP servers).
+	if m.mcpClientFactory != nil {
+		if bp, ok := provider.(*BaseChatProvider); ok {
+			bp.SetMCPClient(m.mcpClientFactory(session))
+		}
 	}
 
 	session.setProvider(provider)
