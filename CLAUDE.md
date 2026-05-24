@@ -193,6 +193,16 @@ The `llm` tier (`provider_llama_live_test.go`) drives the real `LlamaServerManag
 
 The `live` tier is for legacy integration tests that depend on third-party services. Kept for manual smoke; never run in default CI.
 
+### Pre-commit hook
+
+Install once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Runs `go build ./...`, `go vet ./...`, and the hermetic test suite on every commit that touches Go files. ~2s total. Skip in emergencies with `git commit --no-verify`. The `live` and `llm` build tags are not invoked by the hook — those stay opt-in.
+
 ### Adding tests
 
 - Need an HTTP/WS surface to drive? Use `NewTestServer(t, nil)` from `support_server_test.go`.
