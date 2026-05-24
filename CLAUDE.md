@@ -10,6 +10,7 @@ When the user gives an open-ended ask (e.g. "what's next", "act as lead develope
 
 1. [`ROADMAP.md`](ROADMAP.md) — prioritized backlog, survives session compaction.
 2. [`docs/decisions/`](docs/decisions/) — the *why* behind current architecture (manifest protocol, three-tier testing, test seams, no-carveouts rule).
+3. [Releases & consumers](#releases--consumers) below — release model, who depends on relayLLM, "done" definition, breaking-change protocol.
 
 Propose a plan before executing. For specific tasks ("fix this bug", "add X"), do the task — don't read ROADMAP first.
 
@@ -229,6 +230,25 @@ relayLLM is one of several relay-enhanced services. It serves session/provider o
 - `../relayScheduler/` -- Task scheduler. Registers its own manifest with relay; relay dispatches `/api/tasks/*` to it directly (relayLLM does not proxy).
 - `../relayTelegram/` -- Telegram bot bridge.
 - `../relayComfy/` -- ComfyUI service. Manages ComfyUI as a subprocess for image/video generation; relayLLM talks to its HTTP API on port 8188.
+
+## Releases & consumers
+
+**Release model**: continuous from `main`. No tags, no SemVer, no release branches. Consumers build and run against whatever's on `main`.
+
+**Consumers** — who depends on relayLLM's behavior (relay is the transport layer, not a consumer):
+
+- **Eve** — browser frontend. Reaches relayLLM through relay's front-door dispatcher; never speaks to the socket directly.
+- **relayScheduler** — schedules tasks against terminal templates via HTTP/WS.
+- **Standalone CLI / scripts** — humans or scripts hitting the unix socket directly with no relay in front. Treat the documented HTTP/WS surface as a public API for this audience.
+
+**"Done" definition** — every change that lands on `main` must:
+
+1. Pass the hermetic test tier. Enforced by `.githooks/pre-commit` (install once with `git config core.hooksPath .githooks`). If the hook is bypassed, run `go test ./...` manually before merging.
+2. Run the `live` and/or `llm` tiers manually when the change touches the relevant surface — providers (`-tags=live` for Ollama / LM Studio / OMLX / relay binary; `-tags=llm` for llama-server with a real GGUF). Note in the commit message which tiers you ran.
+3. Add an ADR under [`docs/decisions/`](docs/decisions/) for architectural changes: new test seams, new protocols, new build-tag tiers, new run modes. Skip for routine refactors and library upgrades.
+4. Reflect the new state in [`ROADMAP.md`](ROADMAP.md) — close shipped items into the **Closed** section with a one-line note, update **In flight**, add follow-ups you discovered.
+
+**Breaking changes** — anything that alters the wire (WS protocol message shapes, manifest schema, HTTP route paths or payloads, terminal template fields, session settings keys) ships as a **coordinated PR across repos**. Land relayLLM and the matching changes in `../relay`, `../eve`, `../relayScheduler` together. There is no manifest version negotiation or compat shim; one person owns all the repos, so coordinate at PR time rather than building permanent backwards-compat. If a change genuinely cannot be coordinated atomically, ship the additive side first (new field / new route) and migrate consumers in a follow-up PR before removing the old surface.
 
 ## Service Manifest Integration
 
