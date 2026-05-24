@@ -155,43 +155,43 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch msg.Type {
-		case "join_session":
+		case WSMsgJoinSession:
 			h.handleJoinSession(wc, msgBytes, boundSessions)
-		case "send_message":
+		case WSMsgSendMessage:
 			h.handleSendMessage(wc, msgBytes)
-		case "end_session":
+		case WSMsgEndSession:
 			h.handleEndSession(wc, msgBytes)
-		case "rename_session":
+		case WSMsgRenameSession:
 			h.handleRenameSession(wc, msgBytes)
-		case "delete_session":
+		case WSMsgDeleteSession:
 			h.handleDeleteSession(wc, msgBytes, boundSessions)
-		case "leave_session":
+		case WSMsgLeaveSession:
 			h.handleLeaveSession(wc, msgBytes, boundSessions)
-		case "stop_generation":
+		case WSMsgStopGeneration:
 			h.handleStopGeneration(wc, msgBytes)
-		case "clear_session":
+		case WSMsgClearSession:
 			h.handleClearSession(wc, msgBytes)
-		case "permission_response":
+		case WSMsgPermissionResponse:
 			h.handlePermissionResponse(msgBytes)
-		case "set_permission_mode":
+		case WSMsgSetPermissionMode:
 			h.handleSetPermissionMode(wc, msgBytes)
-		case "terminal_create":
+		case WSMsgTerminalCreate:
 			h.handleTerminalCreate(wc, msgBytes, boundTerminals)
-		case "join_terminal":
+		case WSMsgJoinTerminal:
 			h.handleJoinTerminal(wc, msgBytes, boundTerminals)
-		case "leave_terminal":
+		case WSMsgLeaveTerminal:
 			h.handleLeaveTerminal(wc, msgBytes, boundTerminals)
-		case "terminal_input":
+		case WSMsgTerminalInput:
 			h.handleTerminalInput(wc, msgBytes)
-		case "terminal_resize":
+		case WSMsgTerminalResize:
 			h.handleTerminalResize(wc, msgBytes)
-		case "terminal_close":
+		case WSMsgTerminalClose:
 			h.handleTerminalClose(msgBytes, boundTerminals)
-		case "terminal_list":
+		case WSMsgTerminalList:
 			h.handleTerminalList(wc)
-		case "terminal_reconnect":
+		case WSMsgTerminalReconnect:
 			h.handleTerminalReconnect(wc, msgBytes, boundTerminals)
-		case "terminal_templates":
+		case WSMsgTerminalTemplates:
 			h.handleTerminalTemplates(wc)
 		}
 	}
@@ -248,7 +248,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	session.mu.Unlock()
 
 	sendJSON(wc, map[string]interface{}{
-		"type":            "session_joined",
+		"type":            WSMsgSessionJoined,
 		"sessionId":       session.ID,
 		"projectId":       session.ProjectID,
 		"directory":       session.Directory,
@@ -328,11 +328,11 @@ func (h *WSHub) handleDeleteSession(wc *wsConn, msgBytes []byte, boundSessions m
 
 	// Notify all remaining viewers that the session was deleted.
 	h.SendToSession(req.SessionID, map[string]interface{}{
-		"type":      "session_ended",
+		"type":      WSMsgSessionEnded,
 		"sessionId": req.SessionID,
 	})
 	sendJSON(wc, map[string]interface{}{
-		"type":      "session_ended",
+		"type":      WSMsgSessionEnded,
 		"sessionId": req.SessionID,
 	})
 }
@@ -421,7 +421,7 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 	mode := sess.PermissionMode
 	sess.mu.Unlock()
 	h.SendToSession(req.SessionID, map[string]interface{}{
-		"type":      "mode_changed",
+		"type":      WSMsgModeChanged,
 		"sessionId": req.SessionID,
 		"mode":      mode,
 	})
@@ -472,7 +472,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 	h.joinTerminalConn(wc, session, boundTerminals)
 
 	sendJSON(wc, map[string]interface{}{
-		"type":       "terminal_created",
+		"type":       WSMsgTerminalCreated,
 		"terminalId": session.ID,
 		"templateId": session.TemplateID,
 		"name":       session.Name,
@@ -570,14 +570,14 @@ func (h *WSHub) handleTerminalClose(msgBytes []byte, boundTerminals map[string]b
 	delete(boundTerminals, req.TerminalID)
 
 	h.Broadcast(map[string]interface{}{
-		"type":       "terminal_closed",
+		"type":       WSMsgTerminalClosed,
 		"terminalId": req.TerminalID,
 	})
 }
 
 func (h *WSHub) handleTerminalList(wc *wsConn) {
 	sendJSON(wc, map[string]interface{}{
-		"type":      "terminal_list",
+		"type":      WSMsgTerminalList,
 		"terminals": h.terminals.List(),
 	})
 }
@@ -619,7 +619,7 @@ func (h *WSHub) handleTerminalReconnect(wc *wsConn, msgBytes []byte, boundTermin
 
 func (h *WSHub) handleTerminalTemplates(wc *wsConn) {
 	sendJSON(wc, map[string]interface{}{
-		"type":      "terminal_templates",
+		"type":      WSMsgTerminalTemplates,
 		"templates": h.terminals.ListTemplates(),
 	})
 }
@@ -660,7 +660,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 	state, exitCode := session.Snapshot()
 	cols, rows := session.Size()
 	sendJSON(wc, map[string]interface{}{
-		"type":       "terminal_joined",
+		"type":       WSMsgTerminalJoined,
 		"terminalId": tid,
 		"templateId": session.TemplateID,
 		"name":       session.Name,
@@ -673,7 +673,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 
 	if state == "stopped" {
 		sendJSON(wc, map[string]interface{}{
-			"type":       "terminal_exit",
+			"type":       WSMsgTerminalExit,
 			"terminalId": tid,
 			"exitCode":   exitCode,
 		})
@@ -713,7 +713,7 @@ func sendJSON(wc *wsConn, msg map[string]interface{}) {
 
 func sendWSError(wc *wsConn, msg string) {
 	sendJSON(wc, map[string]interface{}{
-		"type":    "error",
+		"type":    WSMsgError,
 		"message": msg,
 	})
 }
