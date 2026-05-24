@@ -416,7 +416,7 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 
 		if perms.sink != nil {
 			perms.sink.SendToSession(body.SessionID, map[string]interface{}{
-				"type":         "permission_request",
+				"type":         WSMsgPermissionRequest,
 				"sessionId":    body.SessionID,
 				"permissionId": req.ID,
 				"toolName":     body.ToolName,
