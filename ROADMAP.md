@@ -24,9 +24,7 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 ## Open — process / infra
 
-| Priority | Item | Rough size | Notes |
-|----------|------|-----------|-------|
-| Medium | CLAUDE.md: release process, who consumes relayLLM, "done" definition | small | Needs human input — no one currently writing this knows. Captures shipping conventions for future sessions. |
+(none open)
 
 ## Cross-repo (tracked here for visibility, owned elsewhere)
 
@@ -40,6 +38,7 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 ## Closed (recent — for context)
 
+- CLAUDE.md: "Releases & consumers" section — release model (continuous from main), consumers (Eve, scheduler, standalone CLI), "done" definition, coordinated-PR breaking-change protocol
 - Test suite overhaul: hermetic default tier, three-tier convention (ADR-002), 166+ tests
 - `waitForHealth`-adopts-external-process bug fix (preflight port check)
 - Event-type constants (`HandlerLLMEvent`, etc.) replacing stringly-typed dispatch
