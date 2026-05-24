@@ -207,6 +207,13 @@ func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatT
 	}
 }
 
+// SetMCPClient replaces the MCP client built from session settings. Test-only
+// seam — production never calls this. Used by SessionManager.mcpClientFactory
+// to substitute a fake MCP that doesn't spawn real subprocesses.
+func (p *BaseChatProvider) SetMCPClient(c MCPClient) {
+	p.mcpManager = c
+}
+
 func (p *BaseChatProvider) Start() error {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer pingCancel()
