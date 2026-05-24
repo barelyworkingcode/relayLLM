@@ -69,12 +69,20 @@ type PermissionManager struct {
 	mu      sync.Mutex
 	pending map[string]chan PermissionDecision
 	sink    EventSink
+	clock   Clock
 }
 
 func NewPermissionManager() *PermissionManager {
 	return &PermissionManager{
 		pending: make(map[string]chan PermissionDecision),
+		clock:   DefaultClock,
 	}
+}
+
+// SetClock swaps the clock used for permission timeouts. Tests use this to
+// drive deterministic timeouts; production never calls it.
+func (m *PermissionManager) SetClock(c Clock) {
+	m.clock = c
 }
 
 func (m *PermissionManager) SetEventSink(sink EventSink) {

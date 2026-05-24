@@ -30,18 +30,18 @@ func (c *ResponseCollector) HandleEvent(msg map[string]interface{}) {
 	msgType, _ := msg["type"].(string)
 
 	switch msgType {
-	case "llm_event":
+	case HandlerLLMEvent:
 		eventRaw, _ := msg["event"].(json.RawMessage)
 		c.extractText(eventRaw)
 
-	case "stats_update":
+	case HandlerStatsUpdate:
 		if stats, ok := msg["stats"].(SessionStats); ok {
 			c.mu.Lock()
 			c.stats = stats
 			c.mu.Unlock()
 		}
 
-	case "message_complete":
+	case HandlerMessageComplete:
 		c.doneOnce.Do(func() { close(c.done) })
 
 	case "error":

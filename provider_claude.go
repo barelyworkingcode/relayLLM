@@ -637,9 +637,9 @@ func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
 		}
 
 		statsData, _ := json.Marshal(stats)
-		p.handler("stats_update", statsData)
+		p.handler(HandlerStatsUpdate, statsData)
 	}
-	p.handler("message_complete", nil)
+	p.handler(HandlerMessageComplete, nil)
 }
 
 func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error {

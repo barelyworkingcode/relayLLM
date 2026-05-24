@@ -799,7 +799,7 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 	}
 
 	statsData, _ := json.Marshal(stats)
-	p.handler("stats_update", statsData)
+	p.handler(HandlerStatsUpdate, statsData)
 
 	// Persist the assistant turn as canonical content blocks (mirrors
 	// chat_base lines 402-407). Pi owns its own per-session JSONL too,
@@ -822,7 +822,7 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 
 	// nil data → session layer skips its fallback text-only save (we just
 	// did the canonical save above).
-	p.handler("message_complete", nil)
+	p.handler(HandlerMessageComplete, nil)
 }
 
 // extractUsageFromAgentEnd sums per-message usage from an agent_end event.

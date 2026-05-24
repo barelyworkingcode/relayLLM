@@ -194,6 +194,18 @@ func (m *LlamaServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) 
 		port = m.allocatePort()
 	}
 
+	// Pre-bind check: if the port is already held by another process
+	// (e.g. a stray llama-server from a previous run, or the user's
+	// interactive instance), bail out before spawning. Without this the
+	// spawned process EADDRINUSE-crashes silently while waitForHealth
+	// happily reports "ready" — it's just talking to the squatter.
+	// Only meaningful for user-specified ports; allocatePort already
+	// returns a free port but checking again is harmless.
+	if err := preflightPortFree(port); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("llama: cannot launch %q: %w", alias, err)
+	}
+
 	args := buildLlamaArgs(cfg.Args, port)
 	slog.Info("llama: launching server", "alias", alias, "binary", binPath, "port", port, "args", args)
 
@@ -441,6 +453,19 @@ func (m *LlamaServerManager) HasAlias(name string) bool {
 		}
 	}
 	return false
+}
+
+// preflightPortFree returns an error if some other process is already
+// listening on port. The bind+close races against any concurrent launcher
+// on the same machine, but the window is microseconds — good enough for
+// catching the "stale llama-server squatting on the port" failure mode.
+func preflightPortFree(port int) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("port %d already in use (likely a stale llama-server from a previous run; try `lsof -i :%d` to find it)", port, port)
+	}
+	_ = ln.Close()
+	return nil
 }
 
 // waitForHealth polls llama-server's /health endpoint until it responds

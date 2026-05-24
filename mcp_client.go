@@ -27,6 +27,20 @@ type MCPTool struct {
 	Tool       *mcp.Tool
 }
 
+// MCPClient is the surface that BaseChatProvider needs from MCP. Decoupling
+// chat_base from the concrete MCPManager lets tests substitute a fake without
+// spawning real subprocesses.
+type MCPClient interface {
+	Start(ctx context.Context) error
+	HasTools() bool
+	ToolCount() int
+	ChatToolDefs() []map[string]interface{}
+	CallTool(ctx context.Context, name string, arguments json.RawMessage) (string, error)
+	ToolNames() []string
+	ServerNames() []string
+	Close()
+}
+
 // mcpServerConn holds a single MCP server's active session.
 type mcpServerConn struct {
 	session *mcp.ClientSession
@@ -176,6 +190,36 @@ func (m *MCPManager) HasTools() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.tools) > 0
+}
+
+// ToolCount returns the number of discovered tools without allocating.
+func (m *MCPManager) ToolCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.tools)
+}
+
+// ToolNames returns the discovered tool names. Used by chat_base to populate
+// system.init events.
+func (m *MCPManager) ToolNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.tools))
+	for _, t := range m.tools {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
+// ServerNames returns the names of currently-connected MCP servers.
+func (m *MCPManager) ServerNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.servers))
+	for name := range m.servers {
+		out = append(out, name)
+	}
+	return out
 }
 
 // Close shuts down all MCP server connections.

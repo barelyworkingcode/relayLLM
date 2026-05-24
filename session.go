@@ -93,6 +93,17 @@ type SessionManager struct {
 
 	routerPort    string
 	proxyRegistry *ProxyRegistry
+
+	// providerFactory, when non-nil, fully replaces the built-in provider
+	// switch in initProvider. Test-only seam — production never sets this.
+	providerFactory func(session *Session, handler EventHandler) (Provider, error)
+}
+
+// SetProviderFactory installs a function that constructs the Provider for a
+// new session. When set, it short-circuits the built-in switch on
+// session.ProviderType. Test-only.
+func (m *SessionManager) SetProviderFactory(f func(*Session, EventHandler) (Provider, error)) {
+	m.providerFactory = f
 }
 
 func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
@@ -308,6 +319,15 @@ func (m *SessionManager) initProvider(session *Session) error {
 		m.handleProviderEvent(session, eventType, data)
 	}
 
+	if m.providerFactory != nil {
+		provider, err := m.providerFactory(session, handler)
+		if err != nil {
+			return err
+		}
+		session.setProvider(provider)
+		return provider.Start()
+	}
+
 	var provider Provider
 
 	switch session.ProviderType {
@@ -459,14 +479,14 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 	var msg map[string]interface{}
 
 	switch eventType {
-	case "llm_event":
+	case HandlerLLMEvent:
 		msg = map[string]interface{}{
-			"type":      "llm_event",
+			"type":      HandlerLLMEvent,
 			"sessionId": session.ID,
 			"event":     json.RawMessage(data),
 		}
 
-	case "stats_update":
+	case HandlerStatsUpdate:
 		var stats SessionStats
 		if err := json.Unmarshal(data, &stats); err != nil {
 			return
@@ -486,12 +506,12 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.mu.Unlock()
 
 		msg = map[string]interface{}{
-			"type":      "stats_update",
+			"type":      HandlerStatsUpdate,
 			"sessionId": session.ID,
 			"stats":     currentStats,
 		}
 
-	case "message_complete":
+	case HandlerMessageComplete:
 		session.mu.Lock()
 		session.processing = false
 		session.mu.Unlock()
@@ -501,7 +521,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		// JSONL replayed by readClaudeHistory). message_complete data is
 		// always nil; there is no fallback save path.
 		msg = map[string]interface{}{
-			"type":      "message_complete",
+			"type":      HandlerMessageComplete,
 			"sessionId": session.ID,
 		}
 
@@ -638,7 +658,7 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 	// provider.StopGeneration() already incremented the generation counter,
 	// so the old goroutine's events (including its own message_complete)
 	// are silently discarded — no double-delivery.
-	m.handleProviderEvent(session, "message_complete", nil)
+	m.handleProviderEvent(session, HandlerMessageComplete, nil)
 	return nil
 }
 
@@ -824,7 +844,7 @@ func (m *SessionManager) ClearSession(id string) error {
 			"sessionId": id,
 		})
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      "stats_update",
+			"type":      HandlerStatsUpdate,
 			"sessionId": id,
 			"stats":     SessionStats{},
 		})

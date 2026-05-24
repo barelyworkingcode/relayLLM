@@ -206,7 +206,7 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 			"tool_name": "generate_image",
 			"message":   msg,
 		})
-		emit("llm_event", data)
+		emit(HandlerLLMEvent, data)
 	}
 
 	// Determine workflow: img2img if user requested and image is attached.
