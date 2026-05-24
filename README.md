@@ -372,7 +372,6 @@ Three tiers, gated by build tag:
 go test ./...                       # default: hermetic, no external deps, ~1.3 s
 go test -tags=live ./...            # legacy integration; requires Ollama/LM Studio/OMLX/relay running
 go test -tags=llm ./...             # real llama.cpp against an installed model (see below)
-./smoketest.sh                      # ad-hoc end-to-end against a running instance
 ```
 
 The default suite covers the WebSocket protocol, HTTP API, session lifecycle, tool-call loop, pi event translation, and relay manifest registration — all driven by fakes in `support_test.go` / `support_server_test.go`. No LLM calls, no subprocesses, no network.
