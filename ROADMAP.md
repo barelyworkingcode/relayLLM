@@ -29,14 +29,14 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 | Item | Owner | Notes |
 |------|-------|-------|
-| Bridge wire types duplicated across `../relay/bridge/manifest.go` and `relayLLM/manifest.go` | relay | Shared Go module or codegen from a single source. Brittle today. |
-| Relay menubar status panel (consumes relayLLM manifest's status/actions) | relay | Original feature request that drove the manifest refactor. Spec lives in relayLLM git history at commit `02312ef`. UI must consume the manifest, not hardcode "relayllm" (see [ADR-004](docs/decisions/004-no-service-carveouts.md)). |
+| Bridge wire types duplicated across `../relay/bridge/manifest.go` and `relayLLM/manifest.go` | relay | Shared Go module or codegen from a single source. Brittle today — `ActionDecl.ForEach` was added to both sides manually in coordinated PR with the Service Inspector landing. |
 | Eve + relay + relayLLM + mock-LLM end-to-end integration tier | platform | No system-level confidence today. Either nightly on a dev box or stays manual. |
 | Single trace-id from Eve → relay → relayLLM → MCP | platform | Today debugging means tailing 5+ log files. Big observability win. |
 | Pre-commit hook pattern in `../relay`, `../eve`, `../relayScheduler` | each repo | Apply the `.githooks/pre-commit` pattern landed here. Without it, sibling suites drift. |
 
 ## Closed (recent — for context)
 
+- Relay menubar status panel landed as a generic **Service Inspector** in relay's settings window. relayLLM declares an `Actions` block with `forEach: "instances"`; relay's `service_status_client.go` + `service_status_poller.go` + `ipc_service_action.go` render any registered manifest with zero hardcoded service IDs (ADR-004 honored). Wire change: `/api/status` now embeds `instances` (replaces `llamaInstances` count). `ActionDecl.ForEach` extension added to both bridge manifest mirrors (relay + relayLLM).
 - WS event-type constants migration finished (`ws_messages.go`) — all 36 inbound/outbound envelope strings now go through `WSMsg*` constants in production code; tests intentionally keep literals as wire-contract pins
 - CLAUDE.md: "Releases & consumers" section — release model (continuous from main), consumers (Eve, scheduler, standalone CLI), "done" definition, coordinated-PR breaking-change protocol
 - Test suite overhaul: hermetic default tier, three-tier convention (ADR-002), 166+ tests

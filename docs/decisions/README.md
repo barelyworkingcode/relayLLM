@@ -10,5 +10,6 @@ Format: Context → Decision → Consequences. Keep each ADR under ~300 words; A
 | [002](002-three-tier-testing.md) | Three-tier testing (default / live / llm) | Accepted |
 | [003](003-production-test-seams.md) | Production test seams (factory + interface pattern) | Accepted |
 | [004](004-no-service-carveouts.md) | No service carveouts in relay (IoC for ecosystem integrations) | Accepted |
+| [005](005-action-foreach-extension.md) | `ActionDecl.ForEach` — per-row manifest actions | Accepted |
 
 When to write a new ADR: a decision was made that future readers might second-guess (e.g. "why did we add this seam? why this interface boundary? why this build tag instead of CI gate?"). Don't ADR routine refactors or library upgrades.

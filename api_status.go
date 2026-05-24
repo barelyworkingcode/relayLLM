@@ -16,15 +16,15 @@ func RegisterStatusRoutes(
 	startTime time.Time,
 ) {
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		var llamaCount int
+		instances := []LlamaInstanceInfo{}
 		if llama != nil {
-			llamaCount = len(llama.ListInstances())
+			instances = llama.ListInstances()
 		}
 		writeJSON(w, 200, map[string]interface{}{
-			"uptimeSeconds":  int64(time.Since(startTime).Seconds()),
-			"sessions":       len(sessions.ListSessions()),
-			"terminals":      len(terminals.List()),
-			"llamaInstances": llamaCount,
+			"uptimeSeconds": int64(time.Since(startTime).Seconds()),
+			"sessions":      len(sessions.ListSessions()),
+			"instances":     instances,
+			"terminals":     terminals.ListSummary(),
 		})
 	})
 
