@@ -10,9 +10,10 @@ import (
 // field-compatible with relay/bridge/manifest.go (which is in a separate
 // Go module, so the types are intentionally mirrored here).
 type Manifest struct {
-	Routes  []string     `json:"routes"`
-	Status  *StatusDecl  `json:"status,omitempty"`
-	Actions []ActionDecl `json:"actions,omitempty"`
+	Routes    []string       `json:"routes"`
+	Status    *StatusDecl    `json:"status,omitempty"`
+	Actions   []ActionDecl   `json:"actions,omitempty"`
+	Resources []ResourceDecl `json:"resources,omitempty"`
 }
 
 type StatusDecl struct {
@@ -28,6 +29,38 @@ type ActionDecl struct {
 	// the UI renders one button per row in that array and substitutes the
 	// row's keys into PathTemplate's {placeholders}. Empty = global action.
 	ForEach string `json:"forEach,omitempty"`
+}
+
+// ResourceDecl declares a typed collection that relay's Service Inspector can
+// CRUD. Mirrors relay/bridge/manifest.go's ResourceDecl wire shape.
+type ResourceDecl struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Help  string `json:"help,omitempty"`
+
+	List   EndpointDecl  `json:"list"`
+	Create *EndpointDecl `json:"create,omitempty"`
+	Update *EndpointDecl `json:"update,omitempty"`
+	Delete *EndpointDecl `json:"delete,omitempty"`
+
+	Fields         []FieldDecl `json:"fields"`
+	ProtectedField string      `json:"protectedField,omitempty"`
+}
+
+type EndpointDecl struct {
+	Method       string `json:"method"`
+	PathTemplate string `json:"pathTemplate"`
+}
+
+type FieldDecl struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Type        string `json:"type"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Help        string `json:"help,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
+	HideInTable bool   `json:"hideInTable,omitempty"`
 }
 
 // registerManifestRequest is the Arguments payload for ReqRegisterManifest.
@@ -73,6 +106,27 @@ func buildManifest() Manifest {
 				Method:       "DELETE",
 				PathTemplate: "/api/terminals/{id}",
 				ForEach:      "terminals",
+			},
+		},
+		Resources: []ResourceDecl{
+			{
+				ID:    "pty_templates",
+				Label: "Terminal Templates",
+				Help:  "Launchable terminal types. Built-ins (claude-code, opencode, shell) cannot be edited or removed.",
+				List:  EndpointDecl{Method: "GET", PathTemplate: "/api/terminal/templates"},
+				Create: &EndpointDecl{Method: "POST", PathTemplate: "/api/terminal/templates"},
+				Update: &EndpointDecl{Method: "PUT", PathTemplate: "/api/terminal/templates/{id}"},
+				Delete: &EndpointDecl{Method: "DELETE", PathTemplate: "/api/terminal/templates/{id}"},
+				Fields: []FieldDecl{
+					{ID: "name", Label: "Name", Type: "text", Required: true, Placeholder: "e.g. My REPL"},
+					{ID: "command", Label: "Command", Type: "text", Required: true, Placeholder: "e.g. /usr/local/bin/myrepl"},
+					{ID: "args", Label: "Args", Type: "string[]", Help: "One per line."},
+					{ID: "env", Label: "Environment", Type: "stringMap", Help: "KEY=VALUE per line."},
+					{ID: "icon", Label: "Icon", Type: "text", Placeholder: "terminal", HideInTable: true},
+					{ID: "description", Label: "Description", Type: "textarea", HideInTable: true},
+					{ID: "builtIn", Label: "Built-in", Type: "bool", ReadOnly: true},
+				},
+				ProtectedField: "builtIn",
 			},
 		},
 	}
