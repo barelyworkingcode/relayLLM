@@ -42,9 +42,6 @@ relay_router.go           Unified OpenAI-compatible router fronting llama-server
 proxy_registry.go         Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
 comfyui_client.go         ComfyUI HTTP client (queue, poll, fetch, workflow builder)
 builtin_tools.go          Built-in tool registry (generate_image) + dynamic schema
-mcp_image_server.go       `relayllm mcp-image-gen` stdio MCP server. Spawned by
-                          Claude CLI via --mcp-config so Claude sessions can
-                          call generate_image. Reuses ComfyUIClient + handleGenerateImage.
 pi_image_skill.go         Materializes the pi SKILL.md that wraps the
                           POST /api/generate-image endpoint via bash+curl.
 terminal_template.go      Terminal template types + JSON file store (built-in + custom)
@@ -91,10 +88,10 @@ Tool dispatch order in `runToolLoop()`: built-in tools are checked first (`built
 
   Provider coverage:
   - **Ollama / OpenAI / llama.cpp**: via the in-process `BuiltinToolRegistry` inside `BaseChatProvider`'s tool loop (zero IPC).
-  - **Claude**: via a stdio MCP server. `ClaudeProvider.SetImageGenMCP` writes an inline `--mcp-config` JSON pointing at `relayllm mcp-image-gen`, which `main.go` routes to `runImageGenMCPServer()`. The subcommand inherits `COMFYUI_URL` + `RELAY_LLM_DATA` from env and reuses the same `handleGenerateImage` + `{dataDir}/generated/` so output URLs are identical across providers.
+  - **Claude**: via the `comfyui` MCP registered with the relay orchestrator (`../relayComfy/mcp/`). Sessions with `useRelayTools: true` + a project `mcpToken` get an inline `--mcp-config` spawning `relay mcp` (see `ClaudeProvider.relayMCPConfigJSON`) — every relay-registered MCP, including `comfyui`, appears under one entry point and respects per-project AllowedMcpIDs / DisabledTools.
   - **pi**: pi has no MCP support, so we ship a SKILL.md (auto-mounted by `pi_overlay.go` when `HasImageGen` is true) that tells the model to `curl --unix-socket $RELAY_LLM_SOCKET .../api/generate-image` from its built-in `bash` tool. The pi provider exports `RELAY_LLM_SOCKET` + `RELAY_LLM_TOKEN` into pi's env so curl authenticates. Synchronous `POST /api/generate-image` is registered in `api.go` only when ComfyUI is configured.
 
-  Common contract: every path returns the same `{"status":"success","image_url":"/api/generated/...", ...}` JSON, so Eve's `_parseImageResult` renders the inline image regardless of provider.
+  Common contract: every path returns the same `{"status":"success","image_url":"/api/generated/...", ...}` JSON, so Eve's `_parseImageResult` renders the inline image regardless of provider. The standalone `comfyui-mcp` binary writes to the same `{dataDir}/generated/` that relayLLM serves via `/api/generated/`, so URLs resolve identically whether image-gen flowed through the in-process tool or the MCP proxy.
 
 ## API
 
