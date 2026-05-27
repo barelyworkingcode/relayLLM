@@ -15,6 +15,18 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch. Keep this above flag.Parse so subcommands can
+	// own their own flag namespace if they ever need one. Today the only
+	// subcommand is the stdio MCP server that exposes generate_image to
+	// providers that don't run our in-process tool loop (Claude CLI, pi).
+	if len(os.Args) > 1 && os.Args[1] == "mcp-image-gen" {
+		if err := runImageGenMCPServer(); err != nil {
+			slog.Error("mcp-image-gen exited with error", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	startTime := time.Now()
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
@@ -198,8 +210,9 @@ func main() {
 	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
 
 	// Image generation via ComfyUI (optional).
+	var comfyui *ComfyUIClient
 	if *comfyuiURL != "" {
-		comfyui := NewComfyUIClient(*comfyuiURL, *dataDir)
+		comfyui = NewComfyUIClient(*comfyuiURL, *dataDir)
 
 		// Discover available models. Retry for up to 30s to handle the case
 		// where ComfyUI starts slower than relayLLM (common on cold boot).
@@ -227,6 +240,23 @@ func main() {
 		builtinTools := NewBuiltinToolRegistry()
 		RegisterImageGenTool(builtinTools, comfyui, "/api/generated", checkpoints, loras)
 		sessions.SetBuiltinTools(builtinTools)
+
+		// Tell SessionManager to bridge image-gen into providers whose
+		// LLMs can't reach our in-process builtin tool registry. The
+		// Claude provider spawns `relayllm mcp-image-gen` via the CLI's
+		// --mcp-config; the HTTP /api/generate-image endpoint is used
+		// by the pi skill via bash+curl.
+		sessions.SetComfyUIURL(*comfyuiURL)
+
+		// Materialize the pi skill so the pi overlay can mount it. Failure
+		// here is non-fatal: pi sessions will just lack the skill (Claude
+		// sessions remain unaffected because they use the MCP path).
+		skillDir, err := MaterializePiImageGenSkill(*dataDir)
+		if err != nil {
+			slog.Warn("failed to materialize pi image-gen skill", "error", err)
+		} else if skillDir != "" {
+			sessions.SetPiImageGenSkillDir(skillDir)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -235,6 +265,7 @@ func main() {
 	RegisterPermissionRoutes(mux, perms, sessions)
 	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager, piCfg, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
+	RegisterGenerateImageRoute(mux, comfyui, "/api/generated")
 	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, startTime)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 

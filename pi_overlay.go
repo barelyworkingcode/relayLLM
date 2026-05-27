@@ -20,6 +20,15 @@ type PiOverlayInputs struct {
 	LlamaModels  []LlamaModelConfig // consumed by pi_models.go to synthesize Eve picker entries
 	RouterPort   string             // empty disables the relay-router provider entry
 	RouterModels []string
+
+	// Image-gen wiring. When HasImageGen is true and ImageGenSkillDir is
+	// non-empty, the overlay appends the skill dir to settings.json's
+	// skills array and the pi provider exports RELAY_LLM_SOCKET +
+	// RELAY_LLM_TOKEN so the skill's curl invocation can authenticate.
+	HasImageGen      bool
+	ImageGenSkillDir string
+	RelayLLMSocket   string
+	RelayLLMToken    string
 }
 
 // piOverlayFileMode is 0o600 to match pi's own auth.json perms — these files
@@ -42,6 +51,18 @@ func applyPiOverlayEnv(env []string, projectDir string, cfg *PiConfig, inputs Pi
 	}
 	if overlayDir != "" {
 		env = setEnv(env, "PI_CODING_AGENT_DIR", overlayDir)
+	}
+	// Image-gen skill needs RELAY_LLM_SOCKET + RELAY_LLM_TOKEN so its
+	// `curl --unix-socket` call can hit relayLLM directly. Exported
+	// unconditionally when present — the env vars are inert without
+	// the skill, and the skill is inert without the env vars.
+	if inputs.HasImageGen {
+		if inputs.RelayLLMSocket != "" {
+			env = setEnv(env, "RELAY_LLM_SOCKET", inputs.RelayLLMSocket)
+		}
+		if inputs.RelayLLMToken != "" {
+			env = setEnv(env, "RELAY_LLM_TOKEN", inputs.RelayLLMToken)
+		}
 	}
 	return env, nil
 }
@@ -87,7 +108,7 @@ func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInpu
 
 	// settings.json
 	if rewriteAll || (skipIfExists && !fileExists(settingsPath)) {
-		settings := buildPiSettingsJSON(projectDir, overlay, globalAgent)
+		settings := buildPiSettingsJSON(projectDir, overlay, globalAgent, inputs)
 		if err := writePiOverlayJSON(settingsPath, settings); err != nil {
 			return "", err
 		}
@@ -183,7 +204,7 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 // skill paths. When IncludeUserSettings (the default), the user's global
 // settings.json is read and merged underneath so theme/keybindings/etc carry
 // over.
-func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgent string) map[string]any {
+func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgent string, inputs PiOverlayInputs) map[string]any {
 	settings := map[string]any{}
 
 	if !overlay.ExcludeUserSettings {
@@ -222,6 +243,14 @@ func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgen
 	for _, extra := range overlay.ExtraSkillDirs {
 		if extra != "" {
 			skills = appendUnique(skills, extra)
+		}
+	}
+	// relayLLM-owned skill: image generation. Only attached when the
+	// dir exists (materialized at startup) and ComfyUI is configured —
+	// surfacing the skill without a backend would just confuse the LLM.
+	if inputs.HasImageGen && inputs.ImageGenSkillDir != "" {
+		if info, err := os.Stat(inputs.ImageGenSkillDir); err == nil && info.IsDir() {
+			skills = appendUnique(skills, inputs.ImageGenSkillDir)
 		}
 	}
 	if len(skills) > 0 {
