@@ -46,6 +46,13 @@ type ClaudeProvider struct {
 	hookSocket      string // Unix socket path the hook subprocess dials for /api/permission
 	hookToken       string // bearer token the hook will send when calling /api/permission
 
+	// Image-gen MCP wiring. When comfyuiURL is non-empty, Start() asks
+	// Claude CLI to spawn `relayllm mcp-image-gen` as an MCP server so
+	// the model can call generate_image just like Ollama/OpenAI sessions
+	// can via the in-process built-in tool registry.
+	imageGenComfyURL string
+	imageGenDataDir  string
+
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
 	stopIdleOnce sync.Once     // prevents double-close of stopIdle
@@ -75,6 +82,52 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookT
 		hookSocket: hookSocket,
 		hookToken:  hookToken,
 	}
+}
+
+// SetImageGenMCP configures the provider to bridge the generate_image
+// tool into Claude CLI via an stdio MCP server. The server is the
+// `mcp-image-gen` subcommand of the running relayllm binary, so the
+// child shares ComfyUIClient code and writes to the same generated/
+// dir served by /api/generated. Empty comfyuiURL disables the wiring.
+func (p *ClaudeProvider) SetImageGenMCP(comfyuiURL, dataDir string) {
+	p.imageGenComfyURL = comfyuiURL
+	p.imageGenDataDir = dataDir
+}
+
+// imageGenMCPConfigJSON serializes the inline --mcp-config value Claude
+// CLI accepts. Returns "" when image-gen is disabled or we can't
+// resolve our own binary path — failing closed there avoids a confusing
+// "command not found" inside Claude CLI's MCP startup output.
+func (p *ClaudeProvider) imageGenMCPConfigJSON() string {
+	if p.imageGenComfyURL == "" {
+		return ""
+	}
+	selfPath, err := os.Executable()
+	if err != nil {
+		slog.Warn("claude: cannot resolve self path; image-gen MCP disabled", "error", err)
+		return ""
+	}
+
+	env := map[string]string{"COMFYUI_URL": p.imageGenComfyURL}
+	if p.imageGenDataDir != "" {
+		env["RELAY_LLM_DATA"] = p.imageGenDataDir
+	}
+
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"relayllm-image-gen": map[string]any{
+				"command": selfPath,
+				"args":    []string{"mcp-image-gen"},
+				"env":     env,
+			},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		slog.Warn("claude: marshal MCP config failed", "error", err)
+		return ""
+	}
+	return string(data)
 }
 
 func (p *ClaudeProvider) touchActivity() {
@@ -136,6 +189,10 @@ func (p *ClaudeProvider) Start() error {
 		if len(p.session.Policy.DeniedTools) > 0 {
 			args = append(args, "--disallowedTools", strings.Join(p.session.Policy.DeniedTools, ","))
 		}
+	}
+
+	if mcpCfg := p.imageGenMCPConfigJSON(); mcpCfg != "" {
+		args = append(args, "--mcp-config", mcpCfg)
 	}
 
 	claudePath := resolveClaudePath()

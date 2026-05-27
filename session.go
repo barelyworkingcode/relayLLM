@@ -87,9 +87,11 @@ type SessionManager struct {
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
 	llamaManager *LlamaServerManager
-	builtinTools *BuiltinToolRegistry
-	dataDir      string
-	piConfig     *PiConfig
+	builtinTools         *BuiltinToolRegistry
+	dataDir              string
+	piConfig             *PiConfig
+	comfyuiURL           string // when set, Claude/pi providers get an MCP image-gen server wired in
+	piImageGenSkillDir   string // dir to add to pi's skills array when comfyui is enabled
 
 	routerPort    string
 	proxyRegistry *ProxyRegistry
@@ -158,6 +160,21 @@ func (m *SessionManager) SetBuiltinTools(r *BuiltinToolRegistry) {
 	m.builtinTools = r
 }
 
+// SetComfyUIURL records the ComfyUI base URL so providers that don't run
+// our in-process tool loop (Claude CLI, pi) can be wired to the stdio
+// MCP image-gen subcommand. Empty disables the wiring (Claude/pi simply
+// won't see a generate_image tool, matching prior behavior).
+func (m *SessionManager) SetComfyUIURL(url string) {
+	m.comfyuiURL = url
+}
+
+// SetPiImageGenSkillDir records the dir holding the pi image-gen SKILL.md.
+// Empty leaves pi's skill set unchanged. The pi overlay appends this dir
+// to settings.json's skills array on every spawn.
+func (m *SessionManager) SetPiImageGenSkillDir(dir string) {
+	m.piImageGenSkillDir = dir
+}
+
 // SetLlamaManager injects the llama-server process manager. Pass nil to
 // disable the llama.cpp provider.
 func (m *SessionManager) SetLlamaManager(mgr *LlamaServerManager) {
@@ -188,7 +205,13 @@ func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
 // The Snapshot call may block ≤3s per stale endpoint after the registry's
 // 15s TTL has expired.
 func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
-	inputs := PiOverlayInputs{RouterPort: m.routerPort}
+	inputs := PiOverlayInputs{
+		RouterPort:        m.routerPort,
+		ImageGenSkillDir:  m.piImageGenSkillDir,
+		RelayLLMSocket:    m.hookSocket, // hookSocket is the same Unix socket pi can dial
+		RelayLLMToken:     m.hookToken,
+		HasImageGen:       m.comfyuiURL != "",
+	}
 	if m.llamaManager != nil && m.llamaManager.config != nil {
 		inputs.LlamaModels = m.llamaManager.config.Models
 		for _, cfg := range m.llamaManager.config.Models {
@@ -403,6 +426,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 		}
 		p := NewClaudeProvider(session, handler, m.hookSocket, m.hookToken)
+		p.SetImageGenMCP(m.comfyuiURL, m.dataDir)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}

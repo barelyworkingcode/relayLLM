@@ -42,6 +42,11 @@ relay_router.go           Unified OpenAI-compatible router fronting llama-server
 proxy_registry.go         Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
 comfyui_client.go         ComfyUI HTTP client (queue, poll, fetch, workflow builder)
 builtin_tools.go          Built-in tool registry (generate_image) + dynamic schema
+mcp_image_server.go       `relayllm mcp-image-gen` stdio MCP server. Spawned by
+                          Claude CLI via --mcp-config so Claude sessions can
+                          call generate_image. Reuses ComfyUIClient + handleGenerateImage.
+pi_image_skill.go         Materializes the pi SKILL.md that wraps the
+                          POST /api/generate-image endpoint via bash+curl.
 terminal_template.go      Terminal template types + JSON file store (built-in + custom)
 terminal_session.go       Terminal session with PTY management (creack/pty)
 relay_spawn.go            Shared relay-managed spawn prep (skill regen + token + ${SUB} expansion)
@@ -82,7 +87,14 @@ Built-in tools coexist with MCP tools in the `BaseChatProvider` tool loop (`prov
 
 Tool dispatch order in `runToolLoop()`: built-in tools are checked first (`builtinTools.Has()`), then MCP (`mcpManager.CallTool()`). Tool definitions from both sources are merged into a single list sent to the LLM.
 
-- **`generate_image`**: Text-to-image via ComfyUI (`--comfyui-url` / `COMFYUI_URL`). Queues a workflow, polls for completion with progress events, fetches the output image, saves to `{dataDir}/generated/`, returns a URL. Supports checkpoint selection, LoRA style adapters, and sampler/scheduler tuning. Available checkpoints and LoRAs are discovered from ComfyUI at startup and exposed as `enum` values in the tool schema. Only available to Ollama/OpenAI sessions (Claude provider has its own tool mechanism).
+- **`generate_image`**: Text-to-image via ComfyUI (`--comfyui-url` / `COMFYUI_URL`). Queues a workflow, polls for completion with progress events, fetches the output image, saves to `{dataDir}/generated/`, returns a URL. Supports checkpoint selection, LoRA style adapters, and sampler/scheduler tuning. Available checkpoints and LoRAs are discovered from ComfyUI at startup and exposed as `enum` values in the tool schema.
+
+  Provider coverage:
+  - **Ollama / OpenAI / llama.cpp**: via the in-process `BuiltinToolRegistry` inside `BaseChatProvider`'s tool loop (zero IPC).
+  - **Claude**: via a stdio MCP server. `ClaudeProvider.SetImageGenMCP` writes an inline `--mcp-config` JSON pointing at `relayllm mcp-image-gen`, which `main.go` routes to `runImageGenMCPServer()`. The subcommand inherits `COMFYUI_URL` + `RELAY_LLM_DATA` from env and reuses the same `handleGenerateImage` + `{dataDir}/generated/` so output URLs are identical across providers.
+  - **pi**: pi has no MCP support, so we ship a SKILL.md (auto-mounted by `pi_overlay.go` when `HasImageGen` is true) that tells the model to `curl --unix-socket $RELAY_LLM_SOCKET .../api/generate-image` from its built-in `bash` tool. The pi provider exports `RELAY_LLM_SOCKET` + `RELAY_LLM_TOKEN` into pi's env so curl authenticates. Synchronous `POST /api/generate-image` is registered in `api.go` only when ComfyUI is configured.
+
+  Common contract: every path returns the same `{"status":"success","image_url":"/api/generated/...", ...}` JSON, so Eve's `_parseImageResult` renders the inline image regardless of provider.
 
 ## API
 
