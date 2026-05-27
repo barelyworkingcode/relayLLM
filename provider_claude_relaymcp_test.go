@@ -5,10 +5,6 @@ import (
 	"testing"
 )
 
-// TestClaudeRelayMCPConfig_Disabled: no opt-in → no --mcp-config flag.
-// Sessions without useRelayTools must not have a relay MCP injected,
-// otherwise users without a project token would see Claude CLI spawn
-// fail at startup.
 func TestClaudeRelayMCPConfig_Disabled(t *testing.T) {
 	p := &ClaudeProvider{session: &Session{}}
 	if got := p.relayMCPConfigJSON(); got != "" {
@@ -16,10 +12,8 @@ func TestClaudeRelayMCPConfig_Disabled(t *testing.T) {
 	}
 }
 
-// TestClaudeRelayMCPConfig_NoToken: opt-in without a project token is
-// a misconfiguration; the provider must refuse to inject the MCP so
-// the failure is loud (log line) instead of silent (claude sees the
-// 'relay' MCP server, can't auth, every tool call fails opaquely).
+// Refuse to inject the relay MCP without a token — better a loud log
+// than Claude silently auth-failing every tool call.
 func TestClaudeRelayMCPConfig_NoToken(t *testing.T) {
 	t.Setenv("RELAY_MCP_COMMAND", "/usr/local/bin/relay")
 	t.Setenv("RELAY_MCP_TOKEN", "")
@@ -31,11 +25,6 @@ func TestClaudeRelayMCPConfig_NoToken(t *testing.T) {
 	}
 }
 
-// TestClaudeRelayMCPConfig_Enabled exercises the happy path: opt-in
-// session settings + project mcpToken → an inline --mcp-config that
-// spawns `relay mcp` with RELAY_TOKEN populated. The structure here
-// is what Claude CLI parses on every session start, so a shape change
-// would break image-gen + every other relay MCP for Claude users.
 func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 	t.Setenv("RELAY_MCP_COMMAND", "/usr/local/bin/relay")
 

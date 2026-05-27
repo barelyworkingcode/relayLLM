@@ -52,10 +52,7 @@ func applyPiOverlayEnv(env []string, projectDir string, cfg *PiConfig, inputs Pi
 	if overlayDir != "" {
 		env = setEnv(env, "PI_CODING_AGENT_DIR", overlayDir)
 	}
-	// Image-gen skill needs RELAY_LLM_SOCKET + RELAY_LLM_TOKEN so its
-	// `curl --unix-socket` call can hit relayLLM directly. Exported
-	// unconditionally when present — the env vars are inert without
-	// the skill, and the skill is inert without the env vars.
+	// Image-gen skill's curl invocation reads these to authenticate.
 	if inputs.HasImageGen {
 		if inputs.RelayLLMSocket != "" {
 			env = setEnv(env, "RELAY_LLM_SOCKET", inputs.RelayLLMSocket)
@@ -245,13 +242,8 @@ func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgen
 			skills = appendUnique(skills, extra)
 		}
 	}
-	// relayLLM-owned skill: image generation. Only attached when the
-	// dir exists (materialized at startup) and ComfyUI is configured —
-	// surfacing the skill without a backend would just confuse the LLM.
 	if inputs.HasImageGen && inputs.ImageGenSkillDir != "" {
-		if info, err := os.Stat(inputs.ImageGenSkillDir); err == nil && info.IsDir() {
-			skills = appendUnique(skills, inputs.ImageGenSkillDir)
-		}
+		skills = appendUnique(skills, inputs.ImageGenSkillDir)
 	}
 	if len(skills) > 0 {
 		settings["skills"] = skills
