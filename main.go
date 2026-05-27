@@ -229,15 +229,9 @@ func main() {
 		RegisterImageGenTool(builtinTools, comfyui, "/api/generated", checkpoints, loras)
 		sessions.SetBuiltinTools(builtinTools)
 
-		// Flag image-gen as available so the pi overlay attaches the
-		// curl-via-bash skill + RELAY_LLM_SOCKET/RELAY_LLM_TOKEN env vars.
-		// Claude (and any other relay-MCP-aware provider) sees
-		// generate_image via the comfyui MCP registered with the relay
-		// orchestrator — no per-provider bridge needed here.
-		sessions.SetComfyUIEnabled(true)
-
-		// Materialize the pi skill so the pi overlay can mount it. Failure
-		// here is non-fatal: pi sessions will just lack the skill.
+		// Failure to materialize is non-fatal: pi sessions just lack the
+		// skill. Claude reaches image-gen via the comfyui MCP registered
+		// with the relay orchestrator regardless.
 		skillDir, err := MaterializePiImageGenSkill(*dataDir)
 		if err != nil {
 			slog.Warn("failed to materialize pi image-gen skill", "error", err)

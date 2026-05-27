@@ -87,11 +87,10 @@ type SessionManager struct {
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
 	llamaManager *LlamaServerManager
-	builtinTools         *BuiltinToolRegistry
-	dataDir              string
-	piConfig             *PiConfig
-	comfyuiEnabled       bool   // true when /api/generate-image is mounted; toggles pi skill+env wiring
-	piImageGenSkillDir   string // dir to add to pi's skills array when comfyui is enabled
+	builtinTools       *BuiltinToolRegistry
+	dataDir            string
+	piConfig           *PiConfig
+	piImageGenSkillDir string // non-empty enables pi overlay image-gen wiring (skill + env vars)
 
 	routerPort    string
 	proxyRegistry *ProxyRegistry
@@ -160,18 +159,8 @@ func (m *SessionManager) SetBuiltinTools(r *BuiltinToolRegistry) {
 	m.builtinTools = r
 }
 
-// SetComfyUIEnabled records whether /api/generate-image is mounted.
-// When true, the pi overlay attaches its image-gen skill + the
-// RELAY_LLM_SOCKET/RELAY_LLM_TOKEN env vars pi's bash+curl path needs.
-// Claude sessions reach image-gen via the relay MCP proxy instead, so
-// they aren't gated by this flag.
-func (m *SessionManager) SetComfyUIEnabled(enabled bool) {
-	m.comfyuiEnabled = enabled
-}
-
-// SetPiImageGenSkillDir records the dir holding the pi image-gen SKILL.md.
-// Empty leaves pi's skill set unchanged. The pi overlay appends this dir
-// to settings.json's skills array on every spawn.
+// SetPiImageGenSkillDir enables image-gen wiring for pi sessions.
+// Empty disables.
 func (m *SessionManager) SetPiImageGenSkillDir(dir string) {
 	m.piImageGenSkillDir = dir
 }
@@ -209,9 +198,9 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	inputs := PiOverlayInputs{
 		RouterPort:       m.routerPort,
 		ImageGenSkillDir: m.piImageGenSkillDir,
-		RelayLLMSocket:   m.hookSocket, // hookSocket is the same Unix socket pi can dial
+		RelayLLMSocket:   m.hookSocket,
 		RelayLLMToken:    m.hookToken,
-		HasImageGen:      m.comfyuiEnabled,
+		HasImageGen:      m.piImageGenSkillDir != "",
 	}
 	if m.llamaManager != nil && m.llamaManager.config != nil {
 		inputs.LlamaModels = m.llamaManager.config.Models
