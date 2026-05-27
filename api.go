@@ -450,6 +450,40 @@ func RegisterGeneratedImageRoutes(mux *http.ServeMux, dataDir string) {
 	})
 }
 
+// RegisterGenerateImageRoute exposes the same handleGenerateImage path used
+// by the built-in tool registry as a synchronous HTTP endpoint. The pi
+// provider's skill instructs the LLM to hit this via bash+curl because pi
+// has no MCP support of its own. The request body is the same JSON shape as
+// the tool arguments; the response is the same JSON the tool returns.
+//
+// Registered only when comfyui is non-nil, so the endpoint is absent in
+// configurations without image generation (a 404 there is correct — the
+// pi skill that would call it isn't materialized either).
+func RegisterGenerateImageRoute(mux *http.ServeMux, comfyui *ComfyUIClient, imageBaseURL string) {
+	if comfyui == nil {
+		return
+	}
+	mux.HandleFunc("POST /api/generate-image", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"status": "error", "error": "read body: " + err.Error()})
+			return
+		}
+		emit := func(eventType string, data json.RawMessage) {}
+		resultStr, herr := handleGenerateImage(r.Context(), body, nil, emit, comfyui, imageBaseURL)
+		if herr != nil {
+			writeJSON(w, 500, map[string]string{"status": "error", "error": herr.Error()})
+			return
+		}
+		// handleGenerateImage already returns a JSON string; pass it
+		// through verbatim so the curl caller sees identical shape to the
+		// MCP / built-in tool variants.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(resultStr))
+	})
+}
+
 func isValidGeneratedFilename(name string) bool {
 	if len(name) == 0 || len(name) > 255 {
 		return false
