@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -50,19 +51,22 @@ var protectedTemplateIDs = map[string]bool{
 }
 
 // ResolveCommand returns the absolute path to the command, checking
-// well-known locations before falling back to PATH lookup.
+// well-known locations before falling back to PATH lookup. Routing is keyed
+// off the command (not template ID) so custom user-created templates that
+// invoke `claude` get the same well-known-locations resolution as the
+// built-in claude-code template — important when relay is launched from
+// launchd/Spotlight where ~/.local/bin isn't on PATH.
 func (t TerminalTemplate) ResolveCommand() string {
-	switch t.ID {
-	case "claude-code":
-		return resolveClaudePath()
-	case "shell":
+	if t.ID == "shell" || t.Command == "" {
 		return resolveShell()
-	default:
-		if p, err := exec.LookPath(t.Command); err == nil {
-			return p
-		}
-		return t.Command
 	}
+	if filepath.Base(t.Command) == "claude" {
+		return resolveClaudePath()
+	}
+	if p, err := exec.LookPath(t.Command); err == nil {
+		return p
+	}
+	return t.Command
 }
 
 // seedDefaultPTYConfig returns the initial pty map written to settings.json on
