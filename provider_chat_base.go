@@ -144,31 +144,43 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 	}
 }
 
-// buildMCPManagerFromSettings constructs an MCPManager for the given base
-// settings. If useRelayTools is enabled, injects a "relay" MCP server using
-// RELAY_MCP_COMMAND and the session's mcpToken (project-scoped) or
-// RELAY_MCP_TOKEN (service-level fallback).
-//
-// Returns nil if no MCP servers are configured (tool calling disabled).
+// resolveRelayMCPServer builds the MCPServerConfig that fronts every
+// relay-registered MCP behind one entry point. Returns (config, true)
+// when useRelayTools is on AND RELAY_MCP_COMMAND is in env AND a token
+// (project-scoped from session, or RELAY_MCP_TOKEN fallback) resolves.
+// Used by both BaseChatProvider (in-process MCP manager) and the Claude
+// provider (which renders the same shape as a --mcp-config JSON for
+// Claude CLI to spawn).
+func resolveRelayMCPServer(useRelayTools bool, mcpToken string) (MCPServerConfig, bool) {
+	if !useRelayTools {
+		return MCPServerConfig{}, false
+	}
+	cmd := os.Getenv("RELAY_MCP_COMMAND")
+	if cmd == "" {
+		slog.Warn("useRelayTools enabled but RELAY_MCP_COMMAND not set")
+		return MCPServerConfig{}, false
+	}
+	token := mcpToken
+	if token == "" {
+		token = os.Getenv("RELAY_MCP_TOKEN")
+	}
+	return MCPServerConfig{
+		Command: cmd,
+		Args:    []string{"mcp"},
+		Env:     map[string]string{"RELAY_TOKEN": token},
+	}, true
+}
+
+// buildMCPManagerFromSettings returns nil when no MCP servers are
+// configured (tool calling disabled).
 func buildMCPManagerFromSettings(s BaseChatSettings, mcpToken string) MCPClient {
 	servers := s.MCPServers
-	if s.UseRelayTools != nil && *s.UseRelayTools {
-		if cmd := os.Getenv("RELAY_MCP_COMMAND"); cmd != "" {
-			token := mcpToken
-			if token == "" {
-				token = os.Getenv("RELAY_MCP_TOKEN")
-			}
-			if servers == nil {
-				servers = make(map[string]MCPServerConfig)
-			}
-			servers["relay"] = MCPServerConfig{
-				Command: cmd,
-				Args:    []string{"mcp"},
-				Env:     map[string]string{"RELAY_TOKEN": token},
-			}
-		} else {
-			slog.Warn("useRelayTools enabled but RELAY_MCP_COMMAND not set")
+	use := s.UseRelayTools != nil && *s.UseRelayTools
+	if relay, ok := resolveRelayMCPServer(use, mcpToken); ok {
+		if servers == nil {
+			servers = make(map[string]MCPServerConfig)
 		}
+		servers["relay"] = relay
 	}
 	if len(servers) == 0 {
 		return nil

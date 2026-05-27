@@ -77,41 +77,22 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookT
 	}
 }
 
-// relayMCPConfigJSON returns the inline --mcp-config value Claude CLI
-// accepts when the session opts in to relay-routed tools. Mirrors what
-// buildMCPManagerFromSettings does for chat-based providers: spawn the
-// `relay mcp` subprocess with the project-scoped token, so the model
-// sees every relay-registered MCP (fsMCP, macMCP, comfyui, ...) under
-// one entry point. Returns "" when the session hasn't opted in, the
-// project token is missing, or relayLLM wasn't started under relay
-// (no RELAY_MCP_COMMAND in env).
+// relayMCPConfigJSON renders the shared relay MCP server entry as the
+// inline JSON Claude CLI's --mcp-config expects. Returns "" when the
+// session hasn't opted in or relayLLM wasn't started under relay.
 func (p *ClaudeProvider) relayMCPConfigJSON() string {
 	settings := parseBaseSettings(p.session.Settings)
-	if settings.UseRelayTools == nil || !*settings.UseRelayTools {
+	use := settings.UseRelayTools != nil && *settings.UseRelayTools
+	relay, ok := resolveRelayMCPServer(use, p.session.McpToken)
+	if !ok {
 		return ""
 	}
-	cmd := os.Getenv("RELAY_MCP_COMMAND")
-	if cmd == "" {
-		slog.Warn("claude: useRelayTools enabled but RELAY_MCP_COMMAND not set")
-		return ""
-	}
-	token := p.session.McpToken
-	if token == "" {
-		token = os.Getenv("RELAY_MCP_TOKEN")
-	}
-	if token == "" {
+	if relay.Env["RELAY_TOKEN"] == "" {
 		slog.Warn("claude: useRelayTools enabled but no MCP token available")
 		return ""
 	}
-
 	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			"relay": map[string]any{
-				"command": cmd,
-				"args":    []string{"mcp"},
-				"env":     map[string]string{"RELAY_TOKEN": token},
-			},
-		},
+		"mcpServers": map[string]any{"relay": relay},
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
