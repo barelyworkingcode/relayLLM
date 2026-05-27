@@ -46,13 +46,6 @@ type ClaudeProvider struct {
 	hookSocket      string // Unix socket path the hook subprocess dials for /api/permission
 	hookToken       string // bearer token the hook will send when calling /api/permission
 
-	// Image-gen MCP wiring. When comfyuiURL is non-empty, Start() asks
-	// Claude CLI to spawn `relayllm mcp-image-gen` as an MCP server so
-	// the model can call generate_image just like Ollama/OpenAI sessions
-	// can via the in-process built-in tool registry.
-	imageGenComfyURL string
-	imageGenDataDir  string
-
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
 	stopIdleOnce sync.Once     // prevents double-close of stopIdle
@@ -84,47 +77,45 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookT
 	}
 }
 
-// SetImageGenMCP configures the provider to bridge the generate_image
-// tool into Claude CLI via an stdio MCP server. The server is the
-// `mcp-image-gen` subcommand of the running relayllm binary, so the
-// child shares ComfyUIClient code and writes to the same generated/
-// dir served by /api/generated. Empty comfyuiURL disables the wiring.
-func (p *ClaudeProvider) SetImageGenMCP(comfyuiURL, dataDir string) {
-	p.imageGenComfyURL = comfyuiURL
-	p.imageGenDataDir = dataDir
-}
-
-// imageGenMCPConfigJSON serializes the inline --mcp-config value Claude
-// CLI accepts. Returns "" when image-gen is disabled or we can't
-// resolve our own binary path — failing closed there avoids a confusing
-// "command not found" inside Claude CLI's MCP startup output.
-func (p *ClaudeProvider) imageGenMCPConfigJSON() string {
-	if p.imageGenComfyURL == "" {
+// relayMCPConfigJSON returns the inline --mcp-config value Claude CLI
+// accepts when the session opts in to relay-routed tools. Mirrors what
+// buildMCPManagerFromSettings does for chat-based providers: spawn the
+// `relay mcp` subprocess with the project-scoped token, so the model
+// sees every relay-registered MCP (fsMCP, macMCP, comfyui, ...) under
+// one entry point. Returns "" when the session hasn't opted in, the
+// project token is missing, or relayLLM wasn't started under relay
+// (no RELAY_MCP_COMMAND in env).
+func (p *ClaudeProvider) relayMCPConfigJSON() string {
+	settings := parseBaseSettings(p.session.Settings)
+	if settings.UseRelayTools == nil || !*settings.UseRelayTools {
 		return ""
 	}
-	selfPath, err := os.Executable()
-	if err != nil {
-		slog.Warn("claude: cannot resolve self path; image-gen MCP disabled", "error", err)
+	cmd := os.Getenv("RELAY_MCP_COMMAND")
+	if cmd == "" {
+		slog.Warn("claude: useRelayTools enabled but RELAY_MCP_COMMAND not set")
 		return ""
 	}
-
-	env := map[string]string{"COMFYUI_URL": p.imageGenComfyURL}
-	if p.imageGenDataDir != "" {
-		env["RELAY_LLM_DATA"] = p.imageGenDataDir
+	token := p.session.McpToken
+	if token == "" {
+		token = os.Getenv("RELAY_MCP_TOKEN")
+	}
+	if token == "" {
+		slog.Warn("claude: useRelayTools enabled but no MCP token available")
+		return ""
 	}
 
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
-			"relayllm-image-gen": map[string]any{
-				"command": selfPath,
-				"args":    []string{"mcp-image-gen"},
-				"env":     env,
+			"relay": map[string]any{
+				"command": cmd,
+				"args":    []string{"mcp"},
+				"env":     map[string]string{"RELAY_TOKEN": token},
 			},
 		},
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
-		slog.Warn("claude: marshal MCP config failed", "error", err)
+		slog.Warn("claude: marshal relay MCP config failed", "error", err)
 		return ""
 	}
 	return string(data)
@@ -191,7 +182,7 @@ func (p *ClaudeProvider) Start() error {
 		}
 	}
 
-	if mcpCfg := p.imageGenMCPConfigJSON(); mcpCfg != "" {
+	if mcpCfg := p.relayMCPConfigJSON(); mcpCfg != "" {
 		args = append(args, "--mcp-config", mcpCfg)
 	}
 
