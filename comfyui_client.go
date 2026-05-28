@@ -342,7 +342,12 @@ func (c *ComfyUIClient) SaveOutput(data []byte, ext string) (string, error) {
 		return "", fmt.Errorf("create generated dir: %w", err)
 	}
 
-	filename := fmt.Sprintf("%d-%d%s", time.Now().UnixMilli(), rand.Int64N(99999), ext)
+	// Fixed-width 6-char hex random suffix (~16M values) instead of a
+	// variable-length decimal: BPE tokenizers split long digit runs into
+	// chunks and models routinely drop the leading digit of a chunk when
+	// retyping the URL in markdown. Hex + fixed width breaks the pattern
+	// — `a3f2cd` tokenizes more stably than `94172` or `4172`.
+	filename := fmt.Sprintf("%d-%06x%s", time.Now().UnixMilli(), rand.Int64N(0x1000000), ext)
 	path := filepath.Join(dir, filename)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return "", fmt.Errorf("write output: %w", err)

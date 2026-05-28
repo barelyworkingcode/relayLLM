@@ -240,6 +240,12 @@ func (p *PiProvider) Start() error {
 	}
 	if subs.RelayToken != "" {
 		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
+	} else if p.session.McpToken != "" {
+		// Fall back to the session's project-scoped MCP token when the spawn
+		// spec didn't opt into useRelayToken. Project skills routinely tell
+		// pi/claude to invoke `relay mcp call ...` via Bash, which needs
+		// RELAY_TOKEN to authenticate.
+		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", p.session.McpToken)
 	}
 	cmd.Env = applyEnvPassthrough(cmd.Env, p.envPassthrough)
 

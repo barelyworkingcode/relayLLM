@@ -179,6 +179,14 @@ func (p *ClaudeProvider) Start() error {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("RELAY_LLM_HOOK_TOKEN=%s", p.hookToken))
 	}
 
+	// Expose the project-scoped relay token to Claude itself, not just to
+	// the --mcp-config child. Project skills (CLAUDE.md) commonly tell the
+	// model to invoke `relay mcp call ...` via Bash; that path needs
+	// RELAY_TOKEN in Claude's own environment to authenticate.
+	if p.session.McpToken != "" {
+		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", p.session.McpToken)
+	}
+
 	if mode == "bypassPermissions" {
 		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")
 	}
