@@ -11,11 +11,13 @@ import (
 )
 
 // BuiltinToolHandler executes a built-in tool. files contains the user's
-// message attachments (may be nil). The emit callback lets the handler send
-// progress events back to the client during long-running operations.
+// message attachments (may be nil). emitter is the typed event channel for
+// progress updates (may be nil for non-streaming callers like the synchronous
+// HTTP endpoint); toolUseID lets progress events pair back to the originating
+// tool_use block in the UI.
 type BuiltinToolHandler func(ctx context.Context, args json.RawMessage,
 	files []FileAttachment,
-	emit func(eventType string, data json.RawMessage)) (string, error)
+	toolUseID string, emitter *EventEmitter) (string, error)
 
 // BuiltinToolDef is the static definition of a built-in tool, used both for
 // ChatToolDefs() export and for the handler registry.
@@ -58,12 +60,12 @@ func (r *BuiltinToolRegistry) Has(name string) bool {
 // Call executes a built-in tool by name. files are the user's message
 // attachments from the current conversation turn.
 func (r *BuiltinToolRegistry) Call(ctx context.Context, name string, args json.RawMessage,
-	files []FileAttachment, emit func(eventType string, data json.RawMessage)) (string, error) {
+	files []FileAttachment, toolUseID string, emitter *EventEmitter) (string, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
 		return "", fmt.Errorf("unknown built-in tool: %s", name)
 	}
-	return handler(ctx, args, files, emit)
+	return handler(ctx, args, files, toolUseID, emitter)
 }
 
 // ChatToolDefs returns tool definitions in the OpenAI/Ollama compatible
@@ -96,8 +98,8 @@ func RegisterImageGenTool(registry *BuiltinToolRegistry, comfyui *ComfyUIClient,
 			Description: "Generate an image from a text description using a local Stable Diffusion model. Returns a URL to the generated image.",
 			Parameters:  schema,
 		},
-		func(ctx context.Context, args json.RawMessage, files []FileAttachment, emit func(string, json.RawMessage)) (string, error) {
-			return handleGenerateImage(ctx, args, files, emit, comfyui, imageBaseURL)
+		func(ctx context.Context, args json.RawMessage, files []FileAttachment, toolUseID string, emitter *EventEmitter) (string, error) {
+			return handleGenerateImage(ctx, args, files, toolUseID, emitter, comfyui, imageBaseURL)
 		},
 	)
 }
@@ -188,7 +190,7 @@ func imageGenError(msg string) string {
 }
 
 func handleGenerateImage(ctx context.Context, args json.RawMessage, files []FileAttachment,
-	emit func(string, json.RawMessage), comfyui *ComfyUIClient, imageBaseURL string) (string, error) {
+	toolUseID string, emitter *EventEmitter, comfyui *ComfyUIClient, imageBaseURL string) (string, error) {
 
 	var params ImageGenParams
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -198,15 +200,8 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 		return imageGenError("prompt is required"), nil
 	}
 
-	// Progress helper.
 	emitProgress := func(msg string) {
-		data, _ := json.Marshal(map[string]any{
-			"type":      "result",
-			"subtype":   "tool_progress",
-			"tool_name": "generate_image",
-			"message":   msg,
-		})
-		emit(HandlerLLMEvent, data)
+		emitter.ToolProgress(toolUseID, "generate_image", msg)
 	}
 
 	// Determine workflow: img2img if user requested and image is attached.

@@ -278,7 +278,7 @@ func TestToolLoop_BuiltinTool_DispatchedBeforeMCP(t *testing.T) {
 	builtinCalled := atomic.Int32{}
 	registry := NewBuiltinToolRegistry()
 	registry.Register(BuiltinToolDef{Name: "generate_image", Description: "test"},
-		func(_ context.Context, _ json.RawMessage, _ []FileAttachment, _ func(string, json.RawMessage)) (string, error) {
+		func(_ context.Context, _ json.RawMessage, _ []FileAttachment, _ string, _ *EventEmitter) (string, error) {
 			builtinCalled.Add(1)
 			return "fake-image-url", nil
 		})
