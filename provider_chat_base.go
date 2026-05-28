@@ -459,7 +459,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			var toolResult string
 			var toolErr error
 			if p.builtinTools != nil && p.builtinTools.Has(tc.Name) {
-				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, p.lastFiles, guardedHandler)
+				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, p.lastFiles, tc.ID, guardedEmitter)
 			} else if p.mcpManager != nil {
 				toolResult, toolErr = p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
 			} else {
@@ -485,6 +485,11 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 				Role:      "tool",
 				Content:   resultContent,
 				ToolName:  tc.Name,
+				// ToolUseID lets Eve pair the result back to its tool_use
+				// block on history replay; without it, the renderer falls
+				// through to _renderHistoryImage and the original tool block
+				// stays empty (no inline image).
+				ToolUseID: tc.ID,
 			})
 			messages = p.transport.AppendToolResult(messages, tc, toolResult)
 		}

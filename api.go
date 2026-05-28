@@ -463,8 +463,9 @@ func RegisterGenerateImageRoute(mux *http.ServeMux, comfyui *ComfyUIClient, imag
 			writeJSON(w, 400, map[string]string{"status": "error", "error": "read body: " + err.Error()})
 			return
 		}
-		emit := func(string, json.RawMessage) {}
-		resultStr, herr := handleGenerateImage(r.Context(), body, nil, emit, comfyui, imageBaseURL)
+		// HTTP path is synchronous — no streaming progress channel available;
+		// the typed emitter handles a nil receiver safely.
+		resultStr, herr := handleGenerateImage(r.Context(), body, nil, "", nil, comfyui, imageBaseURL)
 		if herr != nil {
 			writeJSON(w, 500, map[string]string{"status": "error", "error": herr.Error()})
 			return
