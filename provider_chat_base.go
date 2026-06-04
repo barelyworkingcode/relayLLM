@@ -461,7 +461,13 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			if p.builtinTools != nil && p.builtinTools.Has(tc.Name) {
 				toolResult, toolErr = p.builtinTools.Call(ctx, tc.Name, tc.Arguments, p.lastFiles, tc.ID, guardedEmitter)
 			} else if p.mcpManager != nil {
-				toolResult, toolErr = p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments)
+				// Forward MCP tool progress to the same ToolProgress event the
+				// builtin path emits, so an MCP-backed tool (e.g. image gen)
+				// streams status identically.
+				tcID, tcName := tc.ID, tc.Name
+				toolResult, toolErr = p.mcpManager.CallTool(ctx, tc.Name, tc.Arguments, func(msg string) {
+					guardedEmitter.ToolProgress(tcID, tcName, msg)
+				})
 			} else {
 				toolErr = fmt.Errorf("no handler for tool %q", tc.Name)
 			}
