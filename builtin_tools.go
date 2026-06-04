@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -267,6 +268,10 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 	}
 
 	imageURL := fmt.Sprintf("%s/%s", imageBaseURL, filename)
+	// Absolute path + file:// URL let clients that can't resolve the relative
+	// /api/generated/ URL (terminals, copy-paste) reach the image directly.
+	absPath := comfyui.GeneratedFilePath(filename)
+	fileURL := (&url.URL{Scheme: "file", Path: absPath}).String()
 	genDuration := time.Since(genStart).Seconds()
 	slog.Info("comfyui: image generated", "filename", filename, "size", len(imageData),
 		"duration", fmt.Sprintf("%.1fs", genDuration), "prompt", params.Prompt)
@@ -274,6 +279,8 @@ func handleGenerateImage(ctx context.Context, args json.RawMessage, files []File
 	result, _ := json.Marshal(map[string]any{
 		"status":          "success",
 		"image_url":       imageURL,
+		"file_url":        fileURL,
+		"path":            absPath,
 		"filename":        filename,
 		"prompt":          params.Prompt,
 		"width":           params.Width,

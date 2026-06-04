@@ -355,6 +355,14 @@ func (c *ComfyUIClient) SaveOutput(data []byte, ext string) (string, error) {
 	return filename, nil
 }
 
+// GeneratedFilePath returns the absolute on-disk path for a previously saved
+// output file. Used to surface a copy-pasteable path and file:// URL in the
+// tool result, which terminals (unlike Eve's renderer) can't derive from the
+// relative /api/generated/ URL.
+func (c *ComfyUIClient) GeneratedFilePath(filename string) string {
+	return filepath.Join(c.dataDir, "generated", filename)
+}
+
 // BuildTextToImageWorkflow builds a ComfyUI workflow graph for SDXL
 // text-to-image generation. The returned map is ready to pass to QueuePrompt.
 // Supports optional LoRA loading and dynamic sampler/scheduler selection.
