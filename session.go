@@ -87,10 +87,8 @@ type SessionManager struct {
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
 	llamaManager *LlamaServerManager
-	builtinTools       *BuiltinToolRegistry
-	dataDir            string
-	piConfig           *PiConfig
-	piImageGenSkillDir string // non-empty enables pi overlay image-gen wiring (skill + env vars)
+	dataDir      string
+	piConfig     *PiConfig
 
 	routerPort    string
 	proxyRegistry *ProxyRegistry
@@ -153,18 +151,6 @@ func (m *SessionManager) SetOpenAIConfig(cfg *OpenAIConfig) {
 	m.openaiConfig = cfg
 }
 
-// SetBuiltinTools injects the registry of built-in tools (e.g. generate_image)
-// that will be available to all Ollama/OpenAI sessions alongside MCP tools.
-func (m *SessionManager) SetBuiltinTools(r *BuiltinToolRegistry) {
-	m.builtinTools = r
-}
-
-// SetPiImageGenSkillDir enables image-gen wiring for pi sessions.
-// Empty disables.
-func (m *SessionManager) SetPiImageGenSkillDir(dir string) {
-	m.piImageGenSkillDir = dir
-}
-
 // SetLlamaManager injects the llama-server process manager. Pass nil to
 // disable the llama.cpp provider.
 func (m *SessionManager) SetLlamaManager(mgr *LlamaServerManager) {
@@ -196,11 +182,9 @@ func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
 // 15s TTL has expired.
 func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	inputs := PiOverlayInputs{
-		RouterPort:       m.routerPort,
-		ImageGenSkillDir: m.piImageGenSkillDir,
-		RelayLLMSocket:   m.hookSocket,
-		RelayLLMToken:    m.hookToken,
-		HasImageGen:      m.piImageGenSkillDir != "",
+		RouterPort:     m.routerPort,
+		RelayLLMSocket: m.hookSocket,
+		RelayLLMToken:  m.hookToken,
 	}
 	if m.llamaManager != nil && m.llamaManager.config != nil {
 		inputs.LlamaModels = m.llamaManager.config.Models
