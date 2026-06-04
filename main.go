@@ -197,47 +197,12 @@ func main() {
 	sessions.SetRouterPort(*routerPort)
 	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
 
-	// Image generation via ComfyUI (optional).
-	var comfyui *ComfyUIClient
+	// Image generation is no longer in-process. It is the relay-comfyui MCP
+	// tool, reached through relay (see relay ADR-006). --comfyui-url is accepted
+	// but ignored, for backward compatibility with existing service
+	// registrations that still pass it.
 	if *comfyuiURL != "" {
-		comfyui = NewComfyUIClient(*comfyuiURL, *dataDir)
-
-		// Discover available models. Retry for up to 30s to handle the case
-		// where ComfyUI starts slower than relayLLM (common on cold boot).
-		var checkpoints, loras []string
-		{
-			deadline := time.Now().Add(30 * time.Second)
-			for time.Now().Before(deadline) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := comfyui.Ping(ctx); err == nil {
-					slog.Info("ComfyUI connected", "url", *comfyuiURL)
-					checkpoints, _ = comfyui.ListCheckpoints(ctx)
-					loras, _ = comfyui.ListLoRAs(ctx)
-					slog.Info("ComfyUI models discovered", "checkpoints", len(checkpoints), "loras", len(loras))
-					cancel()
-					break
-				}
-				cancel()
-				time.Sleep(2 * time.Second)
-			}
-			if len(checkpoints) == 0 {
-				slog.Warn("ComfyUI not reachable after 30s — image generation tool registered without model discovery", "url", *comfyuiURL)
-			}
-		}
-
-		builtinTools := NewBuiltinToolRegistry()
-		RegisterImageGenTool(builtinTools, comfyui, "/api/generated", checkpoints, loras)
-		sessions.SetBuiltinTools(builtinTools)
-
-		// Failure to materialize is non-fatal: pi sessions just lack the
-		// skill. Claude reaches image-gen via the comfyui MCP registered
-		// with the relay orchestrator regardless.
-		skillDir, err := MaterializePiImageGenSkill(*dataDir)
-		if err != nil {
-			slog.Warn("failed to materialize pi image-gen skill", "error", err)
-		} else if skillDir != "" {
-			sessions.SetPiImageGenSkillDir(skillDir)
-		}
+		slog.Info("ignoring --comfyui-url; image generation now goes through the relay-comfyui MCP", "url", *comfyuiURL)
 	}
 
 	mux := http.NewServeMux()
@@ -246,7 +211,6 @@ func main() {
 	RegisterPermissionRoutes(mux, perms, sessions)
 	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager, piCfg, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
-	RegisterGenerateImageRoute(mux, comfyui, "/api/generated")
 	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, startTime)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
