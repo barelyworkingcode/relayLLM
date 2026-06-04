@@ -181,7 +181,7 @@ func (f *FakeMCPClient) ChatToolDefs() []map[string]interface{} {
 	return defs
 }
 
-func (f *FakeMCPClient) CallTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+func (f *FakeMCPClient) CallTool(ctx context.Context, name string, args json.RawMessage, onProgress func(message string)) (string, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, FakeMCPCall{Name: name, Args: append(json.RawMessage(nil), args...)})
 	var handler func(json.RawMessage) (string, error)

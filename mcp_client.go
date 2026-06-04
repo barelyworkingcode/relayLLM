@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -35,7 +36,7 @@ type MCPClient interface {
 	HasTools() bool
 	ToolCount() int
 	ChatToolDefs() []map[string]interface{}
-	CallTool(ctx context.Context, name string, arguments json.RawMessage) (string, error)
+	CallTool(ctx context.Context, name string, arguments json.RawMessage, onProgress func(message string)) (string, error)
 	ToolNames() []string
 	ServerNames() []string
 	Close()
@@ -53,14 +54,24 @@ type MCPManager struct {
 	tools   []MCPTool
 	toolMap map[string]string // tool name → server name
 	mu      sync.Mutex
+
+	// progress maps an in-flight call's progressToken → its per-call sink.
+	// The shared client's ProgressNotificationHandler routes inbound
+	// notifications/progress here. Guarded by its own mutex so a progress
+	// callback (fired on the SDK's read goroutine) never contends with the
+	// main connection/tool lock held during Start/Close.
+	progressMu sync.Mutex
+	progress   map[string]func(message string)
+	progressID atomic.Int64
 }
 
 // NewMCPManager creates a manager from MCP server configs. Does not connect yet.
 func NewMCPManager(configs map[string]MCPServerConfig) *MCPManager {
 	return &MCPManager{
-		configs: configs,
-		servers: make(map[string]*mcpServerConn),
-		toolMap: make(map[string]string),
+		configs:  configs,
+		servers:  make(map[string]*mcpServerConn),
+		toolMap:  make(map[string]string),
+		progress: make(map[string]func(message string)),
 	}
 }
 
@@ -72,7 +83,23 @@ func (m *MCPManager) Start(ctx context.Context) error {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "relayLLM",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ClientOptions{
+		// Route inbound tool progress to the in-flight call's sink (set by
+		// CallTool) so MCP tools stream status to the frontend exactly like
+		// the in-process builtin tools do.
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+			if req == nil || req.Params == nil || req.Params.Message == "" {
+				return
+			}
+			token := progressTokenString(req.Params.ProgressToken)
+			m.progressMu.Lock()
+			fn := m.progress[token]
+			m.progressMu.Unlock()
+			if fn != nil {
+				fn(req.Params.Message)
+			}
+		},
+	})
 
 	for name, cfg := range m.configs {
 		if cfg.Command == "" {
@@ -151,8 +178,10 @@ func (m *MCPManager) ChatToolDefs() []map[string]interface{} {
 	return defs
 }
 
-// CallTool executes a tool by name via the appropriate MCP server.
-func (m *MCPManager) CallTool(ctx context.Context, name string, arguments json.RawMessage) (string, error) {
+// CallTool executes a tool by name via the appropriate MCP server. If
+// onProgress is non-nil, a progressToken is attached so the server streams
+// notifications/progress back, each delivered to onProgress as it arrives.
+func (m *MCPManager) CallTool(ctx context.Context, name string, arguments json.RawMessage, onProgress func(message string)) (string, error) {
 	m.mu.Lock()
 	serverName, ok := m.toolMap[name]
 	if !ok {
@@ -174,15 +203,35 @@ func (m *MCPManager) CallTool(ctx context.Context, name string, arguments json.R
 		}
 	}
 
-	result, err := conn.session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      name,
-		Arguments: args,
-	})
+	params := &mcp.CallToolParams{Name: name, Arguments: args}
+	if onProgress != nil {
+		token := fmt.Sprintf("relayllm-%d", m.progressID.Add(1))
+		params.Meta = mcp.Meta{"progressToken": token}
+		m.progressMu.Lock()
+		m.progress[token] = onProgress
+		m.progressMu.Unlock()
+		defer func() {
+			m.progressMu.Lock()
+			delete(m.progress, token)
+			m.progressMu.Unlock()
+		}()
+	}
+
+	result, err := conn.session.CallTool(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("mcp: call %q: %w", name, err)
 	}
 
 	return extractToolResultText(result), nil
+}
+
+// progressTokenString normalizes a JSON progressToken (string or number) to
+// the string key relayLLM uses to correlate progress to its originating call.
+func progressTokenString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // HasTools returns true if any tools were discovered.
