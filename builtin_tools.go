@@ -2,20 +2,20 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
-	"net/url"
-	"strings"
-	"time"
 )
 
 // BuiltinToolHandler executes a built-in tool. files contains the user's
 // message attachments (may be nil). emitter is the typed event channel for
-// progress updates (may be nil for non-streaming callers like the synchronous
-// HTTP endpoint); toolUseID lets progress events pair back to the originating
-// tool_use block in the UI.
+// progress updates (may be nil for non-streaming callers); toolUseID lets
+// progress events pair back to the originating tool_use block in the UI.
+//
+// NOTE: image generation no longer ships as a built-in — it is the
+// relay-comfyui MCP tool, reached through relay like any other MCP tool (see
+// ADR-006 in the relay repo). This registry is retained as the generic
+// mechanism for any future in-process tool that needs a progress emitter MCP
+// tools can't provide.
 type BuiltinToolHandler func(ctx context.Context, args json.RawMessage,
 	files []FileAttachment,
 	toolUseID string, emitter *EventEmitter) (string, error)
@@ -84,229 +84,4 @@ func (r *BuiltinToolRegistry) ChatToolDefs() []map[string]any {
 		})
 	}
 	return defs
-}
-
-// RegisterImageGenTool registers the generate_image tool backed by a
-// ComfyUIClient. The imageBaseURL is the HTTP path prefix for serving
-// generated images (e.g. "/api/generated"). checkpoints and loras are
-// the available model files discovered from ComfyUI at startup.
-func RegisterImageGenTool(registry *BuiltinToolRegistry, comfyui *ComfyUIClient, imageBaseURL string, checkpoints, loras []string) {
-	schema := buildImageGenSchema(checkpoints, loras)
-
-	registry.Register(
-		BuiltinToolDef{
-			Name:        "generate_image",
-			Description: "Generate an image from a text description using a local Stable Diffusion model. Returns a URL to the generated image.",
-			Parameters:  schema,
-		},
-		func(ctx context.Context, args json.RawMessage, files []FileAttachment, toolUseID string, emitter *EventEmitter) (string, error) {
-			return handleGenerateImage(ctx, args, files, toolUseID, emitter, comfyui, imageBaseURL)
-		},
-	)
-}
-
-// buildImageGenSchema constructs the tool parameter schema, dynamically
-// including checkpoint/lora enums when multiple models are available.
-func buildImageGenSchema(checkpoints, loras []string) json.RawMessage {
-	props := map[string]any{
-		"prompt": map[string]any{
-			"type":        "string",
-			"description": "Detailed description of the image to generate",
-		},
-		"negative_prompt": map[string]any{
-			"type":        "string",
-			"description": "What to avoid in the image",
-		},
-		"width": map[string]any{
-			"type":        "integer",
-			"description": "Image width in pixels (default 1024)",
-		},
-		"height": map[string]any{
-			"type":        "integer",
-			"description": "Image height in pixels (default 1024)",
-		},
-		"steps": map[string]any{
-			"type":        "integer",
-			"description": "Number of diffusion steps (default 20, higher = better quality but slower)",
-		},
-		"seed": map[string]any{
-			"type":        "integer",
-			"description": "Random seed for reproducibility (-1 for random)",
-		},
-		"sampler": map[string]any{
-			"type":        "string",
-			"description": "Sampling algorithm (default euler). Use dpmpp_2m_sde for higher quality.",
-			"enum":        []string{"euler", "euler_ancestral", "dpmpp_2m_sde", "dpmpp_2m", "ddim", "uni_pc"},
-		},
-		"scheduler": map[string]any{
-			"type":        "string",
-			"description": "Scheduler algorithm (default normal). karras often produces better results.",
-			"enum":        []string{"normal", "karras", "exponential", "simple"},
-		},
-	}
-
-	// Only expose checkpoint selection if multiple checkpoints are available.
-	if len(checkpoints) > 1 {
-		props["checkpoint"] = map[string]any{
-			"type":        "string",
-			"description": "Model checkpoint to use. Different checkpoints produce different styles (e.g. anime, photorealistic).",
-			"enum":        checkpoints,
-		}
-	}
-
-	// Only expose LoRA if any are installed.
-	if len(loras) > 0 {
-		props["lora"] = map[string]any{
-			"type":        "string",
-			"description": "Optional LoRA style adapter to apply on top of the checkpoint for style control.",
-			"enum":        loras,
-		}
-		props["lora_strength"] = map[string]any{
-			"type":        "number",
-			"description": "How strongly to apply the LoRA (0.0-2.0, default 1.0)",
-		}
-	}
-
-	// Image-to-image support.
-	props["use_input_image"] = map[string]any{
-		"type":        "boolean",
-		"description": "Set to true to use the user's attached image as a starting point. The image will be modified according to the prompt.",
-	}
-	props["denoise"] = map[string]any{
-		"type":        "number",
-		"description": "How much to change the input image (0.0 = keep original, 1.0 = fully regenerate). Default 0.7 for img2img, 1.0 for text-to-image.",
-	}
-
-	schema, _ := json.Marshal(map[string]any{
-		"type":       "object",
-		"properties": props,
-		"required":   []string{"prompt"},
-	})
-	return schema
-}
-
-func imageGenError(msg string) string {
-	result, _ := json.Marshal(map[string]string{"status": "error", "error": msg})
-	return string(result)
-}
-
-func handleGenerateImage(ctx context.Context, args json.RawMessage, files []FileAttachment,
-	toolUseID string, emitter *EventEmitter, comfyui *ComfyUIClient, imageBaseURL string) (string, error) {
-
-	var params ImageGenParams
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", fmt.Errorf("parse image gen params: %w", err)
-	}
-	if params.Prompt == "" {
-		return imageGenError("prompt is required"), nil
-	}
-
-	emitProgress := func(msg string) {
-		emitter.ToolProgress(toolUseID, "generate_image", msg)
-	}
-
-	// Determine workflow: img2img if user requested and image is attached.
-	var workflow map[string]any
-	if params.UseInputImage {
-		inputFile := findImageAttachment(files)
-		if inputFile == nil {
-			return imageGenError("No image attached. Please attach an image to use as a reference."), nil
-		}
-		emitProgress("Uploading reference image...")
-		imageBytes, err := decodeFileAttachment(inputFile)
-		if err != nil {
-			return imageGenError("Failed to decode attached image: " + err.Error()), nil
-		}
-		uploadedName, err := comfyui.UploadImage(ctx, inputFile.Name, imageBytes)
-		if err != nil {
-			slog.Error("comfyui: upload failed", "error", err)
-			return imageGenError("Failed to upload image to ComfyUI: " + err.Error()), nil
-		}
-		if params.Denoise == 0 {
-			params.Denoise = 0.7
-		}
-		workflow = comfyui.BuildImageToImageWorkflow(params, uploadedName)
-	} else {
-		workflow = comfyui.BuildTextToImageWorkflow(params)
-	}
-
-	emitProgress("Queuing image generation...")
-	genStart := time.Now()
-	promptID, err := comfyui.QueuePrompt(ctx, workflow)
-	if err != nil {
-		slog.Error("comfyui: queue failed", "error", err)
-		return imageGenError("ComfyUI queue failed: " + err.Error()), nil
-	}
-
-	emitProgress("Generating image...")
-
-	// Poll for completion.
-	outputs, err := comfyui.PollHistory(ctx, promptID, 5*time.Minute, emitProgress)
-	if err != nil {
-		slog.Error("comfyui: generation failed", "error", err, "promptID", promptID)
-		return imageGenError("Image generation failed: " + err.Error()), nil
-	}
-
-	if len(outputs) == 0 {
-		return imageGenError("ComfyUI produced no output images"), nil
-	}
-
-	// Fetch the first output image.
-	emitProgress("Downloading generated image...")
-	output := outputs[0]
-	imageData, err := comfyui.FetchImage(ctx, output.Filename, output.Subfolder)
-	if err != nil {
-		slog.Error("comfyui: fetch image failed", "error", err, "filename", output.Filename)
-		return imageGenError("Failed to fetch image: " + err.Error()), nil
-	}
-
-	// Save to disk.
-	filename, err := comfyui.SaveOutput(imageData, ".png")
-	if err != nil {
-		slog.Error("comfyui: save failed", "error", err)
-		return imageGenError("Failed to save image: " + err.Error()), nil
-	}
-
-	imageURL := fmt.Sprintf("%s/%s", imageBaseURL, filename)
-	// Absolute path + file:// URL let clients that can't resolve the relative
-	// /api/generated/ URL (terminals, copy-paste) reach the image directly.
-	absPath := comfyui.GeneratedFilePath(filename)
-	fileURL := (&url.URL{Scheme: "file", Path: absPath}).String()
-	genDuration := time.Since(genStart).Seconds()
-	slog.Info("comfyui: image generated", "filename", filename, "size", len(imageData),
-		"duration", fmt.Sprintf("%.1fs", genDuration), "prompt", params.Prompt)
-
-	result, _ := json.Marshal(map[string]any{
-		"status":          "success",
-		"image_url":       imageURL,
-		"file_url":        fileURL,
-		"path":            absPath,
-		"filename":        filename,
-		"prompt":          params.Prompt,
-		"width":           params.Width,
-		"height":          params.Height,
-		"seed":            params.Seed,
-		"generation_time": fmt.Sprintf("%.1fs", genDuration),
-	})
-	return string(result), nil
-}
-
-// findImageAttachment returns the first image file from the user's attachments.
-func findImageAttachment(files []FileAttachment) *FileAttachment {
-	for i := range files {
-		if strings.HasPrefix(files[i].MimeType, "image/") {
-			return &files[i]
-		}
-	}
-	return nil
-}
-
-// decodeFileAttachment extracts raw bytes from a FileAttachment. The Data
-// field may be a bare base64 string or a data URL (data:image/png;base64,...).
-func decodeFileAttachment(f *FileAttachment) ([]byte, error) {
-	data := f.Data
-	if idx := strings.Index(data, ";base64,"); idx >= 0 {
-		data = data[idx+8:]
-	}
-	return base64.StdEncoding.DecodeString(data)
 }

@@ -450,31 +450,10 @@ func RegisterGeneratedImageRoutes(mux *http.ServeMux, dataDir string) {
 	})
 }
 
-// RegisterGenerateImageRoute mirrors the generate_image tool as a
-// synchronous HTTP endpoint, used by the pi skill via bash+curl
-// (pi has no MCP support). Absent when ComfyUI isn't configured.
-func RegisterGenerateImageRoute(mux *http.ServeMux, comfyui *ComfyUIClient, imageBaseURL string) {
-	if comfyui == nil {
-		return
-	}
-	mux.HandleFunc("POST /api/generate-image", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeJSON(w, 400, map[string]string{"status": "error", "error": "read body: " + err.Error()})
-			return
-		}
-		// HTTP path is synchronous — no streaming progress channel available;
-		// the typed emitter handles a nil receiver safely.
-		resultStr, herr := handleGenerateImage(r.Context(), body, nil, "", nil, comfyui, imageBaseURL)
-		if herr != nil {
-			writeJSON(w, 500, map[string]string{"status": "error", "error": herr.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(resultStr))
-	})
-}
+// Image generation is no longer an HTTP endpoint here — it is the
+// relay-comfyui MCP tool, reached via `relay mcp call` (see ADR-006). Only the
+// static serving route above remains; relayComfy writes images into
+// {dataDir}/generated/ and Eve renders them from /api/generated/.
 
 func isValidGeneratedFilename(name string) bool {
 	if len(name) == 0 || len(name) > 255 {
