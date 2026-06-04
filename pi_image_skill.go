@@ -73,6 +73,8 @@ Success looks like:
 {
   "status": "success",
   "image_url": "/api/generated/abc123.png",
+  "file_url": "file:///Users/you/Library/Application%20Support/relayLLM/generated/abc123.png",
+  "path": "/Users/you/Library/Application Support/relayLLM/generated/abc123.png",
   "filename": "abc123.png",
   "prompt": "...",
   "width": 1024,
@@ -81,6 +83,11 @@ Success looks like:
   "generation_time": "12.4s"
 }
 ` + "```" + `
+
+` + "`image_url`" + ` is a relative path the Eve frontend renders inline.
+` + "`path`" + ` is the absolute on-disk location and ` + "`file_url`" + ` the same as a
+` + "`file://`" + ` URL — surface one of these when the user is in a plain
+terminal and can't see Eve's inline render.
 
 Failure looks like:
 
