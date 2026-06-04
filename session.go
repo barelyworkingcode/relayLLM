@@ -359,7 +359,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 	switch session.ProviderType {
 	case "ollama":
 		transport := NewOllamaChatTransport(m.ollamaURL, session.Model, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "openai":
 		prefix, modelID, ok := strings.Cut(session.Model, "/")
@@ -371,7 +371,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("openai: unknown endpoint %q (model %q)", prefix, session.Model)
 		}
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "llama":
 		_, modelID, ok := strings.Cut(session.Model, "/")
@@ -386,7 +386,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("llama: %w", err)
 		}
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, m.builtinTools)
+		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "pi":
 		// Expected model format: pi/<provider>/<modelId>
