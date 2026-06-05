@@ -20,15 +20,6 @@ type PiOverlayInputs struct {
 	LlamaModels  []LlamaModelConfig // consumed by pi_models.go to synthesize Eve picker entries
 	RouterPort   string             // empty disables the relay-router provider entry
 	RouterModels []string
-
-	// Image-gen wiring. When HasImageGen is true and ImageGenSkillDir is
-	// non-empty, the overlay appends the skill dir to settings.json's
-	// skills array and the pi provider exports RELAY_LLM_SOCKET +
-	// RELAY_LLM_TOKEN so the skill's curl invocation can authenticate.
-	HasImageGen      bool
-	ImageGenSkillDir string
-	RelayLLMSocket   string
-	RelayLLMToken    string
 }
 
 // piOverlayFileMode is 0o600 to match pi's own auth.json perms — these files
@@ -51,15 +42,6 @@ func applyPiOverlayEnv(env []string, projectDir string, cfg *PiConfig, inputs Pi
 	}
 	if overlayDir != "" {
 		env = setEnv(env, "PI_CODING_AGENT_DIR", overlayDir)
-	}
-	// Image-gen skill's curl invocation reads these to authenticate.
-	if inputs.HasImageGen {
-		if inputs.RelayLLMSocket != "" {
-			env = setEnv(env, "RELAY_LLM_SOCKET", inputs.RelayLLMSocket)
-		}
-		if inputs.RelayLLMToken != "" {
-			env = setEnv(env, "RELAY_LLM_TOKEN", inputs.RelayLLMToken)
-		}
 	}
 	return env, nil
 }
@@ -241,9 +223,6 @@ func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgen
 		if extra != "" {
 			skills = appendUnique(skills, extra)
 		}
-	}
-	if inputs.HasImageGen && inputs.ImageGenSkillDir != "" {
-		skills = appendUnique(skills, inputs.ImageGenSkillDir)
 	}
 	if len(skills) > 0 {
 		settings["skills"] = skills

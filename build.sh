@@ -27,8 +27,6 @@ codesign --verify --strict --verbose=2 cmd/hook/hook
 /Applications/Relay.app/Contents/MacOS/relay service register \
   --name "Relay LLM" \
   --command "$(pwd)/relayllm" \
-  --args "--comfyui-url" \
-  --args "http://localhost:8188" \
   --args "--router-port" \
   --args "8180" \
   --autostart
