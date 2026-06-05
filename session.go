@@ -182,9 +182,7 @@ func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
 // 15s TTL has expired.
 func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	inputs := PiOverlayInputs{
-		RouterPort:     m.routerPort,
-		RelayLLMSocket: m.hookSocket,
-		RelayLLMToken:  m.hookToken,
+		RouterPort: m.routerPort,
 	}
 	if m.llamaManager != nil && m.llamaManager.config != nil {
 		inputs.LlamaModels = m.llamaManager.config.Models

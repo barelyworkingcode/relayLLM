@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 )
 
 const (
@@ -214,6 +215,11 @@ type ResultErrorEvent struct {
 // the single point that enforces the wire contract.
 type EventEmitter struct {
 	handler EventHandler
+	// mu serializes handler invocations. Progress now arrives on the MCP SDK's
+	// read goroutine (ToolProgress) concurrently with the main tool-loop
+	// goroutine (ToolResult etc.), so emits must be serialized here rather than
+	// relying on each downstream sink to be internally locked.
+	mu sync.Mutex
 }
 
 func NewEventEmitter(handler EventHandler) *EventEmitter {
@@ -411,6 +417,8 @@ func (e *EventEmitter) emit(event any) {
 	if err != nil {
 		panic(fmt.Sprintf("event emitter: marshal failed: %v", err))
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.handler(HandlerLLMEvent, data)
 }
 
@@ -438,6 +446,8 @@ func (e *EventEmitter) EmitVersionedRaw(raw json.RawMessage) {
 		slog.Warn("event emitter: re-marshal failed; dropping", "error", err)
 		return
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.handler(HandlerLLMEvent, out)
 }
 

@@ -21,7 +21,6 @@ func main() {
 	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
 	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Unix domain socket path for this listener. Defaults to {data-dir}/relayllm.sock. Used by direct clients in standalone mode and by relay (via manifest registration) when running under relay.")
 	internalToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every request. Empty → auto-generated random hex (printed at startup).")
-	comfyuiURL := flag.String("comfyui-url", envOrDefault("COMFYUI_URL", ""), "ComfyUI base URL for image generation (empty to disable)")
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
 	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting llama-server + OpenAI endpoints (empty to disable)")
 	flag.Parse()
@@ -197,13 +196,6 @@ func main() {
 	sessions.SetRouterPort(*routerPort)
 	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
 
-	// Image generation is no longer in-process. It is the relay-comfyui MCP
-	// tool, reached through relay (see relay ADR-006). --comfyui-url is accepted
-	// but ignored, for backward compatibility with existing service
-	// registrations that still pass it.
-	if *comfyuiURL != "" {
-		slog.Info("ignoring --comfyui-url; image generation now goes through the relay-comfyui MCP", "url", *comfyuiURL)
-	}
 
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)
