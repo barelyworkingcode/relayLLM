@@ -80,15 +80,13 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookT
 // relayMCPConfigJSON renders the shared relay MCP server entry as the
 // inline JSON Claude CLI's --mcp-config expects. Returns "" when the
 // session hasn't opted in or relayLLM wasn't started under relay.
-func (p *ClaudeProvider) relayMCPConfigJSON(mcpToken string) string {
+func (p *ClaudeProvider) relayMCPConfigJSON(projectToken string) string {
 	settings := parseBaseSettings(p.session.Settings)
-	use := settings.UseRelayTools != nil && *settings.UseRelayTools
-	relay, ok := resolveRelayMCPServer(use, mcpToken)
-	if !ok {
+	if settings.UseRelayTools == nil || !*settings.UseRelayTools {
 		return ""
 	}
-	if relay.Env["RELAY_TOKEN"] == "" {
-		slog.Warn("claude: useRelayTools enabled but no MCP token available")
+	relay, ok := resolveRelayMCPServer(projectToken)
+	if !ok {
 		return ""
 	}
 	cfg := map[string]any{
@@ -102,30 +100,14 @@ func (p *ClaudeProvider) relayMCPConfigJSON(mcpToken string) string {
 	return string(data)
 }
 
-// resolveMCPToken returns the relay project token for this session, used for
-// both Claude's own RELAY_TOKEN env and the --mcp-config child.
-//
-// It prefers the in-memory McpToken, but that field isn't persisted (json:"-"),
-// so a session resumed after a relayLLM restart has none — then we re-resolve
-// from relay's bridge (the source the terminal path uses), which is restart-
-// and rotation-safe. Returns "" when not relay-managed; callers degrade.
+// resolveMCPToken returns the project-scoped relay token for this session,
+// used for both Claude's own RELAY_PROJECT_TOKEN env and the --mcp-config
+// child. It resolves just-in-time from relay's bridge by project id — relay is
+// the sole authority, so this is restart- and rotation-safe and never depends
+// on a stored/eve-supplied token. Returns "" when not relay-managed; callers
+// degrade (they never fall back to the full-access service token).
 func (p *ClaudeProvider) resolveMCPToken() string {
-	if p.session.McpToken != "" {
-		return p.session.McpToken
-	}
-	if os.Getenv(envMcpToken) == "" { // standalone: no bridge to ask
-		return ""
-	}
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
-		Directory:   p.directory,
-		RegenSkills: AutoRegenNever,
-	})
-	if err != nil {
-		slog.Warn("claude: re-resolve relay token from bridge failed",
-			"session", p.session.ID, "error", err)
-		return ""
-	}
-	return resp.RelayToken
+	return resolveProjectToken(p.session)
 }
 
 func (p *ClaudeProvider) touchActivity() {
@@ -201,7 +183,7 @@ func (p *ClaudeProvider) Start() error {
 	claudePath := resolveClaudePath()
 	cmd := exec.Command(claudePath, args...)
 	cmd.Dir = p.directory
-	cmd.Env = ensurePath(os.Environ())
+	cmd.Env = ensurePath(childBaseEnv())
 	cmd.Env = append(cmd.Env,
 		fmt.Sprintf("RELAY_LLM_HOOK_SOCKET=%s", p.hookSocket),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
@@ -213,10 +195,9 @@ func (p *ClaudeProvider) Start() error {
 	// Expose the project-scoped relay token to Claude itself, not just to
 	// the --mcp-config child. Project skills (CLAUDE.md) commonly tell the
 	// model to invoke `relay mcp call ...` via Bash; that path needs
-	// RELAY_TOKEN in Claude's own environment to authenticate.
-	if mcpToken != "" {
-		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", mcpToken)
-	}
+	// RELAY_PROJECT_TOKEN in Claude's own environment to authenticate.
+	// Dual-written under the legacy RELAY_TOKEN name for existing skills.
+	cmd.Env = setProjectTokenEnv(cmd.Env, mcpToken)
 
 	if mode == "bypassPermissions" {
 		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")

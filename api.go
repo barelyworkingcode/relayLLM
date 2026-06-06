@@ -57,14 +57,13 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			SystemPrompt   string          `json:"systemPrompt"`
 			AppendClaudeMd bool            `json:"appendClaudeMd"`
 			ProviderType   string          `json:"providerType"`
-			McpToken       string          `json:"mcpToken"`
 			Settings       json.RawMessage `json:"settings"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.ProviderType, body.Settings, body.McpToken)
+		session, err := sessions.CreateSession(body.ProjectID, body.Directory, body.Name, body.Model, body.SystemPrompt, body.AppendClaudeMd, body.ProviderType, body.Settings)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return
@@ -319,6 +318,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			TemplateID string   `json:"templateId"`
 			Name       string   `json:"name"`
 			Directory  string   `json:"directory"`
+			ProjectID  string   `json:"projectId"`
 			Cols       uint16   `json:"cols"`
 			Rows       uint16   `json:"rows"`
 			ExtraArgs  []string `json:"extraArgs"`
@@ -327,7 +327,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		session, err := terminals.Create(body.TemplateID, body.Name, body.Directory, body.Cols, body.Rows, body.ExtraArgs)
+		session, err := terminals.Create(body.TemplateID, body.Name, body.Directory, body.ProjectID, body.Cols, body.Rows, body.ExtraArgs)
 		if err != nil {
 			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return

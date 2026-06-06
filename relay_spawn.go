@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,60 @@ func applyEnvPassthrough(env []string, keys []string) []string {
 	return env
 }
 
+// relaySecretEnvKeys are the relay credentials relay injected into THIS relayLLM
+// process. They must never be inherited by a spawned child (shell, LLM CLI, or
+// the `relay mcp` subprocess): a child gets only a project-scoped
+// RELAY_PROJECT_TOKEN, injected explicitly. Inheriting the service token would
+// hand the child full bridge access; inheriting the frontend token would hand it
+// relay's front-door bearer. (relayLLM keeps these in its OWN env to call the
+// bridge — childBaseEnv only strips them from what we hand to children.)
+var relaySecretEnvKeys = []string{
+	envServiceToken,       // RELAY_SERVICE_TOKEN — full bridge access
+	envServiceTokenLegacy, // RELAY_MCP_TOKEN — legacy alias of the above
+	envFrontendToken,      // RELAY_FRONTEND_TOKEN — relay front-door bearer (unused by relayLLM)
+	// Project-token names too: relayLLM resolves and injects the correct
+	// per-child project token explicitly (setProjectTokenEnv). Stripping any
+	// inherited value first means a stale/cross-project token in relayLLM's own
+	// env can never leak into a child we don't inject one for (e.g. an ad-hoc
+	// terminal).
+	envProjectToken,       // RELAY_PROJECT_TOKEN
+	envProjectTokenLegacy, // RELAY_TOKEN
+}
+
+// setProjectTokenEnv sets the project-scoped token on a child env under both the
+// current and legacy names. Dual-write is a transition shim (drop the legacy
+// name once nothing reads RELAY_TOKEN) that keeps existing user skills/scripts
+// referencing RELAY_TOKEN working. No-op for an empty token.
+func setProjectTokenEnv(env []string, token string) []string {
+	if token == "" {
+		return env
+	}
+	env = setEnv(env, envProjectToken, token)
+	env = setEnv(env, envProjectTokenLegacy, token)
+	return env
+}
+
+// childBaseEnv returns os.Environ() with relayLLM's own relay credentials
+// stripped. Use it as the base environment for every spawned child instead of
+// os.Environ() directly, so relay secrets never leak into a shell/LLM/mcp child.
+func childBaseEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		drop := false
+		for _, k := range relaySecretEnvKeys {
+			if strings.HasPrefix(kv, k+"=") {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // RelayManagedSpec is the subset of fields any spawnable (PTY template,
 // LLM-pi provider) needs to participate in relay-managed env resolution:
 // regenerate a project skill via relay's bridge, fetch a project-scoped
@@ -35,7 +90,8 @@ func applyEnvPassthrough(env []string, keys []string) []string {
 // Resolve() — keeping the two surfaces decoupled while sharing the
 // bridge-call + substitution logic.
 type RelayManagedSpec struct {
-	Directory       string // session/terminal cwd; bridge uses this to infer the project
+	ProjectID       string // authoritative project key; relay validates Directory is within the project. A non-empty value makes the spawn project-scoped (gets a token).
+	Directory       string // session/terminal cwd; relay validates it against ProjectID, or (legacy) uses it to infer the project
 	SkillPath       string // template — supports ${project.path}
 	AutoRegenSkills string // "always" | "skipIfExists" | "never" (empty = "never")
 	UseRelayToken   bool
@@ -79,7 +135,11 @@ func (s SpawnSubs) Expand(in string) string {
 // AutoRegenSkills requires it. Fails closed: returns error rather than
 // spawning with unresolved placeholders.
 func (r RelayManagedSpec) Resolve() (SpawnSubs, error) {
-	managed := r.UseRelayToken || (r.AutoRegenSkills != "" && r.AutoRegenSkills != AutoRegenNever)
+	// A project-scoped spawn (explicit ProjectID) or one that opted into the
+	// relay token gets a project-scoped token. The legacy UseRelayToken flag
+	// is kept working for templates that don't carry a project id.
+	wantToken := r.ProjectID != "" || r.UseRelayToken
+	managed := wantToken || (r.AutoRegenSkills != "" && r.AutoRegenSkills != AutoRegenNever)
 	if !managed {
 		return SpawnSubs{ProjectPath: r.Directory}, nil
 	}
@@ -97,6 +157,7 @@ func (r RelayManagedSpec) Resolve() (SpawnSubs, error) {
 	}
 
 	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
+		ProjectID:   r.ProjectID,
 		Directory:   r.Directory,
 		RegenSkills: regen,
 		SkillPath:   skillPath,
@@ -109,7 +170,7 @@ func (r RelayManagedSpec) Resolve() (SpawnSubs, error) {
 		ProjectPath: resp.WorkingDir,
 		SkillPath:   resp.SkillPath,
 	}
-	if r.UseRelayToken {
+	if wantToken {
 		subs.RelayToken = resp.RelayToken
 	}
 	if subs.ProjectPath == "" {
@@ -123,4 +184,33 @@ func (r RelayManagedSpec) labelOrDefault() string {
 		return r.Label
 	}
 	return "spawn"
+}
+
+// resolveProjectToken returns the project-scoped token for a session, resolved
+// just-in-time from relay's bridge by project id. Relay is the sole token
+// authority: relayLLM never persists the token and never accepts it from eve —
+// it asks relay for it at spawn time, injects it, and discards it.
+//
+// Fails closed: returns "" when this process is not relay-managed (no service
+// token in the env → standalone/dev run) or when resolution fails. Callers must
+// spawn without a token rather than substitute the full-access service token —
+// handing a child the service token would grant it god-mode bridge access.
+func resolveProjectToken(session *Session) string {
+	if session == nil {
+		return ""
+	}
+	if serviceToken() == "" {
+		return "" // standalone: no relay bridge to ask
+	}
+	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
+		ProjectID:   session.ProjectID,
+		Directory:   session.Directory,
+		RegenSkills: AutoRegenNever,
+	})
+	if err != nil {
+		slog.Warn("resolve project token from relay failed",
+			"session", session.ID, "project", session.ProjectID, "error", err)
+		return ""
+	}
+	return resp.RelayToken
 }

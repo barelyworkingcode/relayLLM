@@ -29,6 +29,7 @@ codesign --verify --strict --verbose=2 cmd/hook/hook
   --command "$(pwd)/relayllm" \
   --args "--router-port" \
   --args "8180" \
-  --autostart
+  --autostart \
+  --no-frontend-creds   # backend: never dials relay's front door, so don't hand it the bearer (it would leak into spawned shells)
 echo ""
 echo "Registered with Relay."

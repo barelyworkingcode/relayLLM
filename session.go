@@ -31,7 +31,9 @@ type Session struct {
 	SystemPrompt  string `json:"systemPrompt,omitempty"`
 	Headless      bool   `json:"headless,omitempty"`
 	ThinkingLevel string `json:"thinkingLevel,omitempty"` // pi-only: off/minimal/low/medium/high/xhigh
-	McpToken      string `json:"-"`                       // project-scoped MCP token, not serialized
+	// Project-scoped MCP tokens are NOT stored on the session. Relay is the
+	// sole token authority: providers resolve the token just-in-time from
+	// relay's bridge by ProjectID at spawn time (see resolveProjectToken).
 
 	// Per-session Claude permission policy (parsed from Settings at create
 	// time). PermissionMode is the live mode — may be mutated by
@@ -214,7 +216,7 @@ func (m *SessionManager) llamaConfig() *LlamaConfig {
 	return m.llamaManager.config
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage, mcpToken string) (*Session, error) {
+func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
 	if directory == "" {
 		return nil, fmt.Errorf("directory is required")
 	}
@@ -271,7 +273,6 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		ProviderType:   providerType,
 		Settings:       settings,
 		SystemPrompt:   systemPrompt,
-		McpToken:       mcpToken,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 		Messages:       []Message{},
 		Stats:          SessionStats{},

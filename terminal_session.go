@@ -33,6 +33,12 @@ type TerminalSession struct {
 	cols uint16
 	rows uint16
 
+	// projectID, when set, makes this a project-scoped terminal: relay resolves
+	// a project-scoped token for it (validating Directory against the project's
+	// path) and the token is injected as RELAY_PROJECT_TOKEN. Empty = ad-hoc
+	// terminal, which gets no token.
+	projectID string
+
 	// Additional argv tokens appended after the template's resolved Args.
 	// Same ${PROJECT_PATH}/${RELAY_TOKEN}/${SKILL_PATH} substitution applies.
 	// Used by scheduled PTY tasks to pass per-task commands into a shared
@@ -75,7 +81,7 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 	// template isn't relay-managed this is a no-op; if relay is unreachable
 	// or the project can't be resolved, fail closed (don't spawn with
 	// unresolved placeholders).
-	subs, err := resolveTemplateSubs(tmpl, s.Directory)
+	subs, err := resolveTemplateSubs(tmpl, s.Directory, s.projectID)
 	if err != nil {
 		return err
 	}
@@ -90,7 +96,7 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 
 	cmd := exec.Command(command, args...)
 	cmd.Dir = s.Directory
-	cmd.Env = ensurePath(os.Environ())
+	cmd.Env = ensurePath(childBaseEnv())
 	// Set TERM and COLORTERM for full 24-bit true color support.
 	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
 	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
@@ -99,9 +105,9 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.Expand(v)))
 	}
 
-	if subs.RelayToken != "" {
-		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
-	}
+	// Project-scoped token (empty for ad-hoc terminals); dual-written under the
+	// legacy RELAY_TOKEN name for skills that still reference it.
+	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
 	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
 
 	// Pi project-overlay: when the template runs `pi` in a relay-managed
@@ -402,9 +408,12 @@ func isPiCommand(command string) bool {
 }
 
 // resolveTemplateSubs is a thin adapter that builds a RelayManagedSpec from
-// a TerminalTemplate and delegates to the generic resolver. See relay_spawn.go.
-func resolveTemplateSubs(tmpl TerminalTemplate, directory string) (SpawnSubs, error) {
+// a TerminalTemplate and delegates to the generic resolver. A non-empty
+// projectID makes the terminal project-scoped (gets a token, regardless of the
+// template's UseRelayToken flag). See relay_spawn.go.
+func resolveTemplateSubs(tmpl TerminalTemplate, directory, projectID string) (SpawnSubs, error) {
 	return RelayManagedSpec{
+		ProjectID:       projectID,
 		Directory:       directory,
 		SkillPath:       tmpl.SkillPath,
 		AutoRegenSkills: tmpl.AutoRegenSkills,

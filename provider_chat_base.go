@@ -145,42 +145,48 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 }
 
 // resolveRelayMCPServer builds the MCPServerConfig that fronts every
-// relay-registered MCP behind one entry point. Returns (config, true)
-// when useRelayTools is on AND RELAY_MCP_COMMAND is in env AND a token
-// (project-scoped from session, or RELAY_MCP_TOKEN fallback) resolves.
-// Used by both BaseChatProvider (in-process MCP manager) and the Claude
-// provider (which renders the same shape as a --mcp-config JSON for
-// Claude CLI to spawn).
-func resolveRelayMCPServer(useRelayTools bool, mcpToken string) (MCPServerConfig, bool) {
-	if !useRelayTools {
-		return MCPServerConfig{}, false
-	}
+// relay-registered MCP behind one entry point. The caller has already decided
+// relay tools are wanted; this returns (config, true) only when
+// RELAY_MCP_COMMAND is in env AND a non-empty project-scoped token was
+// resolved. Used by both BaseChatProvider (in-process MCP manager) and the
+// Claude provider (which renders the same shape as a --mcp-config JSON).
+//
+// Fails closed: an empty projectToken yields ok=false. We never fall back to
+// the full-access service token — that would hand the spawned `relay mcp`
+// child god-mode bridge access instead of the project's scoped permissions.
+func resolveRelayMCPServer(projectToken string) (MCPServerConfig, bool) {
 	cmd := os.Getenv("RELAY_MCP_COMMAND")
 	if cmd == "" {
-		slog.Warn("useRelayTools enabled but RELAY_MCP_COMMAND not set")
+		slog.Warn("relay tools enabled but RELAY_MCP_COMMAND not set")
 		return MCPServerConfig{}, false
 	}
-	token := mcpToken
-	if token == "" {
-		token = os.Getenv("RELAY_MCP_TOKEN")
+	if projectToken == "" {
+		slog.Warn("relay tools enabled but no project token resolved; spawning without relay MCP")
+		return MCPServerConfig{}, false
 	}
 	return MCPServerConfig{
 		Command: cmd,
 		Args:    []string{"mcp"},
-		Env:     map[string]string{"RELAY_TOKEN": token},
+		// Dual-write the legacy RELAY_TOKEN name alongside the new one so skills
+		// that still reference it keep working during the transition.
+		Env: map[string]string{envProjectToken: projectToken, envProjectTokenLegacy: projectToken},
 	}, true
 }
 
 // buildMCPManagerFromSettings returns nil when no MCP servers are
-// configured (tool calling disabled).
-func buildMCPManagerFromSettings(s BaseChatSettings, mcpToken string) MCPClient {
+// configured (tool calling disabled). When the session opts into relay tools,
+// the project token is resolved just-in-time from relay's bridge by project id
+// (never stored, never taken from eve).
+func buildMCPManagerFromSettings(s BaseChatSettings, session *Session) MCPClient {
 	servers := s.MCPServers
 	use := s.UseRelayTools != nil && *s.UseRelayTools
-	if relay, ok := resolveRelayMCPServer(use, mcpToken); ok {
-		if servers == nil {
-			servers = make(map[string]MCPServerConfig)
+	if use {
+		if relay, ok := resolveRelayMCPServer(resolveProjectToken(session)); ok {
+			if servers == nil {
+				servers = make(map[string]MCPServerConfig)
+			}
+			servers["relay"] = relay
 		}
-		servers["relay"] = relay
 	}
 	if len(servers) == 0 {
 		return nil
@@ -214,7 +220,7 @@ func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatT
 		session:      session,
 		handler:      handler,
 		transport:    transport,
-		mcpManager:   buildMCPManagerFromSettings(parseBaseSettings(settings), session.McpToken),
+		mcpManager:   buildMCPManagerFromSettings(parseBaseSettings(settings), session),
 		builtinTools: builtinTools,
 	}
 }
