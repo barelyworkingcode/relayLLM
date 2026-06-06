@@ -16,9 +16,9 @@ import (
 // Prerequisites:
 //   - Running Ollama with gemma4:latest pulled
 //   - Relay MCP server binary at /Applications/Relay.app/Contents/MacOS/relay
-//   - RELAY_TOKEN env var set
+//   - RELAY_PROJECT_TOKEN env var set (legacy RELAY_TOKEN also accepted)
 //
-// Run: RELAY_TOKEN=<token> go test -v -run TestIntegration_MCPToolCalling -timeout 5m
+// Run: RELAY_PROJECT_TOKEN=<token> go test -v -run TestIntegration_MCPToolCalling -timeout 5m
 func TestIntegration_MCPToolCalling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping MCP integration test (requires Ollama + Relay MCP)")
@@ -38,9 +38,12 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 		t.Skipf("Relay binary not found at %s", relayBinary)
 	}
 
-	relayToken := os.Getenv("RELAY_TOKEN")
+	relayToken := os.Getenv("RELAY_PROJECT_TOKEN")
 	if relayToken == "" {
-		t.Skip("RELAY_TOKEN not set")
+		relayToken = os.Getenv("RELAY_TOKEN") // legacy fallback
+	}
+	if relayToken == "" {
+		t.Skip("RELAY_PROJECT_TOKEN not set")
 	}
 
 	ts := newTestServer(t)
@@ -54,7 +57,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 				"command": relayBinary,
 				"args":    []string{"mcp"},
 				"env": map[string]string{
-					"RELAY_TOKEN": relayToken,
+					"RELAY_PROJECT_TOKEN": relayToken,
 				},
 			},
 		},
@@ -70,7 +73,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 		"", t.TempDir(), "mcp-test",
 		model,
 		"You are a helpful assistant with access to tools. When asked about emails, use the available tools to fetch them. Always use tools when they are relevant to the request.",
-		false, "ollama", settingsJSON, "",
+		false, "ollama", settingsJSON,
 	)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -139,16 +142,19 @@ func TestIntegration_MCPToolDiscovery(t *testing.T) {
 		t.Skipf("Relay binary not found at %s", relayBinary)
 	}
 
-	relayToken := os.Getenv("RELAY_TOKEN")
+	relayToken := os.Getenv("RELAY_PROJECT_TOKEN")
 	if relayToken == "" {
-		t.Skip("RELAY_TOKEN not set")
+		relayToken = os.Getenv("RELAY_TOKEN") // legacy fallback
+	}
+	if relayToken == "" {
+		t.Skip("RELAY_PROJECT_TOKEN not set")
 	}
 
 	configs := map[string]MCPServerConfig{
 		"relay": {
 			Command: relayBinary,
 			Args:    []string{"mcp"},
-			Env:     map[string]string{"RELAY_TOKEN": relayToken},
+			Env:     map[string]string{"RELAY_PROJECT_TOKEN": relayToken},
 		},
 	}
 

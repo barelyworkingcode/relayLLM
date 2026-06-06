@@ -12,9 +12,9 @@ import (
 
 // Minimal client for relay's bridge Unix socket. Used to resolve a
 // project's runtime env (token, working dir, skill path) at PTY spawn time.
-// Authenticates with the service token relay injected via RELAY_MCP_TOKEN
-// when it spawned this process. The wire format mirrors relay/bridge —
-// newline-delimited JSON, one request, one response.
+// Authenticates with the full-access service token relay injected via
+// RELAY_SERVICE_TOKEN when it spawned this process. The wire format mirrors
+// relay/bridge — newline-delimited JSON, one request, one response.
 
 const (
 	relayBridgeSocketName = "relay.sock"
@@ -26,7 +26,30 @@ const (
 	// reference them through the same channel.
 	envBridgeSocket = "RELAY_BRIDGE_SOCKET"
 	envServiceID    = "RELAY_SERVICE_ID"
-	envMcpToken     = "RELAY_MCP_TOKEN"
+
+	// envFrontendToken is relay's front-door bearer. relay injects it into every
+	// spawned service, but relayLLM never uses it (it's a backend, not a frontend
+	// consumer) — it must be stripped from child env so it never leaks into a
+	// shell. Mirrors relay/bridge.EnvFrontendToken.
+	envFrontendToken = "RELAY_FRONTEND_TOKEN"
+
+	// envServiceToken is the full-access service token used to authenticate
+	// bridge calls (ResolvePtyEnv, RegisterManifest). Mirrors
+	// relay/bridge.EnvServiceToken. It is NOT a project token and must never
+	// be injected into a spawned child shell. envServiceTokenLegacy is the
+	// pre-rename name, accepted as a transition fallback; drop once relay
+	// stops setting it.
+	envServiceToken       = "RELAY_SERVICE_TOKEN"
+	envServiceTokenLegacy = "RELAY_MCP_TOKEN"
+
+	// envProjectToken is the project-scoped token relayLLM injects into spawned
+	// children (an LLM CLI, the `relay mcp` subprocess, a project-scoped
+	// terminal). Mirrors relay/bridge.EnvProjectToken. envProjectTokenLegacy is
+	// the pre-rename name; we dual-write it into children during the transition
+	// so existing user skills/scripts that reference RELAY_TOKEN keep working,
+	// and strip it from the inherited base env so a stale one can't leak.
+	envProjectToken       = "RELAY_PROJECT_TOKEN"
+	envProjectTokenLegacy = "RELAY_TOKEN"
 
 	// Bridge request/response type values. Must stay in sync with
 	// relay/bridge/types.go.
@@ -38,8 +61,10 @@ const (
 )
 
 // RelayPtyEnvRequest mirrors relay/bridge.PtyEnvRequest. Kept inline to
-// avoid a cross-repo Go module dependency.
+// avoid a cross-repo Go module dependency. ProjectID is the authoritative
+// resolution key; relay validates Directory is within the project's path.
 type RelayPtyEnvRequest struct {
+	ProjectID   string `json:"project_id,omitempty"`
 	Project     string `json:"project,omitempty"`
 	Directory   string `json:"directory,omitempty"`
 	RegenSkills string `json:"regen_skills"`
@@ -83,17 +108,29 @@ func relayBridgeSocketPath() string {
 	return filepath.Join(configDir, "relay", relayBridgeSocketName)
 }
 
+// serviceToken returns the full-access service token relay injected at spawn,
+// preferring the current env name and falling back to the legacy name during
+// the cross-repo rename window. Empty when this process was not spawned by
+// relay (standalone/dev runs).
+func serviceToken() string {
+	if t := os.Getenv(envServiceToken); t != "" {
+		return t
+	}
+	return os.Getenv(envServiceTokenLegacy)
+}
+
 // sendBridgeRequest dials relay's bridge socket, writes one request, reads
 // one response, returns the parsed envelope. Authentication is read from
-// the RELAY_MCP_TOKEN env (the service token relay issued at spawn).
+// the RELAY_SERVICE_TOKEN env (the service token relay issued at spawn),
+// falling back to the legacy name during the cross-repo rename window.
 //
 // Shared by every bridge-consuming call site (PTY env resolution, manifest
 // registration) so the dial / write / scan / parse machinery lives in
 // exactly one place.
 func sendBridgeRequest(reqType string, args json.RawMessage) (relayBridgeResponse, error) {
-	token := os.Getenv(envMcpToken)
+	token := serviceToken()
 	if token == "" {
-		return relayBridgeResponse{}, fmt.Errorf("%s not set in environment (relay-managed callers require a service token)", envMcpToken)
+		return relayBridgeResponse{}, fmt.Errorf("%s not set in environment (relay-managed callers require a service token)", envServiceToken)
 	}
 
 	payload, err := json.Marshal(relayBridgeRequest{

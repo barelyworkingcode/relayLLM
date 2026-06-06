@@ -33,7 +33,7 @@ func newTestSessionManager(t *testing.T) *SessionManager {
 
 func mustCreateSession(t *testing.T, mgr *SessionManager, name string) *Session {
 	t.Helper()
-	sess, err := mgr.CreateSession("", t.TempDir(), name, "fake/m1", "", false, "fake", nil, "")
+	sess, err := mgr.CreateSession("", t.TempDir(), name, "fake/m1", "", false, "fake", nil)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

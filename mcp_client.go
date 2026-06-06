@@ -108,8 +108,10 @@ func (m *MCPManager) Start(ctx context.Context) error {
 		}
 
 		cmd := exec.Command(cfg.Command, cfg.Args...)
-		// Inherit environment, then overlay config-specific vars.
-		cmd.Env = os.Environ()
+		// Inherit environment (minus relay's own credentials), then overlay
+		// config-specific vars. childBaseEnv strips the service/frontend tokens
+		// so the relay mcp child gets only the project token we set in cfg.Env.
+		cmd.Env = childBaseEnv()
 		for k, v := range cfg.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
