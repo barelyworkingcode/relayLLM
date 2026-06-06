@@ -67,8 +67,11 @@ func (m *TerminalManager) SetExitHandler(fn func(terminalID string, exitCode int
 
 // Create starts a new terminal session from a template. extraArgs is
 // appended to the template's resolved Args (after substitution) — used by
-// scheduled tasks to pass per-task commands through a shared template.
-func (m *TerminalManager) Create(templateID, name, directory string, cols, rows uint16, extraArgs []string) (*TerminalSession, error) {
+// scheduled tasks to pass per-task commands through a shared template. A
+// non-empty projectID makes the terminal project-scoped: relay resolves a
+// project-scoped token (validating directory against the project) and injects
+// it as RELAY_PROJECT_TOKEN. An empty projectID yields a token-free terminal.
+func (m *TerminalManager) Create(templateID, name, directory, projectID string, cols, rows uint16, extraArgs []string) (*TerminalSession, error) {
 	tmpl, ok := m.templates.Get(templateID)
 	if !ok {
 		return nil, fmt.Errorf("terminal template not found: %s", templateID)
@@ -93,6 +96,7 @@ func (m *TerminalManager) Create(templateID, name, directory string, cols, rows 
 		TemplateID:      templateID,
 		Name:            name,
 		Directory:       directory,
+		projectID:       projectID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		cols:            cols,
 		rows:            rows,

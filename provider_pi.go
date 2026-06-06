@@ -164,6 +164,7 @@ func (p *PiProvider) Start() error {
 	// expose ${SKILL_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
 	// No-op when none of the relay-managed fields are set.
 	subs, err := RelayManagedSpec{
+		ProjectID:       p.session.ProjectID,
 		Directory:       p.directory,
 		SkillPath:       p.skillPathTpl,
 		AutoRegenSkills: p.autoRegenSkills,
@@ -229,7 +230,7 @@ func (p *PiProvider) Start() error {
 	piPath := resolvePiPath(p.binaryPath)
 	cmd := exec.Command(piPath, args...)
 	cmd.Dir = p.directory
-	cmd.Env = ensurePath(os.Environ())
+	cmd.Env = ensurePath(childBaseEnv())
 	cmd.Env = append(cmd.Env,
 		"PI_OFFLINE=1",
 		"PI_SKIP_VERSION_CHECK=1",
@@ -238,15 +239,11 @@ func (p *PiProvider) Start() error {
 	if err != nil {
 		return fmt.Errorf("pi: %w", err)
 	}
-	if subs.RelayToken != "" {
-		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", subs.RelayToken)
-	} else if p.session.McpToken != "" {
-		// Fall back to the session's project-scoped MCP token when the spawn
-		// spec didn't opt into useRelayToken. Project skills routinely tell
-		// pi/claude to invoke `relay mcp call ...` via Bash, which needs
-		// RELAY_TOKEN to authenticate.
-		cmd.Env = setEnv(cmd.Env, "RELAY_TOKEN", p.session.McpToken)
-	}
+	// subs.RelayToken is the project-scoped token relay resolved by projectId
+	// (subdir-tolerant, consistent with the Claude and terminal paths). Empty
+	// for a session with no project. Dual-written under the legacy name for
+	// existing skills that reference RELAY_TOKEN.
+	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
 	cmd.Env = applyEnvPassthrough(cmd.Env, p.envPassthrough)
 
 	stdin, err := cmd.StdinPipe()

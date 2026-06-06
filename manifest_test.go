@@ -118,14 +118,15 @@ func (b *FakeBridge) handleConn(conn net.Conn) {
 // them on cleanup. Test isolation: never leak env changes to other tests.
 func withBridgeEnv(t *testing.T, sockPath, serviceID, token string) {
 	t.Helper()
-	keys := []string{envBridgeSocket, envServiceID, envMcpToken}
+	keys := []string{envBridgeSocket, envServiceID, envServiceToken, envServiceTokenLegacy}
 	prev := map[string]string{}
 	for _, k := range keys {
 		prev[k] = os.Getenv(k)
 	}
 	_ = os.Setenv(envBridgeSocket, sockPath)
 	_ = os.Setenv(envServiceID, serviceID)
-	_ = os.Setenv(envMcpToken, token)
+	_ = os.Setenv(envServiceToken, token)
+	_ = os.Setenv(envServiceTokenLegacy, "") // deterministic: token rides the new name only
 	t.Cleanup(func() {
 		for k, v := range prev {
 			if v == "" {

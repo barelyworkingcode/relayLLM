@@ -452,6 +452,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 		TemplateID string   `json:"templateId"`
 		Name       string   `json:"name"`
 		Directory  string   `json:"directory"`
+		ProjectID  string   `json:"projectId"`
 		Cols       uint16   `json:"cols"`
 		Rows       uint16   `json:"rows"`
 		ExtraArgs  []string `json:"extraArgs"`
@@ -463,7 +464,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 		return
 	}
 
-	session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.Cols, req.Rows, req.ExtraArgs)
+	session, err := h.terminals.Create(req.TemplateID, req.Name, req.Directory, req.ProjectID, req.Cols, req.Rows, req.ExtraArgs)
 	if err != nil {
 		sendWSError(wc, err.Error())
 		return

@@ -25,7 +25,7 @@ func TestTerminalSession_PTYExitAndLog(t *testing.T) {
 	exitCh := make(chan int, 1)
 	mgr.SetExitHandler(func(_ string, code int) { exitCh <- code })
 
-	sess, err := mgr.Create("test-sh", "test", tmpDir, 80, 24, []string{"-c", "echo hi-from-pty; exit 7"})
+	sess, err := mgr.Create("test-sh", "test", tmpDir, "", 80, 24, []string{"-c", "echo hi-from-pty; exit 7"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
