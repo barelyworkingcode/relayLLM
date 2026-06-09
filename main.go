@@ -231,7 +231,7 @@ func main() {
 	// Tell relay (if present) where to dispatch front-door traffic.
 	// Standalone runs are a clean no-op. Run in a goroutine so a slow
 	// relay-bridge round-trip doesn't delay the listener accepting traffic.
-	go maybeRegisterManifest(*socketPath, *internalToken)
+	go maybeRegisterManifest(*dataDir, *socketPath, *internalToken)
 
 	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
 	go func() {

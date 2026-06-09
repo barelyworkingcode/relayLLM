@@ -244,37 +244,12 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 // --- Terminal Routes ---
 
 func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, terminals *TerminalManager) {
-	// Template CRUD.
+	// Template reads. Mutation moved to relay's config editor, which edits
+	// settings.json directly (the `pty` section) and restarts relayLLM — see
+	// ../relay/plans/yes-i-think-we-proud-lightning.md. relayLLM is no longer a
+	// writer of its own templates at runtime.
 	mux.HandleFunc("GET /api/terminal/templates", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, templates.List())
-	})
-
-	mux.HandleFunc("POST /api/terminal/templates", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Name        string            `json:"name"`
-			Command     string            `json:"command"`
-			Args        []string          `json:"args"`
-			Env         map[string]string `json:"env"`
-			Description string            `json:"description"`
-			Icon        string            `json:"icon"`
-		}
-		if err := readJSON(r, &body); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-		tmpl, err := templates.Create(TerminalTemplate{
-			Name:        body.Name,
-			Command:     body.Command,
-			Args:        body.Args,
-			Env:         body.Env,
-			Description: body.Description,
-			Icon:        body.Icon,
-		})
-		if err != nil {
-			writeJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, 201, tmpl)
 	})
 
 	mux.HandleFunc("GET /api/terminal/templates/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -284,28 +259,6 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			return
 		}
 		writeJSON(w, 200, tmpl)
-	})
-
-	mux.HandleFunc("PUT /api/terminal/templates/{id}", func(w http.ResponseWriter, r *http.Request) {
-		var updates TemplateUpdate
-		if err := readJSON(r, &updates); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-		tmpl, err := templates.Update(r.PathValue("id"), updates)
-		if err != nil {
-			writeJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, 200, tmpl)
-	})
-
-	mux.HandleFunc("DELETE /api/terminal/templates/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := templates.Delete(r.PathValue("id")); err != nil {
-			writeJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, 200, map[string]bool{"success": true})
 	})
 
 	// Terminal instance routes.
