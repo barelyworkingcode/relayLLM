@@ -143,7 +143,8 @@ func withBridgeEnv(t *testing.T, sockPath, serviceID, token string) {
 // ---------------------------------------------------------------------------
 
 func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
-	m := buildManifest()
+	dataDir := t.TempDir()
+	m := buildManifest(dataDir)
 
 	// Routes the relay dispatcher must know about. Adding a route is a
 	// protocol change — break this test deliberately when adding one.
@@ -177,6 +178,20 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 	}
 	if m.Status == nil || m.Status.Path != "/api/status" {
 		t.Errorf("status: got %+v, want path=/api/status", m.Status)
+	}
+
+	// Config rides on registration so relay can render the settings.json editor.
+	if m.Config == nil {
+		t.Fatalf("manifest has no Config — relay can't surface the settings editor")
+	}
+	if want := filepath.Join(dataDir, "settings.json"); m.Config.Path != want {
+		t.Errorf("config.path: got %q, want %q", m.Config.Path, want)
+	}
+	if m.Config.ApplyMode != "restart" {
+		t.Errorf("config.applyMode: got %q, want restart", m.Config.ApplyMode)
+	}
+	if len(m.Config.Schema) == 0 {
+		t.Errorf("config.schema is empty — the editor would render nothing")
 	}
 
 	// Actions are part of the wire contract: the relay UI builds buttons
@@ -216,7 +231,7 @@ func TestManifest_MaybeRegister_StandaloneMode_IsNoOp(t *testing.T) {
 	// shouldn't matter — standalone mode short-circuits before reading them.
 	_ = os.Unsetenv(envBridgeSocket)
 
-	maybeRegisterManifest("/tmp/some.sock", "tok123")
+	maybeRegisterManifest(t.TempDir(), "/tmp/some.sock", "tok123")
 
 	if len(bridge.Requests()) != 0 {
 		t.Errorf("standalone mode sent %d requests; want 0", len(bridge.Requests()))
@@ -227,7 +242,7 @@ func TestManifest_MaybeRegister_SendsCorrectPayload(t *testing.T) {
 	bridge := NewFakeBridge(t)
 	withBridgeEnv(t, bridge.SocketPath(), "relayllm-test", "service-token-xyz")
 
-	maybeRegisterManifest("/tmp/internal.sock", "internal-token-abc")
+	maybeRegisterManifest(t.TempDir(), "/tmp/internal.sock", "internal-token-abc")
 
 	// Bridge accepts and replies are async via goroutine; wait briefly.
 	waitFor(t, 1*time.Second, func() bool { return len(bridge.Requests()) >= 1 })
@@ -271,7 +286,7 @@ func TestManifest_MaybeRegister_MissingServiceID_IsNoOp(t *testing.T) {
 	// Set the socket but deliberately omit the service id.
 	withBridgeEnv(t, bridge.SocketPath(), "", "tok")
 
-	maybeRegisterManifest("/tmp/x.sock", "internal")
+	maybeRegisterManifest(t.TempDir(), "/tmp/x.sock", "internal")
 
 	// maybeRegisterManifest is synchronous; if it dialed at all the request
 	// would already be on the bridge by the time we return here.
@@ -293,7 +308,7 @@ func TestManifest_MaybeRegister_BridgeErrorIsSwallowed(t *testing.T) {
 	// "doesn't panic" — if maybeRegisterManifest ever started propagating
 	// errors the call site (a goroutine in main) would silently exit and
 	// future debugging would be confused.
-	maybeRegisterManifest("/tmp/x.sock", "internal")
+	maybeRegisterManifest(t.TempDir(), "/tmp/x.sock", "internal")
 
 	waitFor(t, 1*time.Second, func() bool { return len(bridge.Requests()) >= 1 })
 	// One request was sent and bridge replied Error — relayLLM should not

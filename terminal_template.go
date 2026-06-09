@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-
-	"github.com/google/uuid"
 )
 
 // TerminalTemplate defines a launchable terminal type.
@@ -179,100 +177,7 @@ func (s *TemplateStore) Get(id string) (TerminalTemplate, bool) {
 	return hydrate(id, t), true
 }
 
-// Create adds a new custom terminal template.
-func (s *TemplateStore) Create(tmpl TerminalTemplate) (TerminalTemplate, error) {
-	if tmpl.Name == "" || tmpl.Command == "" {
-		return TerminalTemplate{}, fmt.Errorf("name and command are required")
-	}
-
-	tmpl.ID = ""
-	tmpl.BuiltIn = false
-	if tmpl.Args == nil {
-		tmpl.Args = []string{}
-	}
-	id := uuid.New().String()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.templates[id] = tmpl
-	if err := s.persist(); err != nil {
-		delete(s.templates, id)
-		return TerminalTemplate{}, err
-	}
-	return hydrate(id, tmpl), nil
-}
-
-// TemplateUpdate holds optional fields for partial template updates.
-type TemplateUpdate struct {
-	Name        *string            `json:"name,omitempty"`
-	Command     *string            `json:"command,omitempty"`
-	Description *string            `json:"description,omitempty"`
-	Icon        *string            `json:"icon,omitempty"`
-	Args        *[]string          `json:"args,omitempty"`
-	Env         *map[string]string `json:"env,omitempty"`
-}
-
-// Update modifies an existing custom template.
-func (s *TemplateStore) Update(id string, u TemplateUpdate) (TerminalTemplate, error) {
-	if protectedTemplateIDs[id] {
-		return TerminalTemplate{}, fmt.Errorf("cannot update built-in template: %s", id)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	t, ok := s.templates[id]
-	if !ok {
-		return TerminalTemplate{}, fmt.Errorf("template not found: %s", id)
-	}
-	original := t
-
-	if u.Name != nil && *u.Name != "" {
-		t.Name = *u.Name
-	}
-	if u.Command != nil && *u.Command != "" {
-		t.Command = *u.Command
-	}
-	if u.Description != nil {
-		t.Description = *u.Description
-	}
-	if u.Icon != nil {
-		t.Icon = *u.Icon
-	}
-	if u.Args != nil {
-		t.Args = *u.Args
-	}
-	if u.Env != nil {
-		t.Env = *u.Env
-	}
-	s.templates[id] = t
-
-	if err := s.persist(); err != nil {
-		s.templates[id] = original
-		return TerminalTemplate{}, err
-	}
-	return hydrate(id, t), nil
-}
-
-// Delete removes a custom terminal template. Built-in templates cannot be deleted.
-func (s *TemplateStore) Delete(id string) error {
-	if protectedTemplateIDs[id] {
-		return fmt.Errorf("cannot delete built-in template: %s", id)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	original, ok := s.templates[id]
-	if !ok {
-		return fmt.Errorf("template not found: %s", id)
-	}
-	delete(s.templates, id)
-
-	if err := s.persist(); err != nil {
-		s.templates[id] = original
-		return err
-	}
-	return nil
-}
+// Template mutation (create/update/delete) is no longer served by relayLLM:
+// relay's config editor edits the `pty` section of settings.json directly and
+// restarts the service. TemplateStore is now read-mostly — it loads templates
+// at startup (seeding defaults on first run) and serves List/Get.
