@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
-// AutoRegenSkills values. Shared by the PTY template (TerminalTemplate)
-// and the LLM-pi config (PiConfig). Empty == AutoRegenNever.
+// AutoRegen* are the "always | skipIfExists | never" mode values used by
+// PiProjectOverlay.Mode (config.go / pi_overlay.go). relayLLM does not
+// regenerate skills — relay owns skill generation (relay ADR-004), and the
+// ResolvePtyEnv bridge call no longer carries a regen field. Empty == never.
 const (
 	AutoRegenAlways       = "always"
 	AutoRegenSkipIfExists = "skipIfExists"
@@ -84,44 +85,33 @@ func childBaseEnv() []string {
 
 // RelayManagedSpec is the subset of fields any spawnable (PTY template,
 // LLM-pi provider) needs to participate in relay-managed env resolution:
-// regenerate a project skill via relay's bridge, fetch a project-scoped
-// token, and expose those plus the project path back as substitution
-// values. Both call sites build this from their own config and call
-// Resolve() — keeping the two surfaces decoupled while sharing the
-// bridge-call + substitution logic.
+// fetch a project-scoped token via relay's bridge and expose the resolved
+// project path back as a substitution value. Both call sites build this from
+// their own config and call Resolve() — keeping the two surfaces decoupled
+// while sharing the bridge-call + substitution logic. Skill regeneration is
+// no longer requested here; relay owns it (see relay ADR-004).
 type RelayManagedSpec struct {
-	ProjectID       string // authoritative project key; relay validates Directory is within the project. A non-empty value makes the spawn project-scoped (gets a token).
-	Directory       string // session/terminal cwd; relay validates it against ProjectID, or (legacy) uses it to infer the project
-	SkillPath       string // template — supports ${project.path}
-	AutoRegenSkills string // "always" | "skipIfExists" | "never" (empty = "never")
-	UseRelayToken   bool
-	Label           string // human-readable identifier (template id / "pi") used in error messages
+	ProjectID     string // authoritative project key; relay validates Directory is within the project. A non-empty value makes the spawn project-scoped (gets a token).
+	Directory     string // session/terminal cwd; relay validates it against ProjectID, or (legacy) uses it to infer the project
+	UseRelayToken bool
+	Label         string // human-readable identifier (template id / "pi") used in error messages
 }
 
 // SpawnSubs holds the resolved substitution values from a relay bridge
 // ResolvePtyEnv call. For non-relay-managed spawns only ProjectPath is set.
 type SpawnSubs struct {
 	ProjectPath string // resolved via bridge (or Directory if not relay-managed)
-	SkillPath   string // path where SKILL.md was written
 	RelayToken  string // project plaintext token (empty if !UseRelayToken)
 }
 
-// Expand substitutes ${PROJECT_PATH}, ${SKILL_PATH}, ${SKILLS_ROOT},
-// ${RELAY_TOKEN} and the lowercase ${project.path} into s.
-//
-// ${SKILLS_ROOT} resolves to the parent directory of ${SKILL_PATH}. Pi (and
-// Claude Code) discover skills recursively under any directory passed to
-// --skill, so pointing at the parent surfaces every sibling skill alongside
-// the relay-managed one in a single flag.
+// Expand substitutes ${PROJECT_PATH}, ${RELAY_TOKEN} and the lowercase
+// ${project.path} into s. The skills directory is the convention
+// ${PROJECT_PATH}/.claude/skills — callers that need a --skill flag build it
+// from ${PROJECT_PATH} (Pi and Claude Code discover skills recursively under
+// any directory passed to --skill).
 func (s SpawnSubs) Expand(in string) string {
-	skillsRoot := ""
-	if s.SkillPath != "" {
-		skillsRoot = filepath.Dir(s.SkillPath)
-	}
 	r := strings.NewReplacer(
 		"${PROJECT_PATH}", s.ProjectPath,
-		"${SKILL_PATH}", s.SkillPath,
-		"${SKILLS_ROOT}", skillsRoot,
 		"${RELAY_TOKEN}", s.RelayToken,
 		"${project.path}", s.ProjectPath,
 	)
@@ -129,54 +119,36 @@ func (s SpawnSubs) Expand(in string) string {
 }
 
 // Resolve computes substitution values for a spawn. For non-relay-managed
-// specs it returns SpawnSubs{ProjectPath: Directory} without contacting
-// the bridge. For relay-managed specs it calls relay's bridge
-// ResolvePtyEnv, which also regenerates SKILL.md as a side effect when
-// AutoRegenSkills requires it. Fails closed: returns error rather than
-// spawning with unresolved placeholders.
+// specs it returns SpawnSubs{ProjectPath: Directory} without contacting the
+// bridge. For relay-managed specs (an explicit ProjectID or one that opted
+// into the relay token) it calls relay's bridge ResolvePtyEnv to fetch a
+// project-scoped token and the resolved project path. Fails closed: returns
+// an error rather than spawning without the token it asked for.
 func (r RelayManagedSpec) Resolve() (SpawnSubs, error) {
 	// A project-scoped spawn (explicit ProjectID) or one that opted into the
 	// relay token gets a project-scoped token. The legacy UseRelayToken flag
 	// is kept working for templates that don't carry a project id.
 	wantToken := r.ProjectID != "" || r.UseRelayToken
-	managed := wantToken || (r.AutoRegenSkills != "" && r.AutoRegenSkills != AutoRegenNever)
-	if !managed {
+	if !wantToken {
 		return SpawnSubs{ProjectPath: r.Directory}, nil
 	}
 
-	// SkillPath's ${project.path} is resolved against the launch directory
-	// before sending over the bridge — relay treats the path as opaque.
-	skillPath := (SpawnSubs{ProjectPath: r.Directory}).Expand(r.SkillPath)
-
-	regen := r.AutoRegenSkills
-	if regen == "" {
-		regen = AutoRegenNever
-	}
-	if regen != AutoRegenNever && skillPath == "" {
-		return SpawnSubs{}, fmt.Errorf("%s: skillPath required when autoRegenSkills != never", r.labelOrDefault())
-	}
-
 	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
-		ProjectID:   r.ProjectID,
-		Directory:   r.Directory,
-		RegenSkills: regen,
-		SkillPath:   skillPath,
+		ProjectID: r.ProjectID,
+		Directory: r.Directory,
 	})
 	if err != nil {
 		return SpawnSubs{}, fmt.Errorf("relay-managed %s: resolve env: %w", r.labelOrDefault(), err)
 	}
 
-	subs := SpawnSubs{
-		ProjectPath: resp.WorkingDir,
-		SkillPath:   resp.SkillPath,
+	projectPath := resp.WorkingDir
+	if projectPath == "" {
+		projectPath = r.Directory
 	}
-	if wantToken {
-		subs.RelayToken = resp.RelayToken
-	}
-	if subs.ProjectPath == "" {
-		subs.ProjectPath = r.Directory
-	}
-	return subs, nil
+	return SpawnSubs{
+		ProjectPath: projectPath,
+		RelayToken:  resp.RelayToken,
+	}, nil
 }
 
 func (r RelayManagedSpec) labelOrDefault() string {
@@ -203,9 +175,8 @@ func resolveProjectToken(session *Session) string {
 		return "" // standalone: no relay bridge to ask
 	}
 	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
-		ProjectID:   session.ProjectID,
-		Directory:   session.Directory,
-		RegenSkills: AutoRegenNever,
+		ProjectID: session.ProjectID,
+		Directory: session.Directory,
 	})
 	if err != nil {
 		slog.Warn("resolve project token from relay failed",

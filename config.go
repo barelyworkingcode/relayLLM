@@ -24,20 +24,18 @@ type relayConfig struct {
 // Empty BinaryPath falls back to the well-known fallback chain in
 // resolvePiPath (~/.local/bin/pi, npm globals, /usr/local/bin/pi, then PATH).
 //
-// The relay-managed fields (UseRelayToken / AutoRegenSkills / SkillPath /
-// EnvPassthrough) mirror the pidev PTY template's shape and trigger the
-// same RelayManagedSpec.Resolve() prep used by terminal_session.go — see
-// relay_spawn.go. When set, each LLM-pi spawn calls relay's bridge to
-// regenerate the project skill, fetch a project-scoped token, and forward
-// listed env vars from the relayLLM process into pi.
+// The relay-managed fields (UseRelayToken / EnvPassthrough) mirror the pidev
+// PTY template's shape and trigger the same RelayManagedSpec.Resolve() prep
+// used by terminal_session.go — see relay_spawn.go. When set, each LLM-pi
+// spawn calls relay's bridge to fetch a project-scoped token and forwards
+// listed env vars from the relayLLM process into pi. Skills load from the
+// project's .claude/skills directory (relay generates and manages them).
 type PiConfig struct {
 	BinaryPath string   `json:"binaryPath,omitempty"`
 	ExtraArgs  []string `json:"extraArgs,omitempty"` // appended to every pi spawn after the standard args
 
-	UseRelayToken   bool     `json:"useRelayToken,omitempty"`
-	AutoRegenSkills string   `json:"autoRegenSkills,omitempty"` // "always" | "skipIfExists" | "never"
-	SkillPath       string   `json:"skillPath,omitempty"`       // supports ${project.path}
-	EnvPassthrough  []string `json:"env_passthrough,omitempty"` // env keys copied from os.Environ() into pi
+	UseRelayToken  bool     `json:"useRelayToken,omitempty"`
+	EnvPassthrough []string `json:"env_passthrough,omitempty"` // env keys copied from os.Environ() into pi
 
 	// ProjectOverlay opts a relay-managed project into a per-project pi
 	// config dir at <projectDir>/.pi/. When enabled, relayLLM materializes

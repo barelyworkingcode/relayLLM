@@ -45,13 +45,11 @@ type PiProvider struct {
 	extraArgs     []string // appended to argv after standard flags
 
 	// Relay-managed spawn fields (mirror the PTY pidev template). When
-	// useRelayToken or autoRegenSkills is set, Start() calls
-	// RelayManagedSpec.Resolve() to regenerate the project skill and fetch
-	// a project-scoped token before spawning pi.
-	useRelayToken   bool
-	autoRegenSkills string
-	skillPathTpl    string
-	envPassthrough  []string
+	// useRelayToken is set, Start() calls RelayManagedSpec.Resolve() to fetch
+	// a project-scoped token before spawning pi. Skills load from the
+	// project's .claude/skills directory (relay generates and manages them).
+	useRelayToken  bool
+	envPassthrough []string
 
 	// Pi project-overlay config + inputs needed to translate relayLLM's
 	// curated providers into the overlay's models.json. When overlay is
@@ -125,8 +123,6 @@ func NewPiProvider(session *Session, handler EventHandler, provider, modelID, da
 		p.binaryPath = cfg.BinaryPath
 		p.extraArgs = cfg.ExtraArgs
 		p.useRelayToken = cfg.UseRelayToken
-		p.autoRegenSkills = cfg.AutoRegenSkills
-		p.skillPathTpl = cfg.SkillPath
 		p.envPassthrough = cfg.EnvPassthrough
 	}
 	return p
@@ -160,16 +156,14 @@ func (p *PiProvider) sessionDir() string {
 }
 
 func (p *PiProvider) Start() error {
-	// Relay-managed spawn prep: regenerate skill, fetch project token,
-	// expose ${SKILL_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
+	// Relay-managed spawn prep: fetch project token + resolved project path,
+	// expose ${PROJECT_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
 	// No-op when none of the relay-managed fields are set.
 	subs, err := RelayManagedSpec{
-		ProjectID:       p.session.ProjectID,
-		Directory:       p.directory,
-		SkillPath:       p.skillPathTpl,
-		AutoRegenSkills: p.autoRegenSkills,
-		UseRelayToken:   p.useRelayToken,
-		Label:           "pi",
+		ProjectID:     p.session.ProjectID,
+		Directory:     p.directory,
+		UseRelayToken: p.useRelayToken,
+		Label:         "pi",
 	}.Resolve()
 	if err != nil {
 		return fmt.Errorf("pi: %w", err)
@@ -200,29 +194,26 @@ func (p *PiProvider) Start() error {
 		args = append(args, "--append-system-prompt", p.session.SystemPrompt)
 	}
 
-	// Auto-append --skill <skills-root> so pi recursively discovers every
-	// sibling skill at once (e.g. .claude/skills/ containing relay/, tbo-email/,
-	// import-meeting/ — one flag, all three loaded). When relay-managed, use
-	// the parent of the resolved skill path; otherwise fall back to
-	// <project>/.claude/skills if present. Skip when the user wired --skill
-	// themselves via extraArgs (avoid duplicate flags).
+	// Auto-append --skill <project>/.claude/skills so pi recursively discovers
+	// every sibling skill at once (e.g. relay/, tbo-email/, import-meeting/ —
+	// one flag, all loaded). The skills dir is the convention off the project
+	// root (relay generates and manages the SKILL.md files there). Skip when
+	// the dir is absent, or when the user wired --skill via extraArgs.
 	if !hasArg(p.extraArgs, "--skill") {
-		skillsRoot := ""
-		if subs.SkillPath != "" {
-			skillsRoot = filepath.Dir(subs.SkillPath)
-		} else if p.directory != "" {
-			candidate := filepath.Join(p.directory, ".claude", "skills")
-			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-				skillsRoot = candidate
-			}
+		root := subs.ProjectPath
+		if root == "" {
+			root = p.directory
 		}
-		if skillsRoot != "" {
-			args = append(args, "--skill", skillsRoot)
+		if root != "" {
+			candidate := filepath.Join(root, ".claude", "skills")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				args = append(args, "--skill", candidate)
+			}
 		}
 	}
 
 	// Expand placeholders in user extraArgs so power users can still
-	// reference ${SKILL_PATH}/${RELAY_TOKEN}/${project.path} themselves.
+	// reference ${PROJECT_PATH}/${RELAY_TOKEN}/${project.path} themselves.
 	for _, extra := range p.extraArgs {
 		args = append(args, subs.Expand(extra))
 	}
