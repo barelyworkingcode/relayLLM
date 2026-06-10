@@ -16,11 +16,11 @@ import (
 // IS the id) and `builtIn` (computed from protectedTemplateIDs at API time).
 // In-memory copies returned by Get/List have both populated for consumers.
 //
-// Relay-managed fields (UseRelayToken, AutoRegenSkills, SkillPath, EnvPassthrough)
-// opt the template into spawn-time resolution via relay's bridge ResolvePtyEnv.
-// Args may reference ${SKILL_PATH}, ${RELAY_TOKEN}, ${PROJECT_PATH}; SkillPath
-// may reference ${project.path}. See terminal_session.go:Start for the
-// substitution rules.
+// Relay-managed fields (UseRelayToken, EnvPassthrough) opt the template into
+// spawn-time resolution via relay's bridge ResolvePtyEnv. Args may reference
+// ${PROJECT_PATH} and ${RELAY_TOKEN}; the skills directory is the convention
+// ${PROJECT_PATH}/.claude/skills (relay generates and manages the SKILL.md
+// files there). See terminal_session.go:Start for the substitution rules.
 type TerminalTemplate struct {
 	ID          string            `json:"id,omitempty"`
 	Name        string            `json:"name"`
@@ -33,10 +33,8 @@ type TerminalTemplate struct {
 	IdleTimeout int               `json:"idleTimeout,omitempty"` // minutes, 0 = default (1440 = 24h)
 
 	// Relay-managed PTY fields. Zero values mean "not relay-managed".
-	UseRelayToken   bool     `json:"useRelayToken,omitempty"`
-	AutoRegenSkills string   `json:"autoRegenSkills,omitempty"` // "always" | "skipIfExists" | "never"
-	SkillPath       string   `json:"skillPath,omitempty"`       // supports ${project.path}
-	EnvPassthrough  []string `json:"env_passthrough,omitempty"`
+	UseRelayToken  bool     `json:"useRelayToken,omitempty"`
+	EnvPassthrough []string `json:"env_passthrough,omitempty"`
 }
 
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
@@ -72,14 +70,12 @@ func (t TerminalTemplate) ResolveCommand() string {
 func seedDefaultPTYConfig() map[string]TerminalTemplate {
 	return map[string]TerminalTemplate{
 		"claude-code": {
-			Name:            "Claude Code",
-			Command:         "claude",
-			Icon:            "terminal",
-			Description:     "Claude Code CLI agent (relay-managed: token + skills injected at launch)",
-			UseRelayToken:   true,
-			AutoRegenSkills: AutoRegenAlways,
-			SkillPath:       "${project.path}/.claude/skills/relay",
-			EnvPassthrough:  []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"},
+			Name:           "Claude Code",
+			Command:        "claude",
+			Icon:           "terminal",
+			Description:    "Claude Code CLI agent (relay-managed: project token injected at launch; skills managed by relay)",
+			UseRelayToken:  true,
+			EnvPassthrough: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"},
 		},
 		"opencode":    {Name: "OpenCode", Command: "opencode", Icon: "terminal", Description: "OpenCode CLI agent"},
 		"shell":       {Name: "Shell", Icon: "shell", Description: "Default system shell"},

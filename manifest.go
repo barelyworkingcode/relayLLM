@@ -161,8 +161,6 @@ func settingsSchema() []FieldDecl {
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "/usr/local/bin/pi"},
 				{ID: "extraArgs", Label: "Extra args", Type: "string[]", Help: "Appended to every pi spawn."},
 				{ID: "useRelayToken", Label: "Use relay token", Type: "bool"},
-				{ID: "autoRegenSkills", Label: "Auto-regen skills", Type: "select", Options: regen},
-				{ID: "skillPath", Label: "Skill path", Type: "text", Help: "Supports ${project.path}."},
 				{ID: "env_passthrough", Label: "Env passthrough", Type: "string[]", Help: "Env keys forwarded into pi."},
 				{ID: "projectOverlay", Label: "Project overlay", Type: "object", Fields: []FieldDecl{
 					{ID: "mode", Label: "Mode", Type: "select", Options: regen},
@@ -192,8 +190,6 @@ func settingsSchema() []FieldDecl {
 					{ID: "description", Label: "Description", Type: "textarea"},
 					{ID: "idleTimeout", Label: "Idle timeout (min)", Type: "number"},
 					{ID: "useRelayToken", Label: "Use relay token", Type: "bool"},
-					{ID: "autoRegenSkills", Label: "Auto-regen skills", Type: "select", Options: regen},
-					{ID: "skillPath", Label: "Skill path", Type: "text"},
 					{ID: "env_passthrough", Label: "Env passthrough", Type: "string[]"},
 				},
 			},

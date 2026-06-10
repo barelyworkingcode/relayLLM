@@ -63,19 +63,18 @@ const (
 // RelayPtyEnvRequest mirrors relay/bridge.PtyEnvRequest. Kept inline to
 // avoid a cross-repo Go module dependency. ProjectID is the authoritative
 // resolution key; relay validates Directory is within the project's path.
+// The call resolves a project-scoped token + working dir; skill generation is
+// owned by relay and is not driven from here.
 type RelayPtyEnvRequest struct {
-	ProjectID   string `json:"project_id,omitempty"`
-	Project     string `json:"project,omitempty"`
-	Directory   string `json:"directory,omitempty"`
-	RegenSkills string `json:"regen_skills"`
-	SkillPath   string `json:"skill_path"`
+	ProjectID string `json:"project_id,omitempty"`
+	Project   string `json:"project,omitempty"`
+	Directory string `json:"directory,omitempty"`
 }
 
 // RelayPtyEnvResponse mirrors relay/bridge.PtyEnvResponse.
 type RelayPtyEnvResponse struct {
 	RelayToken string `json:"relay_token"`
 	WorkingDir string `json:"working_dir"`
-	SkillPath  string `json:"skill_path"`
 }
 
 // relayBridgeRequest is the on-wire request envelope.
