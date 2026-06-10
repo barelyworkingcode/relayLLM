@@ -40,9 +40,9 @@ type TerminalSession struct {
 	projectID string
 
 	// Additional argv tokens appended after the template's resolved Args.
-	// Same ${PROJECT_PATH}/${RELAY_TOKEN}/${SKILL_PATH} substitution applies.
-	// Used by scheduled PTY tasks to pass per-task commands into a shared
-	// template (e.g. a "shell" template invoked with ["-c","npm test"]).
+	// Same ${PROJECT_PATH}/${RELAY_TOKEN} substitution applies. Used by
+	// scheduled PTY tasks to pass per-task commands into a shared template
+	// (e.g. a "shell" template invoked with ["-c","npm test"]).
 	extraArgs []string
 
 	cmd        *exec.Cmd
@@ -413,11 +413,9 @@ func isPiCommand(command string) bool {
 // template's UseRelayToken flag). See relay_spawn.go.
 func resolveTemplateSubs(tmpl TerminalTemplate, directory, projectID string) (SpawnSubs, error) {
 	return RelayManagedSpec{
-		ProjectID:       projectID,
-		Directory:       directory,
-		SkillPath:       tmpl.SkillPath,
-		AutoRegenSkills: tmpl.AutoRegenSkills,
-		UseRelayToken:   tmpl.UseRelayToken,
-		Label:           "template " + tmpl.ID,
+		ProjectID:     projectID,
+		Directory:     directory,
+		UseRelayToken: tmpl.UseRelayToken,
+		Label:         "template " + tmpl.ID,
 	}.Resolve()
 }
