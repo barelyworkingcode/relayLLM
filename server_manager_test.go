@@ -1,11 +1,11 @@
 package main
 
-// Unit tests for the LlamaServerManager helpers that don't need a real
-// llama-server subprocess. Specifically:
+// Unit tests for the ServerManager helpers that don't need a real
+// managed-server subprocess. Specifically:
 //
-//   - buildLlamaArgs: CLI flag translation (bool, number, string)
-//   - parseLlamaRawModels: alias extraction + modelDir path resolution
-//   - LlamaConfig.FindByAlias / LlamaServerManager.HasAlias: lookups
+//   - buildServerArgs: CLI flag translation (bool, number, string) + profile FixedArgs injection
+//   - parseServerRawModels: alias extraction + modelDir path resolution
+//   - ServerConfig.FindByAlias / ServerManager.HasAlias: lookups
 //   - allocatePort: returns a port that bind() will accept
 //   - expandHome: tilde substitution
 //
@@ -22,11 +22,11 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// buildLlamaArgs — CLI flag translation
+// buildServerArgs — CLI flag translation
 // ---------------------------------------------------------------------------
 
-func TestBuildLlamaArgs_PortAndHostAlwaysFirst(t *testing.T) {
-	got := buildLlamaArgs(map[string]any{}, 9090)
+func TestBuildServerArgs_PortAndHostAlwaysFirst(t *testing.T) {
+	got := buildServerArgs(llamaProfile, map[string]any{}, 9090)
 	if len(got) < 4 {
 		t.Fatalf("expected at least port + host flags, got %v", got)
 	}
@@ -38,8 +38,8 @@ func TestBuildLlamaArgs_PortAndHostAlwaysFirst(t *testing.T) {
 	}
 }
 
-func TestBuildLlamaArgs_HostFromArgsOverridesDefault(t *testing.T) {
-	got := buildLlamaArgs(map[string]any{"host": "0.0.0.0"}, 8000)
+func TestBuildServerArgs_HostFromArgsOverridesDefault(t *testing.T) {
+	got := buildServerArgs(llamaProfile, map[string]any{"host": "0.0.0.0"}, 8000)
 	if !slices.Contains(got, "0.0.0.0") {
 		t.Errorf("custom host missing: %v", got)
 	}
@@ -55,11 +55,11 @@ func TestBuildLlamaArgs_HostFromArgsOverridesDefault(t *testing.T) {
 	}
 }
 
-func TestBuildLlamaArgs_BoolTrueEmitsFlagBoolFalseOmits(t *testing.T) {
-	got := buildLlamaArgs(map[string]any{
-		"flash-attn":  true,
-		"verbose":     false,
-		"kv-unified":  true,
+func TestBuildServerArgs_BoolTrueEmitsFlagBoolFalseOmits(t *testing.T) {
+	got := buildServerArgs(llamaProfile, map[string]any{
+		"flash-attn": true,
+		"verbose":    false,
+		"kv-unified": true,
 	}, 8000)
 	if !slices.Contains(got, "--flash-attn") {
 		t.Errorf("--flash-attn missing for true bool: %v", got)
@@ -72,10 +72,10 @@ func TestBuildLlamaArgs_BoolTrueEmitsFlagBoolFalseOmits(t *testing.T) {
 	}
 }
 
-func TestBuildLlamaArgs_IntegerAndFloat(t *testing.T) {
+func TestBuildServerArgs_IntegerAndFloat(t *testing.T) {
 	// JSON numbers come in as float64; whole numbers must render without a
-	// decimal point so llama-server's flag parser accepts them.
-	got := buildLlamaArgs(map[string]any{
+	// decimal point so the server's flag parser accepts them.
+	got := buildServerArgs(llamaProfile, map[string]any{
 		"ctx-size": float64(131072), // integer-valued
 		"temp":     float64(0.6),    // fractional
 		"top-p":    float64(0.95),
@@ -86,8 +86,8 @@ func TestBuildLlamaArgs_IntegerAndFloat(t *testing.T) {
 	mustFollow(t, got, "--top-p", "0.95")
 }
 
-func TestBuildLlamaArgs_StringValue(t *testing.T) {
-	got := buildLlamaArgs(map[string]any{
+func TestBuildServerArgs_StringValue(t *testing.T) {
+	got := buildServerArgs(llamaProfile, map[string]any{
 		"model":        "/models/qwen.gguf",
 		"cache-type-k": "q8_0",
 	}, 8000)
@@ -95,12 +95,12 @@ func TestBuildLlamaArgs_StringValue(t *testing.T) {
 	mustFollow(t, got, "--cache-type-k", "q8_0")
 }
 
-func TestBuildLlamaArgs_DeterministicOrder(t *testing.T) {
+func TestBuildServerArgs_DeterministicOrder(t *testing.T) {
 	// Sort-by-key keeps logs comparable across runs. Two calls with the same
 	// input should produce identical output.
 	args := map[string]any{"zeta": "z", "alpha": "a", "beta": "b"}
-	first := buildLlamaArgs(args, 8000)
-	second := buildLlamaArgs(args, 8000)
+	first := buildServerArgs(llamaProfile, args, 8000)
+	second := buildServerArgs(llamaProfile, args, 8000)
 	if !slices.Equal(first, second) {
 		t.Errorf("output not deterministic:\n  first=%v\n  second=%v", first, second)
 	}
@@ -113,11 +113,39 @@ func TestBuildLlamaArgs_DeterministicOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// parseLlamaRawModels — config translation
+// buildServerArgs — profile FixedArgs injection
 // ---------------------------------------------------------------------------
 
-func TestParseLlamaRawModels_ExtractsAliasAndArgs(t *testing.T) {
-	cfg := &LlamaConfig{
+func TestBuildServerArgs_MlxProfile_InjectsServeFlag(t *testing.T) {
+	got := buildServerArgs(mlxProfile, map[string]any{
+		"model": "/models/mistral",
+	}, 9500)
+	// --serve should appear right after --port/--host, before sorted map flags.
+	if len(got) < 5 {
+		t.Fatalf("too few args: %v", got)
+	}
+	if got[4] != "--serve" {
+		t.Errorf("expected --serve at index 4 (after port/host); got %v", got)
+	}
+	// --model should come after --serve.
+	mustFollow(t, got, "--model", "/models/mistral")
+}
+
+func TestBuildServerArgs_LlamaProfile_NoServeFlag(t *testing.T) {
+	got := buildServerArgs(llamaProfile, map[string]any{
+		"model": "/models/qwen.gguf",
+	}, 8090)
+	if slices.Contains(got, "--serve") {
+		t.Errorf("llama profile should NOT inject --serve: %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseServerRawModels — config translation
+// ---------------------------------------------------------------------------
+
+func TestParseServerRawModels_ExtractsAliasAndArgs(t *testing.T) {
+	cfg := &ServerConfig{
 		RawModels: []map[string]any{
 			{
 				"alias":    "qwen-8b",
@@ -127,7 +155,7 @@ func TestParseLlamaRawModels_ExtractsAliasAndArgs(t *testing.T) {
 			},
 		},
 	}
-	if err := parseLlamaRawModels(cfg, "test"); err != nil {
+	if err := parseServerRawModels(cfg, "test"); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(cfg.Models) != 1 {
@@ -145,23 +173,23 @@ func TestParseLlamaRawModels_ExtractsAliasAndArgs(t *testing.T) {
 	}
 }
 
-func TestParseLlamaRawModels_RejectsMissingAlias(t *testing.T) {
-	cfg := &LlamaConfig{
+func TestParseServerRawModels_RejectsMissingAlias(t *testing.T) {
+	cfg := &ServerConfig{
 		RawModels: []map[string]any{{"model": "/x.gguf"}}, // no alias
 	}
-	if err := parseLlamaRawModels(cfg, "test"); err == nil {
+	if err := parseServerRawModels(cfg, "test"); err == nil {
 		t.Error("expected error for missing alias, got nil")
 	}
 }
 
-func TestParseLlamaRawModels_ResolvesRelativeModelPathAgainstModelDir(t *testing.T) {
-	cfg := &LlamaConfig{
+func TestParseServerRawModels_ResolvesRelativeModelPathAgainstModelDir(t *testing.T) {
+	cfg := &ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "x", "model": "unsloth/Qwen3-8B.gguf"},
 		},
 	}
-	if err := parseLlamaRawModels(cfg, "test"); err != nil {
+	if err := parseServerRawModels(cfg, "test"); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	got := cfg.Models[0].Args["model"]
@@ -171,27 +199,27 @@ func TestParseLlamaRawModels_ResolvesRelativeModelPathAgainstModelDir(t *testing
 	}
 }
 
-func TestParseLlamaRawModels_AbsolutePathLeftAlone(t *testing.T) {
-	cfg := &LlamaConfig{
+func TestParseServerRawModels_AbsolutePathLeftAlone(t *testing.T) {
+	cfg := &ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "x", "model": "/elsewhere/model.gguf"},
 		},
 	}
-	_ = parseLlamaRawModels(cfg, "test")
+	_ = parseServerRawModels(cfg, "test")
 	if cfg.Models[0].Args["model"] != "/elsewhere/model.gguf" {
 		t.Errorf("absolute path should not be reanchored: %v", cfg.Models[0].Args["model"])
 	}
 }
 
-func TestParseLlamaRawModels_MmprojResolvedToo(t *testing.T) {
-	cfg := &LlamaConfig{
+func TestParseServerRawModels_MmprojResolvedToo(t *testing.T) {
+	cfg := &ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "vision", "model": "v/m.gguf", "mmproj": "v/mm.gguf"},
 		},
 	}
-	_ = parseLlamaRawModels(cfg, "test")
+	_ = parseServerRawModels(cfg, "test")
 	if cfg.Models[0].Args["mmproj"] != "/opt/models/v/mm.gguf" {
 		t.Errorf("mmproj not resolved: %v", cfg.Models[0].Args["mmproj"])
 	}
@@ -201,16 +229,16 @@ func TestParseLlamaRawModels_MmprojResolvedToo(t *testing.T) {
 // FindByAlias / HasAlias / Aliases — lookups
 // ---------------------------------------------------------------------------
 
-func TestLlamaConfig_FindByAlias_NilConfigSafe(t *testing.T) {
-	var cfg *LlamaConfig
+func TestServerConfig_FindByAlias_NilConfigSafe(t *testing.T) {
+	var cfg *ServerConfig
 	if cfg.FindByAlias("anything") != nil {
 		t.Error("nil-receiver FindByAlias should return nil, not panic")
 	}
 }
 
-func TestLlamaConfig_FindByAlias_HitAndMiss(t *testing.T) {
-	cfg := &LlamaConfig{
-		Models: []LlamaModelConfig{
+func TestServerConfig_FindByAlias_HitAndMiss(t *testing.T) {
+	cfg := &ServerConfig{
+		Models: []ServerModelConfig{
 			{Alias: "a"}, {Alias: "b"}, {Alias: "c"},
 		},
 	}
@@ -222,16 +250,16 @@ func TestLlamaConfig_FindByAlias_HitAndMiss(t *testing.T) {
 	}
 }
 
-func TestLlamaServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
-	var m *LlamaServerManager
+func TestServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
+	var m *ServerManager
 	if m.HasAlias("anything") {
 		t.Error("nil-receiver HasAlias should return false")
 	}
 
-	cfg := &LlamaConfig{
-		Models: []LlamaModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
+	cfg := &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}
-	mgr := NewLlamaServerManager(cfg, "")
+	mgr := NewServerManager(llamaProfile, cfg, "")
 	if !mgr.HasAlias("qwen-8b") {
 		t.Error("HasAlias should return true for configured alias")
 	}
@@ -240,11 +268,11 @@ func TestLlamaServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
 	}
 }
 
-func TestLlamaServerManager_Aliases_ReturnsAll(t *testing.T) {
-	cfg := &LlamaConfig{
-		Models: []LlamaModelConfig{{Alias: "m1"}, {Alias: "m2"}},
+func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
+	cfg := &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "m1"}, {Alias: "m2"}},
 	}
-	mgr := NewLlamaServerManager(cfg, "")
+	mgr := NewServerManager(llamaProfile, cfg, "")
 	got := mgr.Aliases()
 	if len(got) != 2 || !slices.Contains(got, "m1") || !slices.Contains(got, "m2") {
 		t.Errorf("Aliases: got %v, want [m1 m2]", got)
@@ -255,8 +283,8 @@ func TestLlamaServerManager_Aliases_ReturnsAll(t *testing.T) {
 // allocatePort — actually binds to verify the port is usable
 // ---------------------------------------------------------------------------
 
-func TestLlamaServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
-	mgr := NewLlamaServerManager(&LlamaConfig{BasePort: 18000}, "")
+func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 18000}, "")
 	port := mgr.allocatePort()
 	if port == 0 {
 		t.Fatal("allocatePort returned 0")
@@ -272,8 +300,8 @@ func TestLlamaServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
 	}
 }
 
-func TestLlamaServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
-	mgr := NewLlamaServerManager(&LlamaConfig{BasePort: 18100}, "")
+func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 18100}, "")
 	// Pre-bind 18100 to force the allocator to skip it.
 	blocker, err := net.Listen("tcp", "127.0.0.1:18100")
 	if err != nil {
@@ -336,6 +364,54 @@ func TestExpandHome(t *testing.T) {
 		if got := expandHome(in); got != want {
 			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseUnifiedConfig — mlx-serve section parsing
+// ---------------------------------------------------------------------------
+
+func TestParseUnifiedConfig_MlxServeSection(t *testing.T) {
+	data := []byte(`{
+		"mlx-serve": {
+			"modelDir": "/base",
+			"models": [
+				{"alias": "q4", "model": "sub/dir", "temp": 0.7}
+			]
+		}
+	}`)
+
+	cfg, err := parseUnifiedConfig(data, "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// Mlx section should be parsed.
+	if cfg.Mlx == nil {
+		t.Fatal("cfg.Mlx is nil")
+	}
+	if len(cfg.Mlx.Models) != 1 {
+		t.Fatalf("Mlx models count: got %d, want 1", len(cfg.Mlx.Models))
+	}
+	m := cfg.Mlx.Models[0]
+	if m.Alias != "q4" {
+		t.Errorf("alias: got %q, want q4", m.Alias)
+	}
+	// Relative model path should be resolved against modelDir.
+	if m.Args["model"] != "/base/sub/dir" {
+		t.Errorf("model: got %v, want /base/sub/dir", m.Args["model"])
+	}
+	// temp arg should be preserved as a float64 from JSON.
+	if v, ok := m.Args["temp"].(float64); !ok || v != 0.7 {
+		t.Errorf("temp: got %v, want 0.7", m.Args["temp"])
+	}
+
+	// Llama section absent → empty non-nil config.
+	if cfg.Llama == nil {
+		t.Fatal("cfg.Llama should be non-nil even when absent")
+	}
+	if len(cfg.Llama.Models) != 0 {
+		t.Errorf("Llama models count: got %d, want 0", len(cfg.Llama.Models))
 	}
 }
 

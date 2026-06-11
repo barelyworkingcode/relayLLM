@@ -28,8 +28,8 @@ type FakeBridge struct {
 	socketPath string
 	listener   net.Listener
 
-	mu        sync.Mutex
-	requests  []relayBridgeRequest
+	mu          sync.Mutex
+	requests    []relayBridgeRequest
 	respondWith relayBridgeResponse
 }
 
@@ -159,6 +159,7 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 		"/api/generated/",
 		"/api/status",
 		"/api/llama/",
+		"/api/mlx/",
 		"/ws",
 	}
 	if len(m.Routes) != len(wantRoutes) {
@@ -200,6 +201,10 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 		"stop-llama": {
 			ID: "stop-llama", Label: "Stop", Method: "DELETE",
 			PathTemplate: "/api/llama/instances/{alias}", ForEach: "instances",
+		},
+		"stop-mlx": {
+			ID: "stop-mlx", Label: "Stop", Method: "DELETE",
+			PathTemplate: "/api/mlx/instances/{alias}", ForEach: "mlxInstances",
 		},
 		"stop-terminal": {
 			ID: "stop-terminal", Label: "Kill", Method: "DELETE",

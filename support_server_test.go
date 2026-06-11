@@ -106,9 +106,9 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	RegisterTerminalRoutes(mux, templateStore, terminals)
 	RegisterPermissionRoutes(mux, perms, sessions)
 	// Empty configs are fine — /api/models just returns nothing when nothing's wired.
-	RegisterModelRoutes(mux, "", nil, nil, nil, sessions.piOverlayInputs)
+	RegisterModelRoutes(mux, "", nil, nil, nil, nil, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, dataDir)
-	RegisterStatusRoutes(mux, sessions, terminals, nil, time.Now())
+	RegisterStatusRoutes(mux, sessions, terminals, nil, nil, time.Now())
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	handler := bearerAuth(supportBearerToken, recoverMiddleware(mux))
@@ -309,4 +309,3 @@ func WSSend(t *testing.T, conn *websocket.Conn, msg map[string]interface{}) {
 		t.Fatalf("write ws: %v", err)
 	}
 }
-

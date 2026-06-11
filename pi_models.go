@@ -105,7 +105,7 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 		excluded[name] = struct{}{}
 	}
 
-	out := make([]ModelInfo, 0, len(raw)+len(inputs.LlamaModels))
+	out := make([]ModelInfo, 0, len(raw)+len(inputs.ServerModels))
 	for _, m := range raw {
 		if provider := piProviderFromValue(m.Value); provider != "" {
 			if _, drop := excluded[provider]; drop {
@@ -115,13 +115,13 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 		out = append(out, m)
 	}
 
-	// relay-router: one synthetic entry per llama-server model. Pi won't list
-	// these via --list-models (they only exist in the per-project overlay
-	// materialized at spawn time), so we add them ourselves so the picker
+	// relay-router: one synthetic entry per managed-server model (llama + mlx).
+	// Pi won't list these via --list-models (they only exist in the per-project
+	// overlay materialized at spawn time), so we add them ourselves so the picker
 	// reflects what the user can actually pick.
 	if inputs.RouterPort != "" {
-		for _, llama := range inputs.LlamaModels {
-			value := piModelString(piRelayRouterProvider, llama.Alias)
+		for _, sm := range inputs.ServerModels {
+			value := piModelString(piRelayRouterProvider, sm.Alias)
 			out = append(out, ModelInfo{
 				Label:    value,
 				Value:    value,
