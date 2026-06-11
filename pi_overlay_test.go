@@ -39,7 +39,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 		},
 	}
 	inputs := PiOverlayInputs{
-		LlamaModels: []LlamaModelConfig{
+		ServerModels: []ServerModelConfig{
 			{Alias: "qwen3-8b"},
 			{Alias: "deepseek-r1"},
 		},

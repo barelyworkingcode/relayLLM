@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -22,7 +24,8 @@ func main() {
 	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Unix domain socket path for this listener. Defaults to {data-dir}/relayllm.sock. Used by direct clients in standalone mode and by relay (via manifest registration) when running under relay.")
 	internalToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every request. Empty → auto-generated random hex (printed at startup).")
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
-	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting llama-server + OpenAI endpoints (empty to disable)")
+	mlxServePath := flag.String("mlx-serve-path", envOrDefault("MLX_SERVE_PATH", ""), "Path to mlx-serve binary (default: mlx-serve on PATH)")
+	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve) + OpenAI endpoints (empty to disable)")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -65,19 +68,19 @@ func main() {
 
 	// Load provider + pty config up front. Terminal subsystem needs the pty
 	// map to seed defaults before serving requests.
-	openaiCfg, llamaCfg, piCfg, ptyCfg, err := LoadConfig(*dataDir, *openaiConfigPath)
+	cfg, err := LoadConfig(*dataDir, *openaiConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
-	sessions.SetPiConfig(piCfg)
-	if piCfg.BinaryPath != "" {
-		slog.Info("pi binary configured", "path", piCfg.BinaryPath)
+	sessions.SetPiConfig(cfg.Pi)
+	if cfg.Pi.BinaryPath != "" {
+		slog.Info("pi binary configured", "path", cfg.Pi.BinaryPath)
 	}
 
 	// Terminal subsystem.
 	templateStore := NewTemplateStore(*dataDir)
-	if err := templateStore.Load(ptyCfg); err != nil {
+	if err := templateStore.Load(cfg.PTY); err != nil {
 		slog.Error("failed to load terminal templates", "error", err)
 	}
 	terminalLogDir := filepath.Join(*dataDir, "terminal_logs")
@@ -92,9 +95,9 @@ func main() {
 	// then once per 24h. Idle process — no shutdown coordination needed.
 	go func() {
 		const (
-			sweepAge        = 30 * 24 * time.Hour
-			sweepMaxBytes   = int64(500 * 1024 * 1024)
-			sweepInterval   = 24 * time.Hour
+			sweepAge      = 30 * 24 * time.Hour
+			sweepMaxBytes = int64(500 * 1024 * 1024)
+			sweepInterval = 24 * time.Hour
 		)
 		for {
 			if removed, err := sweepTerminalLogs(terminalLogDir, sweepAge, sweepMaxBytes); err != nil {
@@ -161,49 +164,56 @@ func main() {
 	sessions.SetHookToken(*internalToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
-	if len(openaiCfg.Endpoints) > 0 {
-		slog.Info("openai endpoints loaded", "count", len(openaiCfg.Endpoints), "names", openaiCfg.Names())
+	if len(cfg.OpenAI.Endpoints) > 0 {
+		slog.Info("openai endpoints loaded", "count", len(cfg.OpenAI.Endpoints), "names", cfg.OpenAI.Names())
 	}
-	sessions.SetOpenAIConfig(openaiCfg)
-	var llamaManager *LlamaServerManager
-	if len(llamaCfg.Models) > 0 {
-		llamaManager = NewLlamaServerManager(llamaCfg, *llamaServerPath)
-		slog.Info("llama models configured", "count", len(llamaCfg.Models), "binary", llamaManager.binaryPath)
+	sessions.SetOpenAIConfig(cfg.OpenAI)
+	var llamaManager *ServerManager
+	if len(cfg.Llama.Models) > 0 {
+		llamaManager = NewServerManager(llamaProfile, cfg.Llama, *llamaServerPath)
+		slog.Info("llama models configured", "count", len(cfg.Llama.Models), "binary", llamaManager.binaryPath)
 	}
 	sessions.SetLlamaManager(llamaManager)
 
+	var mlxManager *ServerManager
+	if len(cfg.Mlx.Models) > 0 {
+		mlxManager = NewServerManager(mlxProfile, cfg.Mlx, *mlxServePath)
+		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.binaryPath)
+	}
+	sessions.SetMlxManager(mlxManager)
+
 	var proxyRegistry *ProxyRegistry
-	if len(openaiCfg.Endpoints) > 0 {
-		proxyRegistry = NewProxyRegistry(openaiCfg)
+	if len(cfg.OpenAI.Endpoints) > 0 {
+		proxyRegistry = NewProxyRegistry(cfg.OpenAI)
 	}
 	sessions.SetProxyRegistry(proxyRegistry)
 
-	// Llama wins on collision in the router's dispatch order; an OpenAI
-	// endpoint sharing a llama alias would be unreachable via the router.
-	if llamaManager != nil && proxyRegistry != nil {
-		for _, ep := range openaiCfg.Endpoints {
-			if llamaManager.HasAlias(ep.Name) {
-				slog.Warn("router: openai endpoint name collides with llama alias; endpoint will be unreachable via the router", "name", ep.Name)
-			}
-		}
+	// Slice order is the router's dispatch priority: llama wins alias
+	// collisions with mlx.
+	var managers []*ServerManager
+	if llamaManager != nil {
+		managers = append(managers, llamaManager)
 	}
+	if mlxManager != nil {
+		managers = append(managers, mlxManager)
+	}
+	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
 
 	var routerAddr string
 	if *routerPort != "" {
 		routerAddr = ":" + *routerPort
 	}
-	relayRouter := StartRelayRouter(routerAddr, llamaManager, proxyRegistry)
+	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry)
 	sessions.SetRouterPort(*routerPort)
-	terminalMgr.SetPiOverlay(piCfg, sessions.piOverlayInputs)
-
+	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
 
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms, sessions)
-	RegisterModelRoutes(mux, *ollamaURL, openaiCfg, llamaManager, piCfg, sessions.piOverlayInputs)
+	RegisterModelRoutes(mux, *ollamaURL, cfg.OpenAI, llamaManager, mlxManager, cfg.Pi, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
-	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, startTime)
+	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, mlxManager, startTime)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Build the handler chain. recoverMiddleware sits closest to the mux so it
@@ -253,16 +263,52 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Server stopped — clean up background resources.
+	// Server stopped — clean up background resources. Managers stop in
+	// parallel so shutdown is bounded by one SIGTERM grace period, not one
+	// per manager.
 	sessions.StopAll()
 	if relayRouter != nil {
 		relayRouter.Close()
 	}
-	if llamaManager != nil {
-		llamaManager.StopAll()
+	var wg sync.WaitGroup
+	for _, mgr := range managers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mgr.StopAll()
+		}()
 	}
+	wg.Wait()
 	terminalMgr.StopAll()
 	slog.Info("shutdown complete")
+}
+
+// warnAliasShadowing logs startup warnings for names the relay-router's
+// dispatch order makes unreachable. Bare-alias collisions between managers
+// are won by the earlier (higher-priority) manager. OpenAI endpoint models
+// are only addressable as "{endpoint}/{id}", so an endpoint name equal to a
+// bare alias collides with nothing — only an alias that itself contains "/"
+// can intercept an endpoint model id.
+func warnAliasShadowing(managers []*ServerManager, endpoints []OpenAIEndpoint) {
+	for i, mgr := range managers {
+		for _, alias := range mgr.Aliases() {
+			for _, earlier := range managers[:i] {
+				if earlier.HasAlias(alias) {
+					slog.Warn("router: alias shadowed by a higher-priority manager; model unreachable via the router",
+						"alias", alias, "shadowed", mgr.profile.Kind, "wins", earlier.profile.Kind)
+					break
+				}
+			}
+			if prefix, _, ok := strings.Cut(alias, "/"); ok {
+				for _, ep := range endpoints {
+					if ep.Name == prefix {
+						slog.Warn("router: managed alias would intercept an openai endpoint model id of the same name",
+							"alias", alias, "kind", mgr.profile.Kind, "endpoint", ep.Name)
+					}
+				}
+			}
+		}
+	}
 }
 
 func envOrDefault(key, fallback string) string {
@@ -271,4 +317,3 @@ func envOrDefault(key, fallback string) string {
 	}
 	return fallback
 }
-

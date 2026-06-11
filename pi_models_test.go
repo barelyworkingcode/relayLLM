@@ -90,7 +90,7 @@ func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayRouter(t *testing.T) {
 	}
 	inputs := PiOverlayInputs{
 		RouterPort: "8180",
-		LlamaModels: []LlamaModelConfig{
+		ServerModels: []ServerModelConfig{
 			{Alias: "Qwen3.6 MoE 35"},
 			{Alias: "Qwen3.6 27B Q4"},
 		},
@@ -128,10 +128,10 @@ func TestPiProviderFromValue(t *testing.T) {
 		"pi/anthropic/claude-haiku":      "anthropic",
 		"pi/llama-cpp/Qwen3.6 MoE 35":    "llama-cpp",
 		"pi/relay-router/Qwen3.6 MoE 35": "relay-router",
-		"":            "",
-		"haiku":       "",
-		"pi/":         "",
-		"pi/onlyprov": "", // no '/' after provider
+		"":                               "",
+		"haiku":                          "",
+		"pi/":                            "",
+		"pi/onlyprov":                    "", // no '/' after provider
 	}
 	for in, want := range cases {
 		if got := piProviderFromValue(in); got != want {

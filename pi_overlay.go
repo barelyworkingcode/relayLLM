@@ -15,10 +15,11 @@ import (
 // Pi's ModelRegistry treats providers without an explicit `models` array as
 // override-only (no /v1/models auto-discovery), so RouterModels must be
 // snapshotted from the router's currently-routable set at spawn time —
-// llama aliases bare, OpenAI endpoint models prefixed with the endpoint name.
+// managed-server aliases bare (llama + mlx), OpenAI endpoint models prefixed
+// with the endpoint name.
 type PiOverlayInputs struct {
-	LlamaModels  []LlamaModelConfig // consumed by pi_models.go to synthesize Eve picker entries
-	RouterPort   string             // empty disables the relay-router provider entry
+	ServerModels []ServerModelConfig // consumed by pi_models.go to synthesize Eve picker entries
+	RouterPort   string              // empty disables the relay-router provider entry
 	RouterModels []string
 }
 
@@ -378,4 +379,3 @@ func appendUnique(s []string, v string) []string {
 	}
 	return append(s, v)
 }
-

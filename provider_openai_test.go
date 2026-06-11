@@ -339,7 +339,31 @@ func TestDeriveProviderType_OpenAIPrefix(t *testing.T) {
 		{"/leading", "ollama"}, // malformed
 	}
 	for _, tc := range cases {
-		got := deriveProviderType(tc.model, cfg, nil)
+		got := deriveProviderType(tc.model, cfg, nil, nil)
+		if got != tc.want {
+			t.Errorf("deriveProviderType(%q) = %q, want %q", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestDeriveProviderType_MlxAlias(t *testing.T) {
+	cfg := &OpenAIConfig{
+		Endpoints: []OpenAIEndpoint{
+			{Name: "lmstudio", BaseURL: "http://x/v1"},
+		},
+	}
+	mlxCfg := &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "foo"}},
+	}
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"mlx/foo", "mlx"},     // configured mlx alias
+		{"mlx/nope", "ollama"}, // unknown mlx alias with non-nil config → falls through
+	}
+	for _, tc := range cases {
+		got := deriveProviderType(tc.model, cfg, nil, mlxCfg)
 		if got != tc.want {
 			t.Errorf("deriveProviderType(%q) = %q, want %q", tc.model, got, tc.want)
 		}

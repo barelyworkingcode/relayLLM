@@ -177,6 +177,7 @@ func ProviderSettings() map[string][]SettingField {
 		"ollama": ollamaFields,
 		"openai": openaiFields,
 		"llama":  openaiFields,
+		"mlx":    openaiFields,
 		"pi":     piFields,
 	}
 }

@@ -88,7 +88,8 @@ type SessionManager struct {
 	hookToken    string
 	ollamaURL    string
 	openaiConfig *OpenAIConfig
-	llamaManager *LlamaServerManager
+	llamaManager *ServerManager
+	mlxManager   *ServerManager
 	dataDir      string
 	piConfig     *PiConfig
 
@@ -155,8 +156,14 @@ func (m *SessionManager) SetOpenAIConfig(cfg *OpenAIConfig) {
 
 // SetLlamaManager injects the llama-server process manager. Pass nil to
 // disable the llama.cpp provider.
-func (m *SessionManager) SetLlamaManager(mgr *LlamaServerManager) {
+func (m *SessionManager) SetLlamaManager(mgr *ServerManager) {
 	m.llamaManager = mgr
+}
+
+// SetMlxManager injects the mlx-serve process manager. Pass nil to
+// disable the MLX provider.
+func (m *SessionManager) SetMlxManager(mgr *ServerManager) {
+	m.mlxManager = mgr
 }
 
 // SetDataDir records relayLLM's data directory. The pi provider stores its
@@ -186,9 +193,22 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	inputs := PiOverlayInputs{
 		RouterPort: m.routerPort,
 	}
-	if m.llamaManager != nil && m.llamaManager.config != nil {
-		inputs.LlamaModels = m.llamaManager.config.Models
-		for _, cfg := range m.llamaManager.config.Models {
+	// Copy managed models into a fresh slice — never append onto a manager's
+	// config-owned slice (its spare capacity is shared; appending there races
+	// concurrent callers). Aliases shadowed by a higher-priority manager
+	// (router dispatch: llama before mlx) are skipped so the overlay only
+	// advertises what the router actually serves.
+	seen := make(map[string]bool)
+	for _, mgr := range []*ServerManager{m.llamaManager, m.mlxManager} {
+		if mgr == nil || mgr.config == nil {
+			continue
+		}
+		for _, cfg := range mgr.config.Models {
+			if seen[cfg.Alias] {
+				continue
+			}
+			seen[cfg.Alias] = true
+			inputs.ServerModels = append(inputs.ServerModels, cfg)
 			inputs.RouterModels = append(inputs.RouterModels, cfg.Alias)
 		}
 	}
@@ -207,13 +227,22 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	return inputs
 }
 
-// llamaConfig returns the LlamaConfig from the manager, or nil if no
+// llamaConfig returns the ServerConfig from the llama manager, or nil if no
 // manager is configured. Used by deriveProviderType for routing.
-func (m *SessionManager) llamaConfig() *LlamaConfig {
+func (m *SessionManager) llamaConfig() *ServerConfig {
 	if m.llamaManager == nil {
 		return nil
 	}
 	return m.llamaManager.config
+}
+
+// mlxConfig returns the ServerConfig from the mlx manager, or nil if no
+// manager is configured. Used by deriveProviderType for routing.
+func (m *SessionManager) mlxConfig() *ServerConfig {
+	if m.mlxManager == nil {
+		return nil
+	}
+	return m.mlxManager.config
 }
 
 func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
@@ -230,7 +259,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	}
 
 	if providerType == "" {
-		providerType = deriveProviderType(model, m.openaiConfig, m.llamaConfig())
+		providerType = deriveProviderType(model, m.openaiConfig, m.llamaConfig(), m.mlxConfig())
 	}
 
 	// For non-Claude providers, prepend CLAUDE.md content to system prompt if requested.
@@ -302,8 +331,10 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 // Claude model aliases (haiku/sonnet/opus) route to the Claude subprocess
 // provider. A model of the form "{endpoint}/{model-id}" where {endpoint} is
 // a configured OpenAI-compatible endpoint routes to the generic openai
-// provider. Everything else falls through to Ollama's native provider.
-func deriveProviderType(model string, openaiCfg *OpenAIConfig, llamaCfg *LlamaConfig) string {
+// provider. "llama/{alias}" and "mlx/{alias}" route to their respective
+// managed-server providers. Everything else falls through to Ollama's native
+// provider.
+func deriveProviderType(model string, openaiCfg *OpenAIConfig, llamaCfg, mlxCfg *ServerConfig) string {
 	switch model {
 	case "haiku", "sonnet", "opus":
 		return "claude"
@@ -315,6 +346,9 @@ func deriveProviderType(model string, openaiCfg *OpenAIConfig, llamaCfg *LlamaCo
 		prefix := model[:idx]
 		if prefix == "llama" && llamaCfg.FindByAlias(model[idx+1:]) != nil {
 			return "llama"
+		}
+		if prefix == "mlx" && mlxCfg.FindByAlias(model[idx+1:]) != nil {
+			return "mlx"
 		}
 		if openaiCfg.Find(prefix) != nil {
 			return "openai"
@@ -356,17 +390,21 @@ func (m *SessionManager) initProvider(session *Session) error {
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
 		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
-	case "llama":
-		_, modelID, ok := strings.Cut(session.Model, "/")
-		if !ok || modelID == "" {
-			return fmt.Errorf("llama: model %q missing llama/ prefix", session.Model)
+	case "llama", "mlx":
+		mgr, kind := m.llamaManager, "llama"
+		if session.ProviderType == "mlx" {
+			mgr, kind = m.mlxManager, "mlx"
 		}
-		if m.llamaManager == nil {
-			return fmt.Errorf("llama: manager not configured")
+		prefix, modelID, ok := strings.Cut(session.Model, "/")
+		if !ok || modelID == "" || prefix != kind {
+			return fmt.Errorf("%s: model %q must be %s/{alias}", kind, session.Model, kind)
 		}
-		endpoint, err := m.llamaManager.GetOrLaunch(modelID)
+		if mgr == nil {
+			return fmt.Errorf("%s: manager not configured", kind)
+		}
+		endpoint, err := mgr.GetOrLaunch(modelID)
 		if err != nil {
-			return fmt.Errorf("llama: %w", err)
+			return fmt.Errorf("%s: %w", kind, err)
 		}
 		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
 		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
