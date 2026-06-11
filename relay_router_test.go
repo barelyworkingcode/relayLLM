@@ -3,7 +3,7 @@ package main
 // Coverage for the unified OpenAI-compatible router (relay_router.go).
 // The router has been zero-tested. These tests pin:
 //
-//   - /v1/models aggregation (llama aliases + reachable endpoint models)
+//   - /v1/models aggregation (managed-server aliases + reachable endpoint models)
 //   - dispatch decisions on the request body's `model` field
 //   - llama-wins-on-collision policy
 //   - body rewriting (endpoint sees its bare upstream id, not "name/id")
@@ -12,9 +12,9 @@ package main
 //   - missing-API-key path
 //   - health endpoint
 //
-// llama branch test asserts the routing decision was made by observing the
+// Managed-server branch test asserts the routing decision was made by observing the
 // failure mode when GetOrLaunch can't find a binary — we don't spawn a real
-// llama-server here.
+// server here.
 
 import (
 	"bytes"
@@ -101,10 +101,10 @@ func TestRouter_ListModels_EmptyWithNilBackends(t *testing.T) {
 }
 
 func TestRouter_ListModels_IncludesLlamaAliases(t *testing.T) {
-	mgr := NewLlamaServerManager(&LlamaConfig{
-		Models: []LlamaModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}, "")
-	r := NewRelayRouter(":0", mgr, nil)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -197,24 +197,24 @@ func TestRouter_Proxy_UnknownModel_Returns400(t *testing.T) {
 	}
 }
 
-func TestRouter_Proxy_LlamaAlias_RoutesToLlamaBranch(t *testing.T) {
+func TestRouter_Proxy_LlamaAlias_RoutesToManagedBranch(t *testing.T) {
 	// Manager has the alias but no real binary → GetOrLaunch fails → 502.
-	// The 502 is the test signal: the router DID pick the llama branch and
+	// The 502 is the test signal: the router DID pick the managed branch and
 	// not the endpoint branch (which would 400). We're testing the dispatch
 	// decision, not the lifecycle.
-	mgr := NewLlamaServerManager(&LlamaConfig{
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		BinaryPath: "/nonexistent/llama-server-binary-for-test",
-		Models:     []LlamaModelConfig{{Alias: "test-alias", Args: map[string]any{"model": "/fake"}}},
+		Models:     []ServerModelConfig{{Alias: "test-alias", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", mgr, nil)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
 	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"test-alias"}`))
 	if resp.StatusCode != http.StatusBadGateway {
 		body, _ := io.ReadAll(resp.Body)
-		t.Errorf("expected 502 from failed llama launch; got %d body=%s", resp.StatusCode, string(body))
+		t.Errorf("expected 502 from failed server launch; got %d body=%s", resp.StatusCode, string(body))
 	}
 }
 
@@ -292,12 +292,12 @@ func TestRouter_Proxy_LlamaWinsOnCollision(t *testing.T) {
 	registry := NewProxyRegistry(cfg)
 	registry.Snapshot(context.Background())
 
-	mgr := NewLlamaServerManager(&LlamaConfig{
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		BinaryPath: "/nonexistent/binary",
-		Models:     []LlamaModelConfig{{Alias: "qwen", Args: map[string]any{"model": "/fake"}}},
+		Models:     []ServerModelConfig{{Alias: "qwen", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", mgr, registry)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, registry)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -311,6 +311,35 @@ func TestRouter_Proxy_LlamaWinsOnCollision(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 502 (llama branch fail); got %d body=%s — collision policy may have broken", resp.StatusCode, string(body))
+	}
+}
+
+func TestRouter_Proxy_LlamaWinsOverMlxCollision(t *testing.T) {
+	// Both llama and mlx managers have the same alias. Llama must win because
+	// it's first in the managers slice. We assert by triggering the llama
+	// branch's failure mode (502, no binary).
+	llamaMgr := NewServerManager(llamaProfile, &ServerConfig{
+		BinaryPath: "/nonexistent/binary",
+		Models:     []ServerModelConfig{{Alias: "shared", Args: map[string]any{"model": "/fake"}}},
+	}, "")
+	mlxMgr := NewServerManager(mlxProfile, &ServerConfig{
+		BinaryPath: "/nonexistent/mlx-serve",
+		Models:     []ServerModelConfig{{Alias: "shared", Args: map[string]any{"model": "/fake"}}},
+	}, "")
+
+	r := NewRelayRouter(":0", []*ServerManager{llamaMgr, mlxMgr}, nil)
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"shared"}`))
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected 502 (llama branch fail); got %d body=%s — llama-should-win policy may have broken", resp.StatusCode, string(body))
+	}
+	// Both managers 502 with a missing binary, so the status code alone can't
+	// detect a priority inversion — the error's kind prefix can.
+	if !strings.Contains(string(body), "llama:") {
+		t.Errorf("expected llama-branch error (llama wins collision); got body=%s", string(body))
 	}
 }
 
@@ -378,4 +407,3 @@ func newFakeOpenAIUpstream(t *testing.T, modelIDs []string) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
-

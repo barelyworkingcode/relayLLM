@@ -11,13 +11,16 @@ import (
 	"github.com/tidwall/jsonc"
 )
 
-// relayConfig is the unified settings.json structure. Each top-level key is
-// optional; missing sections produce empty (non-nil) configs.
-type relayConfig struct {
-	OpenAI      *OpenAIConfig               `json:"openai,omitempty"`
-	LlamaServer *LlamaConfig                `json:"llama-server,omitempty"`
-	Pi          *PiConfig                   `json:"pi,omitempty"`
-	PTY         map[string]TerminalTemplate `json:"pty,omitempty"`
+// LoadedConfig bundles every section LoadConfig can produce. The config
+// sections are non-nil after a successful load (empty configs, not nil);
+// PTY is the raw settings.json `pty` section and may be nil when absent —
+// seeding happens in TemplateStore.Load, not here.
+type LoadedConfig struct {
+	OpenAI *OpenAIConfig
+	Llama  *ServerConfig
+	Mlx    *ServerConfig
+	Pi     *PiConfig
+	PTY    map[string]TerminalTemplate
 }
 
 // PiConfig configures the pi.dev coding-agent provider. All fields optional.
@@ -93,33 +96,32 @@ func (o PiProjectOverlay) Enabled() bool {
 // The openaiConfigOverride flag (--openai-config) bypasses all of the above
 // for the OpenAI section and reads that file directly.
 //
-// The returned pty map is the raw settings.json `pty` section (may be nil if
-// absent). Seeding happens in TemplateStore.Load, not here.
-func LoadConfig(dataDir string, openaiConfigOverride string) (*OpenAIConfig, *LlamaConfig, *PiConfig, map[string]TerminalTemplate, error) {
+// The returned LoadedConfig bundles every section; all fields are non-nil.
+func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, error) {
 	configPath := filepath.Join(dataDir, "settings.json")
 
 	// Try unified settings.json first.
 	data, err := os.ReadFile(configPath)
 	if err == nil {
-		openaiCfg, llamaCfg, piCfg, ptyCfg, err := parseUnifiedConfig(data, configPath)
+		cfg, err := parseUnifiedConfig(data, configPath)
 		if err != nil {
-			return nil, nil, nil, nil, err // parse error — don't silently fall back
+			return nil, err // parse error — don't silently fall back
 		}
 
 		// --openai-config flag overrides the unified config's openai section.
 		if openaiConfigOverride != "" {
 			if override, err := loadOpenAIConfigFile(openaiConfigOverride); err == nil {
-				openaiCfg = override
+				cfg.OpenAI = override
 			} else if !os.IsNotExist(err) {
-				return nil, nil, nil, nil, err
+				return nil, err
 			}
 		}
 
 		slog.Info("loaded settings.json", "path", configPath)
-		return openaiCfg, llamaCfg, piCfg, ptyCfg, nil
+		return cfg, nil
 	}
 	if !os.IsNotExist(err) {
-		return nil, nil, nil, nil, fmt.Errorf("read %s: %w", configPath, err)
+		return nil, fmt.Errorf("read %s: %w", configPath, err)
 	}
 
 	// settings.json not found — fall back to separate files + env vars.
@@ -129,31 +131,37 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*OpenAIConfig, *Ll
 	}
 	openaiCfg, err := LoadOpenAIConfig(openaiPath)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, err
 	}
 
 	llamaCfg, err := loadLlamaConfigFile(filepath.Join(dataDir, "llama_models.json"))
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, err
 	}
 
-	return openaiCfg, llamaCfg, &PiConfig{}, nil, nil
+	return &LoadedConfig{
+		OpenAI: openaiCfg,
+		Llama:  llamaCfg,
+		Mlx:    &ServerConfig{},
+		Pi:     &PiConfig{},
+	}, nil
 }
 
-// parseUnifiedConfig parses the unified settings.json into separate configs.
+// parseUnifiedConfig parses the unified settings.json into a LoadedConfig.
 // Strips JSONC comments (// and /* */) before unmarshalling so users can
 // toggle sections with comment blocks. Comments don't survive writes.
-func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig, *PiConfig, map[string]TerminalTemplate, error) {
-	// Use a raw intermediate so llama-server's model entries stay as
-	// map[string]any for the generic CLI flag translation.
+func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
+	// Use a raw intermediate so llama-server's and mlx-serve's model entries
+	// stay as map[string]any for the generic CLI flag translation.
 	var raw struct {
 		OpenAI      *OpenAIConfig               `json:"openai"`
 		LlamaServer *json.RawMessage            `json:"llama-server"`
+		MlxServer   *json.RawMessage            `json:"mlx-serve"`
 		Pi          *PiConfig                   `json:"pi"`
 		PTY         map[string]TerminalTemplate `json:"pty"`
 	}
 	if err := json.Unmarshal(jsonc.ToJSON(data), &raw); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("parse %s: %w", source, err)
+		return nil, fmt.Errorf("parse %s: %w", source, err)
 	}
 
 	openaiCfg := &OpenAIConfig{}
@@ -162,13 +170,23 @@ func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig
 		normalizeOpenAI(openaiCfg)
 	}
 
-	llamaCfg := &LlamaConfig{}
+	llamaCfg := &ServerConfig{}
 	if raw.LlamaServer != nil {
 		if err := json.Unmarshal(*raw.LlamaServer, llamaCfg); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("parse %s llama-server: %w", source, err)
+			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
 		}
-		if err := parseLlamaRawModels(llamaCfg, source); err != nil {
-			return nil, nil, nil, nil, err
+		if err := parseServerRawModels(llamaCfg, source); err != nil {
+			return nil, err
+		}
+	}
+
+	mlxCfg := &ServerConfig{}
+	if raw.MlxServer != nil {
+		if err := json.Unmarshal(*raw.MlxServer, mlxCfg); err != nil {
+			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
+		}
+		if err := parseServerRawModels(mlxCfg, source); err != nil {
+			return nil, err
 		}
 	}
 
@@ -178,7 +196,13 @@ func parseUnifiedConfig(data []byte, source string) (*OpenAIConfig, *LlamaConfig
 		piCfg.BinaryPath = expandHome(piCfg.BinaryPath)
 	}
 
-	return openaiCfg, llamaCfg, piCfg, raw.PTY, nil
+	return &LoadedConfig{
+		OpenAI: openaiCfg,
+		Llama:  llamaCfg,
+		Mlx:    mlxCfg,
+		Pi:     piCfg,
+		PTY:    raw.PTY,
+	}, nil
 }
 
 // readJSONCFile reads path and unmarshals into out, stripping JSONC comments
@@ -208,15 +232,15 @@ func loadOpenAIConfigFile(path string) (*OpenAIConfig, error) {
 }
 
 // loadLlamaConfigFile reads a standalone llama_models.json file.
-func loadLlamaConfigFile(path string) (*LlamaConfig, error) {
-	var cfg LlamaConfig
+func loadLlamaConfigFile(path string) (*ServerConfig, error) {
+	var cfg ServerConfig
 	if err := readJSONCFile(path, &cfg); err != nil {
 		if os.IsNotExist(err) {
-			return &LlamaConfig{}, nil
+			return &ServerConfig{}, nil
 		}
 		return nil, err
 	}
-	if err := parseLlamaRawModels(&cfg, path); err != nil {
+	if err := parseServerRawModels(&cfg, path); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

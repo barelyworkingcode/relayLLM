@@ -86,6 +86,7 @@ func buildManifest(dataDir string) Manifest {
 			"/api/generated/",
 			"/api/status",
 			"/api/llama/",
+			"/api/mlx/",
 			"/ws",
 		},
 		Status: &StatusDecl{
@@ -98,6 +99,13 @@ func buildManifest(dataDir string) Manifest {
 				Method:       "DELETE",
 				PathTemplate: "/api/llama/instances/{alias}",
 				ForEach:      "instances",
+			},
+			{
+				ID:           "stop-mlx",
+				Label:        "Stop",
+				Method:       "DELETE",
+				PathTemplate: "/api/mlx/instances/{alias}",
+				ForEach:      "mlxInstances",
 			},
 			{
 				ID:           "stop-terminal",
@@ -119,9 +127,10 @@ func buildManifest(dataDir string) Manifest {
 }
 
 // settingsSchema describes the on-disk shape of settings.json so relay can
-// render a nested editor. Mirrors relayConfig (config.go): openai, llama-server,
-// pi, and the pty terminal-template map. Help text replaces the JSONC comments
-// the file used to carry (they don't survive a form save).
+// render a nested editor. Mirrors the sections parseUnifiedConfig (config.go)
+// reads: openai, llama-server, mlx-serve, pi, and the pty terminal-template
+// map. Help text replaces the JSONC comments the file used to carry (they
+// don't survive a form save).
 func settingsSchema() []FieldDecl {
 	regen := []string{AutoRegenAlways, "skipIfExists", AutoRegenNever}
 	return []FieldDecl{
@@ -151,6 +160,21 @@ func settingsSchema() []FieldDecl {
 						{ID: "alias", Label: "Alias", Type: "text", Required: true, Help: "Routing name (llama/{alias})."},
 						{ID: "flags", Label: "llama-server flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
 							Help: `Each key becomes --key. true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. model, ctx-size, n-gpu-layers, flash-attn).`},
+					},
+				}},
+			},
+		},
+		{
+			ID: "mlx-serve", Label: "MLX server (mlx-serve)", Type: "object",
+			Fields: []FieldDecl{
+				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "~/.local/mlx-serve/mlx-serve"},
+				{ID: "modelDir", Label: "Model directory", Type: "text", Help: "Base directory for relative model paths."},
+				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "9400", Help: "First port; each model instance increments from here. Blank uses the 9400 default."},
+				{ID: "models", Label: "Models", Type: "array", Item: &FieldDecl{
+					Type: "object", Label: "model", Fields: []FieldDecl{
+						{ID: "alias", Label: "Alias", Type: "text", Required: true, Help: "Routing name (mlx/{alias})."},
+						{ID: "flags", Label: "mlx-serve flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
+							Help: `Each key becomes --key. model = path to the MLX model DIRECTORY. true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. ctx-size, temp, kv-quant, max-tokens).`},
 					},
 				}},
 			},

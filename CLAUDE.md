@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-enhanced service.
+Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp + MLX managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-enhanced service.
 
 Under relay, relayLLM registers a [service manifest](../relay/plans/service-manifest-spec.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
 
@@ -21,8 +21,8 @@ main.go                   Entry point, flag parsing, server wiring, manifest reg
 manifest.go               Service manifest declaration + maybeRegisterManifest
 relay_bridge_client.go    Bridge socket transport (sendBridgeRequest helper) +
                           PtyEnv resolution. RELAY_BRIDGE_SOCKET env var detection.
-api_status.go             GET /api/status, GET /api/llama/instances,
-                          DELETE /api/llama/instances/{alias}
+api_status.go             GET /api/status, GET+DELETE /api/llama/instances[/{alias}],
+                          GET+DELETE /api/mlx/instances[/{alias}]
 project.go                Project CRUD + JSON file storage
 session.go                Session lifecycle management
 session_store.go          Session persistence to disk
@@ -35,10 +35,11 @@ provider_openai.go        OpenAI-compatible HTTP provider (SSE streaming)
 provider_chat_base.go     Base provider: tool-calling loop, MCP + built-in tool dispatch
 provider_settings.go      Per-provider settings schema for Eve UI
 response_collector.go     Headless response accumulation for HTTP clients
-config.go                 Unified config loader (settings.json → OpenAI + llama-server configs)
-llama_manager.go          llama-server process manager (launch, health check, port allocation,
-                          per-alias stop, instance listing)
-relay_router.go           Unified OpenAI-compatible router fronting llama-server + OpenAI endpoints
+config.go                 Unified config loader (settings.json → OpenAI + llama-server + mlx-serve configs)
+server_manager.go         Profile-driven managed-server process manager (launch, health check,
+                          port allocation, per-alias stop, instance listing). One ServerManager
+                          per profile: llama-server (llamaProfile) + mlx-serve (mlxProfile).
+relay_router.go           Unified OpenAI-compatible router fronting managed servers + OpenAI endpoints
 proxy_registry.go         Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
 comfyui_client.go         ComfyUI HTTP client (queue, poll, fetch, workflow builder)
 builtin_tools.go          Built-in tool registry (generate_image) + dynamic schema
@@ -61,22 +62,23 @@ cmd/hook/                 Compiled PreToolUse hook binary
 - **pi (pi.dev coding agent)**: Persistent process spawned as `pi --mode rpc --provider <upstream> --model <id> --session-dir {dataDir}/pi-sessions [--thinking <level>] [--session <piSessionId>]`. Model identifier convention: `pi/<provider>/<modelId>` (e.g. `pi/anthropic/claude-sonnet-4-20250514`). Resume via `--session <piSessionId>` — pi owns its session JSONL under `{dataDir}/pi-sessions/`. No PreToolUse hook: pi runs in its no-permission-popups default and auto-executes tools; `CapabilitiesForProvider("pi")` therefore omits `SupportsPermissions`. Auth (API keys, OAuth tokens) is inherited from the user's environment / `~/.pi/agent/auth.json`. `PI_OFFLINE=1` + `PI_SKIP_VERSION_CHECK=1` are set at spawn to suppress pi's startup network calls. Pi's RPC event stream (`message_update` with `assistantMessageEvent`, `tool_execution_*`, `agent_end`) is canonicalized into the Claude `content_block_start`/`delta`/`stop` + `result` envelope inside `provider_pi.go:translate`, so Eve renders pi sessions with the existing Claude renderer. Mid-session capabilities: `PUT /api/sessions/:id/model` (sends `set_model` RPC), `PUT /api/sessions/:id/thinking-level` (sends `set_thinking_level`). `StopGeneration` uses pi's in-band `abort` RPC instead of process kill, so the subprocess survives stop/resume cycles. Per-session settings: `thinkingLevel` (off/minimal/low/medium/high/xhigh).
 - **Ollama**: HTTP client with NDJSON streaming. Base URL via `--ollama-url` / `OLLAMA_URL` (default `http://localhost:11434`). Sends full conversation history per request; relies on Ollama's automatic KV cache prefix reuse. Per-session settings: `temperature`, `top_p`, `top_k`, `min_p`, `think` (bool), `num_ctx`. Explicitly sends `think: false` to suppress built-in reasoning on thinking models (e.g. Gemma 4). Supports image attachments via base64.
 - **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `settings.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
-- **llama.cpp**: Managed llama-server processes via `LlamaServerManager`. Configured via `settings.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances across sessions. Communicates via OpenAI-compatible API (reuses `OpenAIChatTransport`). Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias` which is the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel. Per-session settings: same as OpenAI (temperature, top_p, top_k, min_p, etc.) — override server-level defaults set in the config.
+- **llama.cpp**: Managed llama-server processes via `ServerManager` (`llamaProfile`). Configured via `settings.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances across sessions. Communicates via OpenAI-compatible API (reuses `OpenAIChatTransport`). Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias` which is the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel. Per-session settings: same as OpenAI (temperature, top_p, top_k, min_p, etc.) — override server-level defaults set in the config.
+- **MLX (mlx-serve)**: Managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes via `ServerManager` (`mlxProfile`) — native Zig + mlx-c, no Python. Same shape as llama.cpp in every way: `settings.json` `mlx-serve` section (identical schema to `llama-server`), model selection `mlx/{alias}`, on-demand launch + `/health` poll + instance reuse, OpenAI transport. Differences: the `model` config key is an **MLX model directory** (e.g. an `mlx-community/*` HF snapshot), the manager always appends `--serve`, base port defaults to 9400, and binary resolution is `--mlx-serve-path` / `MLX_SERVE_PATH` / config `binaryPath` / `mlx-serve` on PATH. Useful per-model flags: `ctx-size`, `temp`, `max-tokens`, `kv-quant`, `reasoning-budget`, `no-vision`. See `docs/decisions/007-profile-driven-server-manager.md`.
 
 ## Relay-router (`relay_router.go`)
 
 Optional unified OpenAI-compatible router (`--router-port` / `RELAY_ROUTER_PORT`). Single TCP listener that aggregates every locally-routable model behind one endpoint:
 
-- `GET /v1/models` — lists llama-server aliases (bare, e.g. `qwen3-8b`) plus every reachable OpenAI-endpoint model prefixed with the endpoint name (e.g. `omlx/Qwen3.5-27B`).
+- `GET /v1/models` — lists managed-server aliases (bare, e.g. `qwen3-8b` — llama-server and mlx-serve alike) plus every reachable OpenAI-endpoint model prefixed with the endpoint name (e.g. `omlx/Qwen3.5-27B`).
 - `GET /health` — liveness.
 - Everything else — dispatched by reading the request body's `model` field:
-  - If the model matches a configured llama alias, `GetOrLaunch()` brings up the right llama-server and the request is reverse-proxied to it (SSE flushed via `FlushInterval: -1`).
-  - Otherwise the model is parsed as `endpoint.Name/upstreamID`; the registry resolves the endpoint, the body's `model` field is rewritten to bare `upstreamID`, the inbound `Authorization` is replaced with the endpoint's API key, and the request is reverse-proxied to the endpoint's baseURL. Llama aliases win on collision with an endpoint name (logged at startup).
+  - If the model matches a configured managed-server alias, `GetOrLaunch()` brings up the right server and the request is reverse-proxied to it (SSE flushed via `FlushInterval: -1`). Managers are checked in priority order — llama first, then mlx — so llama wins alias collisions (logged at startup; shadowed aliases are also dropped from `/v1/models` and the pi overlay).
+  - Otherwise the model is parsed as `endpoint.Name/upstreamID`; the registry resolves the endpoint, the body's `model` field is rewritten to bare `upstreamID`, the inbound `Authorization` is replaced with the endpoint's API key, and the request is reverse-proxied to the endpoint's baseURL. Bare managed aliases and `endpoint.Name/id` model ids occupy distinct namespaces, so an endpoint name equal to a managed alias collides with nothing; only an alias that itself contains `/` can intercept an endpoint model id (warned at startup).
   - Unknown / not-currently-online models 400.
 
 Reachability of OpenAI endpoints is tracked by `ProxyRegistry` (`proxy_registry.go`) with a 15 s natural-expiry TTL — no background goroutine. The first `/v1/models` request after expiry triggers parallel probes (single-flighted per endpoint) of upstream `/v1/models`. Offline endpoints disappear from the router's listing until the next probe succeeds; rejecting routing into a known-down endpoint avoids surfacing confusing upstream errors to clients. Probe results — including failures — re-stamp `LastChecked = now`, so a dead upstream isn't re-probed every request.
 
-External clients use either the bare llama alias (`"model": "qwen3-8b"`) or the endpoint-prefixed id (`"model": "omlx/Qwen3.5-27B"`) — no `llama/` or `openai/` prefix.
+External clients use either the bare managed alias (`"model": "qwen3-8b"`) or the endpoint-prefixed id (`"model": "omlx/Qwen3.5-27B"`) — no `llama/`, `mlx/`, or `openai/` prefix.
 
 ## Built-in Tools
 
@@ -99,15 +101,17 @@ Unix socket at `--socket` (defaults to `{data-dir}/relayllm.sock`). WebSocket at
 
 ### HTTP Endpoints
 ```
-GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp)
+GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp + MLX)
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
 DELETE         /api/sessions/:id   — end session
 PUT            /api/sessions/:id/model           — pi only: mid-session model switch
 PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
-GET            /api/status         — runtime status (uptime + sessions + terminals + embedded `instances` array). Drives relay's Service Inspector via the manifest; rows in `instances` feed the declared `stop-llama` action's `{alias}` placeholder.
+GET            /api/status         — runtime status (uptime + sessions + terminals + embedded `instances` + `mlxInstances` arrays). Drives relay's Service Inspector via the manifest; rows in `instances` / `mlxInstances` feed the declared `stop-llama` / `stop-mlx` actions' `{alias}` placeholder.
 GET            /api/llama/instances        — list running llama-server instances
 DELETE         /api/llama/instances/{alias} — stop a specific llama-server instance
+GET            /api/mlx/instances          — list running mlx-serve instances
+DELETE         /api/mlx/instances/{alias}  — stop a specific mlx-serve instance
 GET/POST       /api/terminal/templates     — list/create terminal templates
 GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
 GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
@@ -168,6 +172,16 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
         "temp": 0.6, "top-p": 0.95, "top-k": 20, "min-p": 0.0
       }]
     },
+    "mlx-serve": {
+      "binaryPath": "~/.local/mlx-serve/mlx-serve",
+      "modelDir": "~/models/",
+      "basePort": 9400,
+      "models": [{
+        "alias": "qwen3.5-4b-mlx",
+        "model": "mlx-community/Qwen3.5-4B-8bit",
+        "max-tokens": 8192, "temp": 0.7
+      }]
+    },
     "pi": {
       "binaryPath": "~/.npm-global/bin/pi",
       "extraArgs": ["--no-context-files"],
@@ -182,9 +196,9 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
     }
   }
   ```
-  Each llama-server model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths. `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` (or, for terminals, a non-empty `projectID`) injects a project-scoped `RELAY_PROJECT_TOKEN` env var, resolved just-in-time from relay's bridge — never the full-access service token; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. Skill *generation* is owned by relay (see relay ADR-004 + `docs/decisions/006-skill-regen-owned-by-relay.md`); relayLLM no longer regenerates SKILL.md. Skills load from the convention `<project>/.claude/skills`: the pi `--mode rpc` provider auto-appends `--skill <project>/.claude/skills` (skipped if `extraArgs` already contains `--skill`), and PTY templates reference `${PROJECT_PATH}/.claude/skills` in their args (e.g. the `pidev` template: `"args": ["--skill", "${PROJECT_PATH}/.claude/skills"]`).
+  Each llama-server / mlx-serve model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths (for mlx-serve, `model` is an MLX model *directory*). `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` (or, for terminals, a non-empty `projectID`) injects a project-scoped `RELAY_PROJECT_TOKEN` env var, resolved just-in-time from relay's bridge — never the full-access service token; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. Skill *generation* is owned by relay (see relay ADR-004 + `docs/decisions/006-skill-regen-owned-by-relay.md`); relayLLM no longer regenerates SKILL.md. Skills load from the convention `<project>/.claude/skills`: the pi `--mode rpc` provider auto-appends `--skill <project>/.claude/skills` (skipped if `extraArgs` already contains `--skill`), and PTY templates reference `${PROJECT_PATH}/.claude/skills` in their args (e.g. the `pidev` template: `"args": ["--skill", "${PROJECT_PATH}/.claude/skills"]`).
 
-  **`projectOverlay`** (optional) writes a per-project `<projectDir>/.pi/` directory before each pi spawn (both `--mode rpc` and PTY `pi` templates) and sets `PI_CODING_AGENT_DIR` so pi reads from it. Pi's global `~/.pi/agent/` is never written to. Materialized files: `models.json` containing a single `relay-router` provider pointing at the `--router-port` listener, with its `models` array snapshotted from the router's currently-routable set at spawn time — llama-server aliases (bare) plus every reachable OpenAI endpoint model (prefixed `endpoint.Name/`). Pi's ModelRegistry treats providers with an empty `models` array as override-only, so the enumeration is required; the snapshot uses `ProxyRegistry.Snapshot()` and inherits its 15 s TTL. Set `--router-port` to enable this entry; otherwise relayLLM contributes nothing to pi's models.json and the user's global providers carry through unchanged. Also writes `settings.json` with `defaultProvider`/`defaultModel`/`defaultThinkingLevel` and a `skills` array (project `.claude/skills/` + `extraSkillDirs`); `auth.json` symlinked to `~/.pi/agent/auth.json` so credentials stay centrally managed (OAuth refresh writes through). Modes: `"never"` (default — feature off), `"always"` (rewrite on every spawn), `"skipIfExists"` (write missing files only). User's global `models.json` providers and `settings.json` keys are merged underneath by default (turn off via `excludeUserProviders`/`excludeUserSettings`). Set `authStrategy: "none"` if pi credentials are managed out-of-band. `gitignore: true` opt-in appends the overlay dir to the project's `.gitignore`. Fails closed at spawn if global `auth.json` is missing while symlink strategy is active — run `pi auth login` once globally first.
+  **`projectOverlay`** (optional) writes a per-project `<projectDir>/.pi/` directory before each pi spawn (both `--mode rpc` and PTY `pi` templates) and sets `PI_CODING_AGENT_DIR` so pi reads from it. Pi's global `~/.pi/agent/` is never written to. Materialized files: `models.json` containing a single `relay-router` provider pointing at the `--router-port` listener, with its `models` array snapshotted from the router's currently-routable set at spawn time — managed-server aliases (bare, llama + mlx) plus every reachable OpenAI endpoint model (prefixed `endpoint.Name/`). Pi's ModelRegistry treats providers with an empty `models` array as override-only, so the enumeration is required; the snapshot uses `ProxyRegistry.Snapshot()` and inherits its 15 s TTL. Set `--router-port` to enable this entry; otherwise relayLLM contributes nothing to pi's models.json and the user's global providers carry through unchanged. Also writes `settings.json` with `defaultProvider`/`defaultModel`/`defaultThinkingLevel` and a `skills` array (project `.claude/skills/` + `extraSkillDirs`); `auth.json` symlinked to `~/.pi/agent/auth.json` so credentials stay centrally managed (OAuth refresh writes through). Modes: `"never"` (default — feature off), `"always"` (rewrite on every spawn), `"skipIfExists"` (write missing files only). User's global `models.json` providers and `settings.json` keys are merged underneath by default (turn off via `excludeUserProviders`/`excludeUserSettings`). Set `authStrategy: "none"` if pi credentials are managed out-of-band. `gitignore: true` opt-in appends the overlay dir to the project's `.gitignore`. Fails closed at spawn if global `auth.json` is missing while symlink strategy is active — run `pi auth login` once globally first.
 - `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
 
 ## Build

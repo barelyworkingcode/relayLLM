@@ -11,22 +11,30 @@ import (
 	"net/url"
 )
 
-// RelayRouter aggregates llama-server aliases and reachable OpenAI endpoint
-// models behind one OpenAI-compatible listener. Dispatch is by the request
-// body's `model` field: bare alias → llama branch; `endpoint.Name/id` →
-// matching OpenAI upstream. Endpoints that fail their last probe drop out of
-// /v1/models and refuse routing until the next 15s TTL cycle.
+// RelayRouter aggregates managed-server aliases (llama.cpp, MLX, …) and
+// reachable OpenAI endpoint models behind one OpenAI-compatible listener.
+// Dispatch is by the request body's `model` field: bare alias → first
+// matching manager; `endpoint.Name/id` → matching OpenAI upstream.
+// Endpoints that fail their last probe drop out of /v1/models and refuse
+// routing until the next 15s TTL cycle.
 type RelayRouter struct {
-	manager  *LlamaServerManager
+	managers []*ServerManager
 	registry *ProxyRegistry
 	server   *http.Server
 }
 
-// NewRelayRouter creates a router on addr. Either backend may be nil to
-// disable that branch; passing both nil yields a router that 400s every
-// request — callers should guard at construction time.
-func NewRelayRouter(addr string, manager *LlamaServerManager, registry *ProxyRegistry) *RelayRouter {
-	p := &RelayRouter{manager: manager, registry: registry}
+// NewRelayRouter creates a router on addr. Nil entries in managers are
+// dropped; registry may be nil to disable the endpoint branch. A router with
+// no live backends 400s every request — StartRelayRouter guards against
+// starting one.
+func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry) *RelayRouter {
+	live := make([]*ServerManager, 0, len(managers))
+	for _, m := range managers {
+		if m != nil {
+			live = append(live, m)
+		}
+	}
+	p := &RelayRouter{managers: live, registry: registry}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
@@ -52,13 +60,20 @@ func (p *RelayRouter) Close() error {
 
 func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	var data []map[string]any
-	if p.manager != nil {
-		for _, alias := range p.manager.Aliases() {
+	// Dispatch gives an alias to the first manager that has it, so list each
+	// alias once, under the manager that actually serves it.
+	seen := make(map[string]bool)
+	for _, m := range p.managers {
+		for _, alias := range m.Aliases() {
+			if seen[alias] {
+				continue
+			}
+			seen[alias] = true
 			data = append(data, map[string]any{
 				"id":       alias,
 				"object":   "model",
 				"created":  0,
-				"owned_by": "llama.cpp",
+				"owned_by": m.profile.Group,
 			})
 		}
 	}
@@ -109,10 +124,13 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Llama wins on collision — see the startup warning in main.go.
-	if p.manager != nil && p.manager.HasAlias(envelope.Model) {
-		p.routeLlama(w, r, envelope.Model, body)
-		return
+	// Managed servers checked in priority order (llama first, then mlx).
+	// First HasAlias match wins — llama wins on collision.
+	for _, mgr := range p.managers {
+		if mgr.HasAlias(envelope.Model) {
+			p.routeManaged(w, r, mgr, envelope.Model, body)
+			return
+		}
 	}
 
 	if p.registry != nil {
@@ -128,17 +146,17 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("unknown model %q", envelope.Model)})
 }
 
-func (p *RelayRouter) routeLlama(w http.ResponseWriter, r *http.Request, alias string, body []byte) {
-	endpoint, err := p.manager.GetOrLaunch(alias)
+func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte) {
+	endpoint, err := mgr.GetOrLaunch(alias)
 	if err != nil {
-		slog.Warn("relay router: failed to launch llama-server", "model", alias, "error", err)
+		slog.Warn("relay router: failed to launch managed server", "kind", mgr.profile.Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	target, _ := url.Parse(endpoint.BaseURL)
-	newUpstreamProxy(target, body, endpoint.APIKey, "llama", alias).ServeHTTP(w, r)
+	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias).ServeHTTP(w, r)
 }
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
@@ -205,12 +223,16 @@ func rewriteModelField(body []byte, upstreamID string) ([]byte, error) {
 }
 
 // StartRelayRouter starts the router in a background goroutine. Returns nil
-// (no-op) when addr is empty or both backends are nil.
-func StartRelayRouter(addr string, manager *LlamaServerManager, registry *ProxyRegistry) *RelayRouter {
-	if addr == "" || (manager == nil && registry == nil) {
+// (no-op) when addr is empty or no live backend remains after dropping nil
+// managers.
+func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry) *RelayRouter {
+	if addr == "" {
 		return nil
 	}
-	p := NewRelayRouter(addr, manager, registry)
+	p := NewRelayRouter(addr, managers, registry)
+	if len(p.managers) == 0 && p.registry == nil {
+		return nil
+	}
 	go func() {
 		if err := p.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("relay router error", "error", err)

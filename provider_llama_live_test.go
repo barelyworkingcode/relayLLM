@@ -6,7 +6,7 @@ package main
 // surface fake-provider tests can't reach:
 //
 //   - SSE stream chunking and event ordering
-//   - LlamaServerManager lifecycle (launch, port allocation, graceful stop)
+//   - ServerManager lifecycle (launch, port allocation, graceful stop)
 //   - Real tool-call JSON quality (model emits valid function args)
 //   - Mid-stream stop / abort
 //
@@ -31,12 +31,12 @@ const liveTestAlias = "Qwen3.6 MoE 35"
 
 // Shared across all subtests so the model loads exactly once. nil if the
 // model isn't installed — every subtest checks and t.Skip's in that case.
-var liveLlama *LlamaServerManager
+var liveLlama *ServerManager
 
 func TestMain(m *testing.M) {
 	cfg := loadLiveLlamaConfig()
 	if cfg != nil {
-		liveLlama = NewLlamaServerManager(cfg, "")
+		liveLlama = NewServerManager(llamaProfile, cfg, "")
 	}
 	code := m.Run()
 	if liveLlama != nil {
@@ -46,17 +46,18 @@ func TestMain(m *testing.M) {
 }
 
 // loadLiveLlamaConfig reads the user's relayLLM settings.json and returns the
-// LlamaConfig if the required alias is present, else nil.
-func loadLiveLlamaConfig() *LlamaConfig {
+// ServerConfig if the required alias is present, else nil.
+func loadLiveLlamaConfig() *ServerConfig {
 	settingsPath := liveSettingsPath()
 	if settingsPath == "" {
 		return nil
 	}
 	dataDir := filepath.Dir(settingsPath)
-	_, llamaCfg, _, _, err := LoadConfig(dataDir, "")
-	if err != nil || llamaCfg == nil {
+	cfg, err := LoadConfig(dataDir, "")
+	if err != nil || cfg == nil {
 		return nil
 	}
+	llamaCfg := cfg.Llama
 	if llamaCfg.FindByAlias(liveTestAlias) == nil {
 		return nil
 	}
@@ -144,14 +145,14 @@ func TestLlamaLive_HTTPMessage_RoundTripsRealLLM(t *testing.T) {
 	requireLive(t)
 
 	// TestServer wires sessions + perms + HTTP routes against the real
-	// LlamaServerManager. The only fake here is the bearer-auth glue.
+	// ServerManager. The only fake here is the bearer-auth glue.
 	srv := newLiveTestServer(t)
 
 	sessionID := srv.CreateSession(map[string]interface{}{
 		"providerType": "llama",
 		"model":        "llama/" + liveTestAlias,
 		"directory":    srv.DataDir,
-		"settings": json.RawMessage(`{"temperature": 0.0, "top_k": 1}`),
+		"settings":     json.RawMessage(`{"temperature": 0.0, "top_k": 1}`),
 	})
 
 	var resp struct {
@@ -279,7 +280,7 @@ func TestLlamaLive_StopMidGeneration_CleanlyAborts(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// newLiveTestServer wires a TestServer with the real LlamaServerManager so
+// newLiveTestServer wires a TestServer with the real ServerManager so
 // "llama/{alias}" sessions route to a real llama-server process.
 func newLiveTestServer(t *testing.T) *TestServer {
 	t.Helper()

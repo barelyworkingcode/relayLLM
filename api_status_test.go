@@ -15,10 +15,11 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	srv := NewTestServer(t, nil)
 
 	var got struct {
-		UptimeSeconds int64               `json:"uptimeSeconds"`
-		Sessions      int                 `json:"sessions"`
-		Instances     []LlamaInstanceInfo `json:"instances"`
-		Terminals     []TerminalSummary   `json:"terminals"`
+		UptimeSeconds int64                `json:"uptimeSeconds"`
+		Sessions      int                  `json:"sessions"`
+		Instances     []ServerInstanceInfo `json:"instances"`
+		MlxInstances  []ServerInstanceInfo `json:"mlxInstances"`
+		Terminals     []TerminalSummary    `json:"terminals"`
 	}
 	resp := srv.GetJSON("/api/status", &got)
 	if resp.StatusCode != 200 {
@@ -29,6 +30,9 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	// renders forEach buttons by iterating them. nil/missing would crash JS.
 	if got.Instances == nil {
 		t.Fatal("instances field missing or null; want empty array []")
+	}
+	if got.MlxInstances == nil {
+		t.Fatal("mlxInstances field missing or null; want empty array []")
 	}
 	if got.Terminals == nil {
 		t.Fatal("terminals field missing or null; want empty array []")
@@ -45,6 +49,9 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	if _, hasInstances := raw["instances"]; !hasInstances {
 		t.Error("status payload missing instances array")
 	}
+	if _, hasMlx := raw["mlxInstances"]; !hasMlx {
+		t.Error("status payload missing mlxInstances array")
+	}
 	termRaw, hasTerminals := raw["terminals"]
 	if !hasTerminals {
 		t.Error("status payload missing terminals array")
@@ -52,5 +59,25 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	// Guard against the previous int-count shape sneaking back in.
 	if len(termRaw) > 0 && termRaw[0] != '[' {
 		t.Errorf("terminals must be an array (was a count?); got %s", string(termRaw))
+	}
+}
+
+func TestAPI_Status_MlxRoutes_NoManager(t *testing.T) {
+	srv := NewTestServer(t, nil)
+
+	// GET /api/mlx/instances should return empty array when no mlx manager.
+	var got []ServerInstanceInfo
+	resp := srv.GetJSON("/api/mlx/instances", &got)
+	if resp.StatusCode != 200 {
+		t.Fatalf("mlx instances: got %d, want 200", resp.StatusCode)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty mlx instances, got %d", len(got))
+	}
+
+	// DELETE /api/mlx/instances/foo should 404 when no mlx manager.
+	resp = srv.DeleteJSON("/api/mlx/instances/foo", nil)
+	if resp.StatusCode != 404 {
+		t.Fatalf("mlx stop: got %d, want 404", resp.StatusCode)
 	}
 }
