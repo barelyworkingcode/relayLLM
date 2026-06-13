@@ -85,6 +85,31 @@ func (r *ProxyRegistry) Snapshot(ctx context.Context) []EndpointStatus {
 	return out
 }
 
+// SnapshotModels returns ModelInfo entries for every currently-online
+// endpoint, upstream ids prefixed with the endpoint name (matching the
+// /v1/models aggregation). Offline endpoints contribute nothing — same
+// drop-on-offline policy as the reverse proxy. Results come from the 15s
+// probe cache, so /api/models callers (e.g. Eve's model-list poll) share that
+// throttle instead of firing a live /models fetch per request.
+func (r *ProxyRegistry) SnapshotModels(ctx context.Context) []ModelInfo {
+	var out []ModelInfo
+	for _, status := range r.Snapshot(ctx) {
+		if !status.Online {
+			continue
+		}
+		for _, id := range status.Models {
+			value := status.Endpoint.Name + "/" + id
+			out = append(out, ModelInfo{
+				Label:    value,
+				Value:    value,
+				Group:    status.Endpoint.Group,
+				Provider: "openai",
+			})
+		}
+	}
+	return out
+}
+
 // LookupModel parses "endpoint.Name/upstreamID" and resolves the endpoint
 // from the registry, returning the upstream id with the prefix stripped. Only
 // returns ok when the endpoint is currently believed online — the router

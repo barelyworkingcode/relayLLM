@@ -167,7 +167,7 @@ type ModelInfo struct {
 	SupportsAttachments bool   `json:"supportsAttachments"`
 }
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAIConfig, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *PiConfig, piOverlay func() PiOverlayInputs) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRegistry, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *PiConfig, piOverlay func() PiOverlayInputs) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -181,7 +181,7 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		var (
 			wg     sync.WaitGroup
 			ollama []ModelInfo
-			openai [][]ModelInfo
+			openai []ModelInfo
 			pi     []ModelInfo
 		)
 
@@ -193,16 +193,17 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 			}()
 		}
 
-		if openaiCfg != nil {
-			openai = make([][]ModelInfo, len(openaiCfg.Endpoints))
+		if registry != nil {
 			ctx := r.Context()
-			for i, endpoint := range openaiCfg.Endpoints {
-				wg.Add(1)
-				go func(i int, ep OpenAIEndpoint) {
-					defer wg.Done()
-					openai[i] = FetchOpenAIModels(ctx, ep)
-				}(i, endpoint)
-			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Serve OpenAI-endpoint models from the same 15s probe cache the
+				// reverse proxy uses, rather than a live /models fetch per call,
+				// so a polling model picker no longer bypasses the throttle.
+				// Offline endpoints are dropped, matching /v1/models.
+				openai = registry.SnapshotModels(ctx)
+			}()
 		}
 
 		wg.Add(1)
@@ -218,9 +219,7 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, openaiCfg *OpenAI
 		wg.Wait()
 
 		models := append(claude, ollama...)
-		for _, ms := range openai {
-			models = append(models, ms...)
-		}
+		models = append(models, openai...)
 		if llamaMgr != nil {
 			models = append(models, llamaMgr.ListModels()...)
 		}
