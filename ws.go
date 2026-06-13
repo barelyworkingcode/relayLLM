@@ -163,6 +163,8 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			h.handleEndSession(wc, msgBytes)
 		case WSMsgRenameSession:
 			h.handleRenameSession(wc, msgBytes)
+		case WSMsgSetSessionFolder:
+			h.handleSetSessionFolder(wc, msgBytes)
 		case WSMsgDeleteSession:
 			h.handleDeleteSession(wc, msgBytes, boundSessions)
 		case WSMsgLeaveSession:
@@ -254,6 +256,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		"directory":       session.Directory,
 		"model":           session.Model,
 		"name":            session.Name,
+		"folder":          session.Folder,
 		"history":         history,
 		"stats":           stats,
 		"headless":        session.Headless,
@@ -303,6 +306,22 @@ func (h *WSHub) handleRenameSession(wc *wsConn, msgBytes []byte) {
 		return
 	}
 	if err := h.sessions.RenameSession(req.SessionID, req.Name); err != nil {
+		sendWSError(wc, err.Error())
+	}
+}
+
+func (h *WSHub) handleSetSessionFolder(wc *wsConn, msgBytes []byte) {
+	var req struct {
+		SessionID string `json:"sessionId"`
+		Folder    string `json:"folder"`
+	}
+	json.Unmarshal(msgBytes, &req)
+
+	if req.SessionID == "" {
+		sendWSError(wc, "sessionId required")
+		return
+	}
+	if err := h.sessions.SetSessionFolder(req.SessionID, req.Folder); err != nil {
 		sendWSError(wc, err.Error())
 	}
 }

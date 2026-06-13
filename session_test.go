@@ -156,6 +156,57 @@ func TestSession_RenameSession_UpdatesNameInMemoryAndDisk(t *testing.T) {
 	}
 }
 
+func TestSession_SetSessionFolder_WorksOnPersistedSession(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	sess := mustCreateSession(t, mgr, "existing")
+	// Evict from memory so it exists only on disk — mirrors a pre-existing
+	// session a user organizes from the list after the folders feature lands.
+	mgr.EndSession(sess.ID)
+
+	if err := mgr.SetSessionFolder(sess.ID, "Archive"); err != nil {
+		t.Fatalf("SetSessionFolder: %v", err)
+	}
+
+	// Disk should reflect the folder — SetSessionFolder lazy-loads + saves.
+	path := filepath.Join(mgr.dataDir, "sessions", sess.ID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read disk: %v", err)
+	}
+	var disk Session
+	_ = json.Unmarshal(data, &disk)
+	if disk.Folder != "Archive" {
+		t.Errorf("disk folder: got %q, want %q", disk.Folder, "Archive")
+	}
+
+	// And ListSessions surfaces the folder.
+	for _, e := range mgr.ListSessions() {
+		if e["id"] == sess.ID {
+			if e["folder"] != "Archive" {
+				t.Errorf("list folder: got %v, want %q", e["folder"], "Archive")
+			}
+			return
+		}
+	}
+	t.Errorf("session %s missing from list", sess.ID)
+}
+
+// A session created before this feature has no folder key on disk; it must load
+// as ungrouped (empty folder) and never be dropped from the list.
+func TestSession_ListSessions_LegacySessionIsUngrouped(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	sess := mustCreateSession(t, mgr, "legacy")
+	for _, e := range mgr.ListSessions() {
+		if e["id"] == sess.ID {
+			if e["folder"] != "" {
+				t.Errorf("new session folder: got %v, want empty", e["folder"])
+			}
+			return
+		}
+	}
+	t.Errorf("session %s missing from list", sess.ID)
+}
+
 // ---------------------------------------------------------------------------
 // Listing semantics
 // ---------------------------------------------------------------------------

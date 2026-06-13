@@ -19,6 +19,7 @@ type Session struct {
 	ID            string          `json:"sessionId"`
 	ProjectID     string          `json:"projectId"`
 	Name          string          `json:"name"`
+	Folder        string          `json:"folder,omitempty"` // UI-only grouping label within a project; empty = ungrouped
 	Directory     string          `json:"directory"`
 	Model         string          `json:"model"`
 	ProviderType  string          `json:"providerType"`
@@ -787,6 +788,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 			"id":        s.ID,
 			"projectId": s.ProjectID,
 			"name":      s.Name,
+			"folder":    s.Folder,
 			"directory": s.Directory,
 			"model":     s.Model,
 			"active":    provider != nil && provider.Alive(),
@@ -996,6 +998,35 @@ func (m *SessionManager) RenameSession(id, name string) error {
 	}
 
 	slog.Info("session renamed", "id", id, "name", name)
+	return nil
+}
+
+// SetSessionFolder updates the session's UI grouping label and persists.
+// Unlike RenameSession it goes through GetSession (lazy-loads from disk), so it
+// also works on inactive/persisted sessions a user organizes from the list.
+// An empty folder means ungrouped.
+func (m *SessionManager) SetSessionFolder(id, folder string) error {
+	session, ok := m.GetSession(id)
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.Lock()
+	session.Folder = folder
+	session.mu.Unlock()
+
+	m.saveSession(session)
+
+	// Notify WS clients (any other viewers of this session).
+	if m.sink != nil {
+		m.sink.SendToSession(id, map[string]interface{}{
+			"type":      WSMsgSessionFolderChanged,
+			"sessionId": id,
+			"folder":    folder,
+		})
+	}
+
+	slog.Info("session folder changed", "id", id, "folder", folder)
 	return nil
 }
 
