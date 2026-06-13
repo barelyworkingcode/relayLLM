@@ -567,30 +567,3 @@ func FetchOpenAIModelIDs(ctx context.Context, endpoint OpenAIEndpoint) ([]string
 	}
 	return ids, nil
 }
-
-// FetchOpenAIModels queries /v1/models on the endpoint and returns ModelInfo
-// entries. Model values are prefixed with the endpoint name so the session
-// layer can route them back to the right endpoint at session-create time.
-//
-// Returns nil for any error path (unreachable endpoint, non-2xx, malformed
-// JSON). The caller treats nil as "no models from this endpoint" rather than
-// a hard error, since the model picker fans out across many endpoints in
-// parallel and one being down shouldn't break the others.
-func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) []ModelInfo {
-	ids, err := FetchOpenAIModelIDs(ctx, endpoint)
-	if err != nil {
-		slog.Warn("openai: model discovery failed", "endpoint", endpoint.Name, "error", err)
-		return nil
-	}
-	models := make([]ModelInfo, 0, len(ids))
-	for _, id := range ids {
-		value := endpoint.Name + "/" + id
-		models = append(models, ModelInfo{
-			Label:    value,
-			Value:    value,
-			Group:    endpoint.Group,
-			Provider: "openai",
-		})
-	}
-	return models
-}

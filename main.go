@@ -211,7 +211,7 @@ func main() {
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms, sessions)
-	RegisterModelRoutes(mux, *ollamaURL, cfg.OpenAI, llamaManager, mlxManager, cfg.Pi, sessions.piOverlayInputs)
+	RegisterModelRoutes(mux, *ollamaURL, proxyRegistry, llamaManager, mlxManager, cfg.Pi, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
 	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, mlxManager, startTime)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
