@@ -121,7 +121,14 @@ func TestWS_RenameSession_UpdatesName(t *testing.T) {
 
 	waitFor(t, 1*time.Second, func() bool {
 		sess, ok := srv.Sessions.GetSession(sessionID)
-		return ok && sess.Name == "renamed"
+		if !ok {
+			return false
+		}
+		// RenameSession mutates Name under session.mu on the WS handler
+		// goroutine; read it under the same lock so -race stays clean.
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.Name == "renamed"
 	})
 }
 

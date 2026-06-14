@@ -155,20 +155,36 @@ func (p *PiProvider) sessionDir() string {
 	return filepath.Join(p.dataDir, "pi-sessions")
 }
 
-func (p *PiProvider) Start() error {
-	// Relay-managed spawn prep: fetch project token + resolved project path,
-	// expose ${PROJECT_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
-	// No-op when none of the relay-managed fields are set.
-	subs, err := RelayManagedSpec{
-		ProjectID:     p.session.ProjectID,
-		Directory:     p.directory,
-		UseRelayToken: p.useRelayToken,
-		Label:         "pi",
-	}.Resolve()
-	if err != nil {
-		return fmt.Errorf("pi: %w", err)
+// resolveSkillDir returns the project skills directory to auto-mount via
+// --skill, or "" to skip. Skipped when the user already wired --skill through
+// extraArgs, or when the convention dir (<project>/.claude/skills) is absent.
+// The filesystem probe lives here (not in buildPiArgs) so the argv assembly
+// stays pure and hermetically testable.
+func (p *PiProvider) resolveSkillDir(subs SpawnSubs) string {
+	if hasArg(p.extraArgs, "--skill") {
+		return ""
 	}
+	root := subs.ProjectPath
+	if root == "" {
+		root = p.directory
+	}
+	if root == "" {
+		return ""
+	}
+	candidate := filepath.Join(root, ".claude", "skills")
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return ""
+}
 
+// buildPiArgs assembles the `pi --mode rpc` argv. sessionDir is the resolved
+// --session-dir; skillDir is the resolved --skill directory ("" to omit, see
+// resolveSkillDir). Pure over provider fields + arguments, so the model-routing
+// flags (--provider/--model/--thinking), session resume (--session), and
+// extraArgs expansion are hermetically testable without spawning. See
+// provider_pi_spawn_test.go.
+func (p *PiProvider) buildPiArgs(subs SpawnSubs, sessionDir, skillDir string) []string {
 	args := []string{"--mode", "rpc"}
 
 	if p.provider != "" {
@@ -184,10 +200,6 @@ func (p *PiProvider) Start() error {
 		args = append(args, "--session", p.piSessionID)
 	}
 
-	sessionDir := p.sessionDir()
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return fmt.Errorf("create pi session dir: %w", err)
-	}
 	args = append(args, "--session-dir", sessionDir)
 
 	if p.session.SystemPrompt != "" {
@@ -197,19 +209,9 @@ func (p *PiProvider) Start() error {
 	// Auto-append --skill <project>/.claude/skills so pi recursively discovers
 	// every sibling skill at once (e.g. relay/, tbo-email/, import-meeting/ —
 	// one flag, all loaded). The skills dir is the convention off the project
-	// root (relay generates and manages the SKILL.md files there). Skip when
-	// the dir is absent, or when the user wired --skill via extraArgs.
-	if !hasArg(p.extraArgs, "--skill") {
-		root := subs.ProjectPath
-		if root == "" {
-			root = p.directory
-		}
-		if root != "" {
-			candidate := filepath.Join(root, ".claude", "skills")
-			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-				args = append(args, "--skill", candidate)
-			}
-		}
+	// root (relay generates and manages the SKILL.md files there).
+	if skillDir != "" {
+		args = append(args, "--skill", skillDir)
 	}
 
 	// Expand placeholders in user extraArgs so power users can still
@@ -217,6 +219,30 @@ func (p *PiProvider) Start() error {
 	for _, extra := range p.extraArgs {
 		args = append(args, subs.Expand(extra))
 	}
+
+	return args
+}
+
+func (p *PiProvider) Start() error {
+	// Relay-managed spawn prep: fetch project token + resolved project path,
+	// expose ${PROJECT_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
+	// No-op when none of the relay-managed fields are set.
+	subs, err := RelayManagedSpec{
+		ProjectID:     p.session.ProjectID,
+		Directory:     p.directory,
+		UseRelayToken: p.useRelayToken,
+		Label:         "pi",
+	}.Resolve()
+	if err != nil {
+		return fmt.Errorf("pi: %w", err)
+	}
+
+	sessionDir := p.sessionDir()
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		return fmt.Errorf("create pi session dir: %w", err)
+	}
+
+	args := p.buildPiArgs(subs, sessionDir, p.resolveSkillDir(subs))
 
 	piPath := resolvePiPath(p.binaryPath)
 	cmd := exec.Command(piPath, args...)
