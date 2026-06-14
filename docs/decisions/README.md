@@ -2,7 +2,7 @@
 
 Short notes on architectural decisions that aren't obvious from the code. Each one captures the *why* so a future contributor (human or AI) doesn't have to relearn it.
 
-Format: Context → Decision → Consequences. Keep each ADR under ~300 words; ADRs that grow longer have outgrown the format and should become regular design docs.
+Format: Context → Decision → Consequences. Aim for brevity; if an ADR balloons past a few hundred words it has probably outgrown the format and should become a regular design doc.
 
 | # | Title | Status |
 |---|------|--------|

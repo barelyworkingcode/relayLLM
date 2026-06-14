@@ -2,7 +2,7 @@
 
 Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp + MLX managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-enhanced service.
 
-Under relay, relayLLM registers a [service manifest](../relay/plans/service-manifest-spec.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
+Under relay, relayLLM registers a [service manifest](../relay/docs/service-manifest.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
 
 ## For open-ended / lead-developer requests
 
@@ -23,7 +23,6 @@ relay_bridge_client.go    Bridge socket transport (sendBridgeRequest helper) +
                           PtyEnv resolution. RELAY_BRIDGE_SOCKET env var detection.
 api_status.go             GET /api/status, GET+DELETE /api/llama/instances[/{alias}],
                           GET+DELETE /api/mlx/instances[/{alias}]
-project.go                Project CRUD + JSON file storage
 session.go                Session lifecycle management
 session_store.go          Session persistence to disk
 provider.go               Provider interface + shared types + extractTextContent
@@ -41,11 +40,8 @@ server_manager.go         Profile-driven managed-server process manager (launch,
                           per profile: llama-server (llamaProfile) + mlx-serve (mlxProfile).
 relay_router.go           Unified OpenAI-compatible router fronting managed servers + OpenAI endpoints
 proxy_registry.go         Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
-comfyui_client.go         ComfyUI HTTP client (queue, poll, fetch, workflow builder)
-builtin_tools.go          Built-in tool registry (generate_image) + dynamic schema
-pi_image_skill.go         Materializes the pi SKILL.md that wraps the
-                          POST /api/generate-image endpoint via bash+curl.
-terminal_template.go      Terminal template types + JSON file store (built-in + custom)
+builtin_tools.go          Generic in-process tool registry (emit-capable; ships no tools today)
+terminal_template.go      Terminal template types + store in settings.json's pty map (built-in + custom)
 terminal_session.go       Terminal session with PTY management (creack/pty)
 relay_spawn.go            Shared relay-managed spawn prep (project-token resolution + ${SUB} expansion)
 terminal_manager.go       Terminal CRUD + lifecycle management
@@ -82,18 +78,9 @@ External clients use either the bare managed alias (`"model": "qwen3-8b"`) or th
 
 ## Built-in Tools
 
-Built-in tools coexist with MCP tools in the `BaseChatProvider` tool loop (`provider_chat_base.go`). Unlike MCP tools, built-in tool handlers receive an `emit` callback for progress events during long-running operations.
+`BuiltinToolRegistry` (`builtin_tools.go`) is the generic mechanism for in-process tools that run alongside MCP tools in the `BaseChatProvider` loop (`provider_chat_base.go`) and need an `emit` progress callback MCP tools can't provide. Dispatch order in `runToolLoop()`: built-ins first (`builtinTools.Has()`), then MCP.
 
-Tool dispatch order in `runToolLoop()`: built-in tools are checked first (`builtinTools.Has()`), then MCP (`mcpManager.CallTool()`). Tool definitions from both sources are merged into a single list sent to the LLM.
-
-- **`generate_image`**: Text-to-image via ComfyUI (`--comfyui-url` / `COMFYUI_URL`). Queues a workflow, polls for completion with progress events, fetches the output image, saves to `{dataDir}/generated/`, returns a URL. Supports checkpoint selection, LoRA style adapters, and sampler/scheduler tuning. Available checkpoints and LoRAs are discovered from ComfyUI at startup and exposed as `enum` values in the tool schema.
-
-  Provider coverage:
-  - **Ollama / OpenAI / llama.cpp**: via the in-process `BuiltinToolRegistry` inside `BaseChatProvider`'s tool loop (zero IPC).
-  - **Claude**: via the `comfyui` MCP registered with the relay orchestrator (`../relayComfy/mcp/`). Sessions with `useRelayTools: true` get an inline `--mcp-config` spawning `relay mcp` (see `ClaudeProvider.relayMCPConfigJSON`), authenticated with a project token relay resolves just-in-time by `projectId` (`resolveProjectToken`) — every relay-registered MCP, including `comfyui`, appears under one entry point and respects per-project AllowedMcpIDs / DisabledTools.
-  - **pi**: pi has no MCP support, so we ship a SKILL.md (auto-mounted by `pi_overlay.go` when `HasImageGen` is true) that tells the model to `curl --unix-socket $RELAY_LLM_SOCKET .../api/generate-image` from its built-in `bash` tool. The pi provider exports `RELAY_LLM_SOCKET` + `RELAY_LLM_TOKEN` into pi's env so curl authenticates. Synchronous `POST /api/generate-image` is registered in `api.go` only when ComfyUI is configured.
-
-  Common contract: every path returns the same `{"status":"success","image_url":"/api/generated/...","file_url":"file://...","path":"/abs/.../generated/...", ...}` JSON, so Eve's `_parseImageResult` renders the inline image regardless of provider. `image_url` is the relative path Eve's renderer (and the auto-inline pass) resolves against its own origin; `path`/`file_url` are the absolute on-disk location for clients that can't resolve the relative URL — Eve's xterm terminal linkifies the `/api/generated/` token via a custom link provider (`terminal-manager.js`), and plain terminals can copy-paste the path. The standalone `comfyui-mcp` binary writes to the same `{dataDir}/generated/` that relayLLM serves via `/api/generated/`, so URLs resolve identically whether image-gen flowed through the in-process tool or the MCP proxy.
+It currently **ships no tools**. Image generation is no longer a built-in — it is the `comfyui` MCP tool reached through relay like any other MCP (see relay ADR-006). relayLLM only *serves* the output directory: `GET /api/generated/:filename` returns images that the relay-comfyui MCP wrote to `{dataDir}/generated/`.
 
 ## API
 
@@ -104,6 +91,8 @@ Unix socket at `--socket` (defaults to `{data-dir}/relayllm.sock`). WebSocket at
 GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp + MLX)
 GET/POST       /api/sessions       — list/create sessions
 POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
+POST           /api/sessions/:id/stop  — stop generation (mirrors WS stop_generation)
+POST           /api/sessions/:id/delete — end + delete persisted session data
 DELETE         /api/sessions/:id   — end session
 PUT            /api/sessions/:id/model           — pi only: mid-session model switch
 PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
@@ -112,8 +101,8 @@ GET            /api/llama/instances        — list running llama-server instanc
 DELETE         /api/llama/instances/{alias} — stop a specific llama-server instance
 GET            /api/mlx/instances          — list running mlx-serve instances
 DELETE         /api/mlx/instances/{alias}  — stop a specific mlx-serve instance
-GET/POST       /api/terminal/templates     — list/create terminal templates
-GET/PUT/DELETE /api/terminal/templates/:id — get/update/delete custom template
+GET            /api/terminal/templates     — list terminal templates (read-only)
+GET            /api/terminal/templates/:id — get one template
 GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
 DELETE         /api/terminals/:id          — close terminal
 GET            /api/terminals/:id/log      — stitched head+tail of PTY's raw byte stream (works after session eviction)
@@ -133,11 +122,15 @@ Client → Server: terminal_create, join_terminal, leave_terminal, terminal_inpu
 Server → Client: terminal_created, terminal_joined (with base64 scrollback), terminal_output (base64), terminal_exit, terminal_closed, terminal_list, terminal_templates
 ```
 
+The grouped `WSMsg*` constants in `ws_messages.go` are the authoritative message
+set (the lists above are the common subset); `llm_event` payloads follow the
+canonical contract in [`docs/event-protocol.md`](docs/event-protocol.md).
+
 ## Terminal Sessions
 
 PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via WebSocket (base64-encoded). Terminals survive Eve restarts.
 
-- **Templates**: Built-in (Claude Code, OpenCode, Shell) + custom via API. `IdleTimeout` field (minutes, default 1440 = 24h).
+- **Templates**: live in the `pty` section of `settings.json` (relay's config editor manages them; the API is read-only). Three protected built-ins: `claude-code`, `opencode`, `shell`. `IdleTimeout` field (minutes, default 1440 = 24h).
 - **Idle timeout**: When all viewers disconnect, an idle timer starts. If no viewer reconnects before it fires, the terminal is auto-closed. Configurable per template.
 - **Color**: PTY spawned with `TERM=xterm-256color` and `COLORTERM=truecolor` for full 24-bit color.
 - **Scrollback**: 100KB in-memory ring buffer per terminal, replayed on reconnect.
@@ -147,11 +140,9 @@ PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via We
 ## Data
 
 Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Support/relayLLM/`, on Linux `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
-- `projects.json` — project definitions
 - `sessions/` — per-session JSON files. A daily sweeper deletes files where `headless: true` and mtime is older than 7 days; non-headless (Eve-owned) sessions are never touched.
 - `pi-sessions/` — pi.dev session JSONLs (one per pi session, owned by pi via `--session-dir`). Daily sweeper deletes files whose `piSessionId` is no longer referenced by any `sessions/*.json` (with a 1h minAge cushion to avoid racing live pi processes).
-- `terminals/templates.json` — custom terminal templates
-- `settings.json` — unified provider config (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
+- `settings.json` — unified provider config **and** the `pty` terminal-template map (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
   ```json
   {
     "openai": {
@@ -199,7 +190,7 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
   Each llama-server / mlx-serve model key except `alias` maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths (for mlx-serve, `model` is an MLX model *directory*). `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` (or, for terminals, a non-empty `projectID`) injects a project-scoped `RELAY_PROJECT_TOKEN` env var, resolved just-in-time from relay's bridge — never the full-access service token; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. Skill *generation* is owned by relay (see relay ADR-004 + `docs/decisions/006-skill-regen-owned-by-relay.md`); relayLLM no longer regenerates SKILL.md. Skills load from the convention `<project>/.claude/skills`: the pi `--mode rpc` provider auto-appends `--skill <project>/.claude/skills` (skipped if `extraArgs` already contains `--skill`), and PTY templates reference `${PROJECT_PATH}/.claude/skills` in their args (e.g. the `pidev` template: `"args": ["--skill", "${PROJECT_PATH}/.claude/skills"]`).
 
   **`projectOverlay`** (optional) writes a per-project `<projectDir>/.pi/` directory before each pi spawn (both `--mode rpc` and PTY `pi` templates) and sets `PI_CODING_AGENT_DIR` so pi reads from it. Pi's global `~/.pi/agent/` is never written to. Materialized files: `models.json` containing a single `relay-router` provider pointing at the `--router-port` listener, with its `models` array snapshotted from the router's currently-routable set at spawn time — managed-server aliases (bare, llama + mlx) plus every reachable OpenAI endpoint model (prefixed `endpoint.Name/`). Pi's ModelRegistry treats providers with an empty `models` array as override-only, so the enumeration is required; the snapshot uses `ProxyRegistry.Snapshot()` and inherits its 15 s TTL. Set `--router-port` to enable this entry; otherwise relayLLM contributes nothing to pi's models.json and the user's global providers carry through unchanged. Also writes `settings.json` with `defaultProvider`/`defaultModel`/`defaultThinkingLevel` and a `skills` array (project `.claude/skills/` + `extraSkillDirs`); `auth.json` symlinked to `~/.pi/agent/auth.json` so credentials stay centrally managed (OAuth refresh writes through). Modes: `"never"` (default — feature off), `"always"` (rewrite on every spawn), `"skipIfExists"` (write missing files only). User's global `models.json` providers and `settings.json` keys are merged underneath by default (turn off via `excludeUserProviders`/`excludeUserSettings`). Set `authStrategy: "none"` if pi credentials are managed out-of-band. `gitignore: true` opt-in appends the overlay dir to the project's `.gitignore`. Fails closed at spawn if global `auth.json` is missing while symlink strategy is active — run `pi auth login` once globally first.
-- `generated/` — images produced by the generate_image tool (served via `/api/generated/`)
+- `generated/` — images written by the relay-comfyui MCP tool (served via `/api/generated/`)
 
 ## Build
 
@@ -250,7 +241,7 @@ relayLLM is one of several relay-enhanced services. It serves session/provider o
 - `../eve/` -- Browser-based LLM frontend. Talks to relay's frontend socket; relay dispatches `/api/sessions`, `/api/terminals`, etc. to relayLLM.
 - `../relayScheduler/` -- Task scheduler. Registers its own manifest with relay; relay dispatches `/api/tasks/*` to it directly (relayLLM does not proxy).
 - `../relayTelegram/` -- Telegram bot bridge.
-- `../relayComfy/` -- ComfyUI service. Manages ComfyUI as a subprocess for image/video generation; relayLLM talks to its HTTP API on port 8188.
+- `../relayComfy/` -- ComfyUI service exposed as the `comfyui` MCP. relayLLM reaches image generation through relay's MCP path, not a direct HTTP call; it only serves the resulting images via `/api/generated/`.
 
 ## Releases & consumers
 
@@ -280,7 +271,7 @@ relayLLM detects its run mode from `RELAY_BRIDGE_SOCKET`:
 
 The mode switch is a deployment fact, not a code fork — one config loader, two sources. Both `manifest.go` (what relayLLM exposes) and `relay_bridge_client.go` (how it talks to relay) are small and self-contained.
 
-See `../relay/plans/service-manifest-spec.md` for the full protocol contract.
+See `../relay/docs/service-manifest.md` for the full protocol contract.
 
 ## Local Auth
 
