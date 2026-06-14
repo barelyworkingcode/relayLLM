@@ -75,18 +75,16 @@ func NewMCPManager(configs map[string]MCPServerConfig) *MCPManager {
 	}
 }
 
-// Start connects to all configured MCP servers and discovers their tools.
-func (m *MCPManager) Start(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	client := mcp.NewClient(&mcp.Implementation{
+// newMCPClient builds the shared MCP client. Its ProgressNotificationHandler
+// routes inbound notifications/progress to the in-flight call's sink (registered
+// by CallTool) so MCP tools stream status to the frontend exactly like the
+// in-process builtin tools do. Extracted from Start so a hermetic test can wire
+// this same client (and thus the real progress routing) to an in-memory server.
+func (m *MCPManager) newMCPClient() *mcp.Client {
+	return mcp.NewClient(&mcp.Implementation{
 		Name:    "relayLLM",
 		Version: "1.0.0",
 	}, &mcp.ClientOptions{
-		// Route inbound tool progress to the in-flight call's sink (set by
-		// CallTool) so MCP tools stream status to the frontend exactly like
-		// the in-process builtin tools do.
 		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
 			if req == nil || req.Params == nil || req.Params.Message == "" {
 				return
@@ -100,6 +98,14 @@ func (m *MCPManager) Start(ctx context.Context) error {
 			}
 		},
 	})
+}
+
+// Start connects to all configured MCP servers and discovers their tools.
+func (m *MCPManager) Start(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client := m.newMCPClient()
 
 	for name, cfg := range m.configs {
 		if cfg.Command == "" {

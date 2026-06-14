@@ -232,7 +232,7 @@ Install once per clone:
 git config core.hooksPath .githooks
 ```
 
-Runs `go build ./...`, `go vet ./...`, and the hermetic test suite on every commit that touches Go files. ~2s total. Skip in emergencies with `git commit --no-verify`. The `live` and `llm` build tags are not invoked by the hook — those stay opt-in.
+Runs `go build ./...`, `go vet ./...`, and the hermetic test suite under the race detector (`go test -race ./...`) on every commit that touches Go files. ~3s total warm (~+1s for `-race`; a one-time ~+4s when the instrumented build cache is cold). Skip in emergencies with `git commit --no-verify`. The `live` and `llm` build tags are not invoked by the hook — those stay opt-in.
 
 ### Adding tests
 
