@@ -10,12 +10,17 @@
 # What runs:
 #   1. go build ./...        — fail fast on compile errors
 #   2. go vet ./...          — cheap static checks
-#   3. go test ./...         — hermetic suite (~1.5s, no external deps)
+#   3. go test -race ./...   — hermetic suite under the race detector
+#                              (~3s warm; ~+1s vs no -race). The detector earns
+#                              its keep: the suite drives concurrent WS/session
+#                              goroutines, so a data race here is a real bug.
+#                              First run after `go clean -cache` or a Go upgrade
+#                              pays a one-time ~+4s to build the instrumented
+#                              cache; steady-state is cheap.
 #
 # What does NOT run:
 #   - -tags=live  (needs Ollama / LM Studio / OMLX / relay binary)
 #   - -tags=llm   (needs Qwen3.6 MoE 35 loaded; ~5s+ runtime)
-#   - go test -race (slower; run manually with: go test -race ./...)
 
 set -e
 
@@ -40,10 +45,10 @@ if ! go vet ./...; then
     exit 1
 fi
 
-echo "→ go test ./..."
-if ! go test ./...; then
+echo "→ go test -race ./..."
+if ! go test -race ./...; then
     echo "✗ tests failed; commit aborted"
-    echo "  (rerun with: go test -v ./...)"
+    echo "  (rerun with: go test -race -v ./...)"
     exit 1
 fi
 

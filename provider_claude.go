@@ -133,7 +133,25 @@ func (p *ClaudeProvider) idleWatcher() {
 	}
 }
 
-func (p *ClaudeProvider) Start() error {
+// effectivePermissionMode resolves the Claude CLI --permission-mode for this
+// session. A headless session forces "bypassPermissions" — the legacy synonym
+// takes precedence even if a different mode is set. This single source of truth
+// is what gates both --dangerously-skip-permissions and RELAY_LLM_HEADLESS, so
+// the headless escape hatch can never be half-applied.
+func (p *ClaudeProvider) effectivePermissionMode() string {
+	if p.session.Headless {
+		return "bypassPermissions"
+	}
+	return p.session.PermissionMode
+}
+
+// buildClaudeArgs assembles the claude CLI argv. mcpCfg is the rendered
+// --mcp-config JSON ("" to omit). Pure over provider fields + the one argument,
+// so the security-sensitive flag matrix (resume, permission mode, the
+// --dangerously-skip-permissions escape hatch, policy tools) is hermetically
+// testable without spawning a process. See provider_claude_spawn_test.go and
+// the headless-isolation guard in security_regression_test.go.
+func (p *ClaudeProvider) buildClaudeArgs(mcpCfg string) []string {
 	args := []string{
 		"--print",
 		"--output-format", "stream-json",
@@ -150,11 +168,7 @@ func (p *ClaudeProvider) Start() error {
 		args = append(args, "--append-system-prompt", p.session.SystemPrompt)
 	}
 
-	mode := p.session.PermissionMode
-	if p.session.Headless {
-		// Legacy synonym; takes precedence even if a different mode is set.
-		mode = "bypassPermissions"
-	}
+	mode := p.effectivePermissionMode()
 	if mode != "" && mode != "default" {
 		args = append(args, "--permission-mode", mode)
 	}
@@ -171,25 +185,28 @@ func (p *ClaudeProvider) Start() error {
 		}
 	}
 
-	// Resolve the relay project token once and reuse it for both the
-	// --mcp-config child and Claude's own env (below). Resilient to a
-	// relayLLM restart, which drops the non-persisted session.McpToken.
-	mcpToken := p.resolveMCPToken()
-
-	if mcpCfg := p.relayMCPConfigJSON(mcpToken); mcpCfg != "" {
+	if mcpCfg != "" {
 		args = append(args, "--mcp-config", mcpCfg)
 	}
 
-	claudePath := resolveClaudePath()
-	cmd := exec.Command(claudePath, args...)
-	cmd.Dir = p.directory
-	cmd.Env = ensurePath(childBaseEnv())
-	cmd.Env = append(cmd.Env,
+	return args
+}
+
+// buildClaudeEnv assembles the child environment. base is the inherited
+// environment (childBaseEnv after ensurePath); mcpToken is the resolved
+// project-scoped relay token — "" when the session is not relay-managed.
+//
+// Fail-closed contract: an empty mcpToken sets NO project-token var (never the
+// full-access service token — see setProjectTokenEnv). RELAY_LLM_HEADLESS is
+// set if and only if the effective permission mode is bypassPermissions, so the
+// hook's auto-approve only ever fires for a session that is actually headless.
+func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string {
+	env := append(base,
 		fmt.Sprintf("RELAY_LLM_HOOK_SOCKET=%s", p.hookSocket),
 		fmt.Sprintf("RELAY_LLM_SESSION_ID=%s", p.session.ID),
 	)
 	if p.hookToken != "" {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("RELAY_LLM_HOOK_TOKEN=%s", p.hookToken))
+		env = append(env, fmt.Sprintf("RELAY_LLM_HOOK_TOKEN=%s", p.hookToken))
 	}
 
 	// Expose the project-scoped relay token to Claude itself, not just to
@@ -197,11 +214,27 @@ func (p *ClaudeProvider) Start() error {
 	// model to invoke `relay mcp call ...` via Bash; that path needs
 	// RELAY_PROJECT_TOKEN in Claude's own environment to authenticate.
 	// Dual-written under the legacy RELAY_TOKEN name for existing skills.
-	cmd.Env = setProjectTokenEnv(cmd.Env, mcpToken)
+	env = setProjectTokenEnv(env, mcpToken)
 
-	if mode == "bypassPermissions" {
-		cmd.Env = append(cmd.Env, "RELAY_LLM_HEADLESS=true")
+	if p.effectivePermissionMode() == "bypassPermissions" {
+		env = append(env, "RELAY_LLM_HEADLESS=true")
 	}
+	return env
+}
+
+func (p *ClaudeProvider) Start() error {
+	// Resolve the relay project token once and reuse it for both the
+	// --mcp-config child and Claude's own env. Resilient to a relayLLM
+	// restart, which drops the non-persisted session.McpToken.
+	mcpToken := p.resolveMCPToken()
+	mcpCfg := p.relayMCPConfigJSON(mcpToken)
+
+	args := p.buildClaudeArgs(mcpCfg)
+
+	claudePath := resolveClaudePath()
+	cmd := exec.Command(claudePath, args...)
+	cmd.Dir = p.directory
+	cmd.Env = p.buildClaudeEnv(ensurePath(childBaseEnv()), mcpToken)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
