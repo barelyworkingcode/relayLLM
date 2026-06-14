@@ -2,7 +2,7 @@
 
 Version: **2**
 
-This document defines the wire format between relayLLM and its clients (Eve, relayTelegram, HTTP callers, future clients). All five providers — Claude CLI, pi.dev CLI, Ollama, OpenAI-compatible, llama.cpp — emit events in this single canonical shape via translators. The shape is owned by relayLLM: no provider's wire format leaks through.
+This document defines the wire format between relayLLM and its clients (Eve, relayTelegram, HTTP callers, future clients). Every provider — Claude CLI, pi.dev CLI, Ollama, OpenAI-compatible, llama.cpp, MLX — emits events in this single canonical shape via translators. The typed canonical events are owned by relayLLM; no provider's native event struct is exposed. One narrow exception exists: a small set of Claude-CLI-specific top-level events pass through verbatim via the `EmitVersionedRaw` escape hatch (see below).
 
 If you are adding a new provider, your job is to translate that provider's wire format into the events described here. If you are writing a new client, this document is your contract.
 
@@ -11,7 +11,7 @@ If you are adding a new provider, your job is to translate that provider's wire 
 All events are JSON. Two channels exist:
 
 - **WebSocket** (`/ws`) — server → client streaming. Each event is a single JSON object.
-- **HTTP** (`POST /api/sessions/:id/message`) — synchronous wrapper. The server accumulates the same event stream into a `{text, stats}` reply via `response_collector.go`. Only text deltas are surfaced — thinking and tool blocks are deliberately excluded.
+- **HTTP** (`POST /api/sessions/:id/message`) — synchronous wrapper. The server accumulates the same event stream into a `{response, stats}` reply via `response_collector.go`. Only text deltas are surfaced — thinking and tool blocks are deliberately excluded.
 
 The WebSocket channel is the canonical source.
 
@@ -33,13 +33,11 @@ Clients route on the top-level `type`. The interesting payload is the `event` fi
 
 `session_joined` carries `"protocolVersion": "2"`. Clients on an unknown major must refuse to render and surface an upgrade prompt.
 
-## Per-event versioning
-
-Every payload inside `llm_event.event` carries a `"v": 2` field at the top level. Clients should gate on this field per-event, in addition to the session-join check, so a misrouted-from-the-future event doesn't render against an incompatible parser.
-
 ## The canonical event shape
 
 The `event` field of every `llm_event` is one of the shapes below. All of them are typed in Go (`events.go`) — the wire shape is what `json.Marshal` produces from those structs. JSON tag changes are wire-breaking changes.
+
+Every payload inside `llm_event.event` carries a `"v": 2` field at the top level (see [Versioning](#versioning)).
 
 The three top-level discriminators are `system`, `assistant`, and `result`.
 
@@ -56,12 +54,12 @@ Emitted once per turn, before any assistant content. Carries the static context 
   "subtype": "init",
   "model": "claude-opus-4-7",
   "cwd": "/Users/jonathan/source/foo",
-  "tools": ["Read", "Edit", "Bash", "generate_image"],
+  "tools": ["Read", "Edit", "Bash"],
   "mcp_servers": ["relay", "github"]
 }
 ```
 
-`tools` and `mcp_servers` are best-effort. Empty arrays are valid.
+`tools` and `mcp_servers` are best-effort. Empty arrays are valid (pi, for instance, supplies neither).
 
 ---
 
@@ -217,7 +215,7 @@ Marks the start of a single content block within the assistant message. Block ty
 `index` is monotonically increasing within one assistant turn and is the key that ties `content_block_start` → `content_block_delta` → `content_block_stop` together.
 
 For `tool_use` blocks:
-- `id` is **always present and unique** within the session. For providers that don't supply one (Ollama native), relayLLM synthesizes `tool_<index>_<name>`.
+- `id` is **always present and unique** within the session. For providers that don't supply one (Ollama native), relayLLM synthesizes `tool_<index>_<name>` via `SynthesizeToolUseID`.
 - `input` is `{}` at start; the actual arguments arrive via `input_json_delta` events.
 
 For `text` and `thinking` blocks: **no inline content on start.** Content arrives via deltas only. Claude CLI's combined start+content quirk is normalized at the translator boundary.
@@ -285,7 +283,7 @@ Emitted after a tool call returns. Pairs to its `tool_use` block by `tool_use_id
 
 ### `result.tool_progress`
 
-Optional progress events emitted by long-running tools (e.g. image generation).
+Optional progress events emitted by long-running tools (e.g. the `comfyui` image-generation MCP tool). Forwarded from both the in-process `BuiltinToolRegistry` (emit callback) and MCP tool progress notifications.
 
 ```json
 {
@@ -293,7 +291,7 @@ Optional progress events emitted by long-running tools (e.g. image generation).
   "type": "result",
   "subtype": "tool_progress",
   "tool_use_id": "toolu_01ABC",
-  "tool_name": "generate_image",
+  "tool_name": "comfyui",
   "message": "Generating image..."
 }
 ```
@@ -314,6 +312,12 @@ Streamed error from a tool or the model itself. Distinct from `system.api_error`
 ```
 
 ---
+
+## The `EmitVersionedRaw` escape hatch
+
+A few Claude-CLI-specific top-level events fall outside the canonical trio above: `permission-mode`, `ai-title`, `custom-title`. The Claude translator forwards these verbatim via `EmitVersionedRaw` (`events.go`), which only stamps the `v` field and re-marshals — their full schema is not typed in `events.go`. Malformed (non-object) raw events are logged and dropped rather than panicking.
+
+Clients must therefore tolerate top-level event types beyond the documented `system`/`assistant`/`result` discriminators: **ignore unknown event types and unknown fields silently.** Prefer the typed emitter methods for anything that's part of the documented contract; the escape hatch is for provider-native events only.
 
 ## Stream lifecycle
 
@@ -346,11 +350,11 @@ Invariants:
 3. `result.tool_result` appears after the `content_block_stop` of its corresponding `tool_use` block, before the next assistant `content_block_start`.
 4. `stats_update` may arrive at any time after `message_start`; clients should treat the latest value as authoritative.
 5. `message_complete` is terminal for the turn. Anything that arrives after it should be discarded by the client until the next `message_start`.
-6. **All providers emit `message_complete` with no payload (top-level `data: null`).** Providers persist assistant turns to `session.Messages` themselves (chat-base via `turnStreamState.blocks`, pi via its block accumulator, Claude via its CLI's JSONL replayed on join). There is no fallback "save as text-only" path.
+6. **All providers emit `message_complete` with no payload (top-level `data: null`).** Providers persist assistant turns to `session.Messages` themselves (chat-base via `turnStreamState.blocks`, pi via its `allBlocks` accumulator, Claude via its CLI's JSONL replayed on join). There is no fallback "save as text-only" path.
 
 ## Adding a new provider
 
-Write a translator function in your provider file that consumes the upstream wire format and emits canonical events via an `*EventEmitter` constructed at provider start. The state machine pattern from `provider_pi.go::translate` (lines 477–654) is the working reference:
+Write a translator that consumes the upstream wire format and emits canonical events via an `*EventEmitter` constructed at provider start. The pi provider is the working reference: `provider_pi.go::translate` dispatches top-level upstream events, and `translateMessageUpdate` (with the `flushOpenBlock` / `finalizeOpenBlockLocked` helpers and the `allBlocks` accumulator) runs the per-block state machine.
 
 1. Reset per-turn block state on the upstream's turn-start signal.
 2. Call `emitter.SystemInit(model, cwd, tools, mcpServers)`, then `emitter.MessageStart("")`.
@@ -364,6 +368,8 @@ Avoid building JSON inline. The `EventEmitter` methods are the single point that
 
 ## Versioning
 
-Breaking changes bump the major version (`"2"` → `"3"`). Adding new event types or new fields to existing events is non-breaking. Clients should ignore unknown event types and unknown fields silently — but they should still gate on the major version (`v` field) per-event so a misrouted-from-the-future payload isn't fed to an incompatible parser.
+Breaking changes bump the major version (`"2"` → `"3"`). Adding new event types or new fields to existing events is non-breaking.
+
+Clients should ignore unknown event types and unknown fields silently, but should still gate on the major version per-event: every payload inside `llm_event.event` carries a `"v": 2` field, and `session_joined` carries `protocolVersion`. Gate on both so a misrouted-from-the-future payload isn't fed to an incompatible parser, and on an unknown major refuse to render and surface an upgrade prompt.
 
 Under "no legacy support" as of v2: there is no compatibility shim period. A bump from v2 to v3 is a hard break.
