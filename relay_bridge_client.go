@@ -53,11 +53,13 @@ const (
 
 	// Bridge request/response type values. Must stay in sync with
 	// relay/bridge/types.go.
-	reqResolvePtyEnv    = "ResolvePtyEnv"
-	reqRegisterManifest = "RegisterManifest"
-	respError           = "Error"
-	respPtyEnv          = "PtyEnv"
-	respOK              = "OK"
+	reqResolvePtyEnv          = "ResolvePtyEnv"
+	reqResolveProjectTemplate = "ResolveProjectTemplate"
+	reqRegisterManifest       = "RegisterManifest"
+	respError                 = "Error"
+	respPtyEnv                = "PtyEnv"
+	respProjectTemplate       = "ProjectTemplate"
+	respOK                    = "OK"
 )
 
 // RelayPtyEnvRequest mirrors relay/bridge.PtyEnvRequest. Kept inline to
@@ -75,6 +77,26 @@ type RelayPtyEnvRequest struct {
 type RelayPtyEnvResponse struct {
 	RelayToken string `json:"relay_token"`
 	WorkingDir string `json:"working_dir"`
+}
+
+// RelayProjectTemplateRequest mirrors relay/bridge.ShellTemplateRequest. Kept
+// inline to avoid a cross-repo Go module dependency. Resolves a project-scoped
+// shell (terminal) launch template definition by (ProjectID, TemplateID).
+type RelayProjectTemplateRequest struct {
+	ProjectID  string `json:"project_id"`
+	TemplateID string `json:"template_id"`
+}
+
+// RelayProjectTemplateResponse mirrors relay/bridge.ShellTemplateResponse. It
+// carries only the template definition — never a token.
+type RelayProjectTemplateResponse struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Icon        string            `json:"icon,omitempty"`
 }
 
 // relayBridgeRequest is the on-wire request envelope.
@@ -192,4 +214,38 @@ func resolveRelayPtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 		return RelayPtyEnvResponse{}, fmt.Errorf("parse PtyEnv data: %w", err)
 	}
 	return out, nil
+}
+
+// resolveRelayProjectTemplate calls relay's bridge ResolveProjectTemplate to
+// fetch a project-scoped shell template definition by (projectID, templateID),
+// mapping the response into a TerminalTemplate so the existing launch path is
+// unchanged. Returns an error if relay is not running, the service token is
+// missing, or the project/template cannot be resolved — the caller fails closed
+// and never spawns a guessed command. The response carries no token; the
+// project token is injected separately by the existing ResolvePtyEnv path.
+func resolveRelayProjectTemplate(projectID, templateID string) (TerminalTemplate, error) {
+	args, err := json.Marshal(RelayProjectTemplateRequest{ProjectID: projectID, TemplateID: templateID})
+	if err != nil {
+		return TerminalTemplate{}, fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := sendBridgeRequest(reqResolveProjectTemplate, args)
+	if err != nil {
+		return TerminalTemplate{}, err
+	}
+	if resp.Type != respProjectTemplate {
+		return TerminalTemplate{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
+	}
+	var out RelayProjectTemplateResponse
+	if err := json.Unmarshal(resp.Data, &out); err != nil {
+		return TerminalTemplate{}, fmt.Errorf("parse ProjectTemplate data: %w", err)
+	}
+	return TerminalTemplate{
+		ID:          out.ID,
+		Name:        out.Name,
+		Command:     out.Command,
+		Args:        out.Args,
+		Env:         out.Env,
+		Description: out.Description,
+		Icon:        out.Icon,
+	}, nil
 }
