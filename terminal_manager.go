@@ -74,7 +74,18 @@ func (m *TerminalManager) SetExitHandler(fn func(terminalID string, exitCode int
 func (m *TerminalManager) Create(templateID, name, directory, projectID string, cols, rows uint16, extraArgs []string) (*TerminalSession, error) {
 	tmpl, ok := m.templates.Get(templateID)
 	if !ok {
-		return nil, fmt.Errorf("terminal template not found: %s", templateID)
+		// Global-store miss. If this is a project-scoped launch, the template may
+		// be private to the project — resolve its definition from relay over the
+		// bridge (global-first precedence: a global id always wins). An ad-hoc
+		// terminal with no project can't have a private template, so fail fast.
+		if projectID == "" {
+			return nil, fmt.Errorf("terminal template not found: %s", templateID)
+		}
+		pt, err := resolveRelayProjectTemplate(projectID, templateID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project template %s: %w", templateID, err)
+		}
+		tmpl = pt
 	}
 
 	if directory == "" {
