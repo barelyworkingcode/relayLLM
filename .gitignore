@@ -2,3 +2,4 @@ relayllm
 cmd/hook/hook
 .idea/
 plans/
+.DS_Store
