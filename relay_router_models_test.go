@@ -24,7 +24,8 @@ type catalogRow struct {
 		Error  string `json:"error"`
 	} `json:"status"`
 	Meta *struct {
-		NCtx int64 `json:"n_ctx"`
+		NCtx      int64 `json:"n_ctx"`
+		NCtxTrain int64 `json:"n_ctx_train"`
 	} `json:"meta"`
 	Architecture *struct {
 		InputModalities []string `json:"input_modalities"`
@@ -94,6 +95,21 @@ func TestRouterCatalog_SatisfiesLlamaCppClientContract(t *testing.T) {
 	}
 }
 
+// A configured model reports "loaded" because our router launches on demand:
+// the client can use it right now without asking for a load. Residency is
+// reported through /api/status instead. Reporting residency here would empty a
+// client's model picker every time the idle reaper ran.
+func TestRouterCatalog_ConfiguredModelsAreUsable(t *testing.T) {
+	router, _, _ := newCatalogRouter(t)
+
+	for _, row := range fetchCatalog(t, router, "/models") {
+		if row.Status.Value != ModelStatusLoaded {
+			t.Errorf("%q status = %q, want %q so clients can select it without an explicit load",
+				row.ID, row.Status.Value, ModelStatusLoaded)
+		}
+	}
+}
+
 func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 	router, mgr, clk := newCatalogRouter(t)
 
@@ -105,9 +121,9 @@ func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 		return out
 	}
 
-	// Nothing running yet.
-	if got := byID()["plain"].Status.Value; got != ModelStatusUnloaded {
-		t.Errorf("status = %q, want %q before launch", got, ModelStatusUnloaded)
+	// Nothing running, but usable on demand.
+	if got := byID()["plain"].Status.Value; got != ModelStatusLoaded {
+		t.Errorf("status = %q, want %q before launch", got, ModelStatusLoaded)
 	}
 
 	// A process that exists but has not passed its health check is "loading" —
@@ -125,9 +141,31 @@ func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 		t.Errorf("status = %q, want %q once healthy", got, ModelStatusLoaded)
 	}
 
-	// A model that never started must stay unloaded.
-	if got := byID()["vision"].Status.Value; got != ModelStatusUnloaded {
-		t.Errorf("vision status = %q, want %q", got, ModelStatusUnloaded)
+	// A model that never started is still selectable.
+	if got := byID()["vision"].Status.Value; got != ModelStatusLoaded {
+		t.Errorf("vision status = %q, want %q", got, ModelStatusLoaded)
+	}
+}
+
+// A live instance proves any recorded failure is stale.
+func TestRouterCatalog_RunningInstanceOverridesStaleFailure(t *testing.T) {
+	router, mgr, clk := newCatalogRouter(t)
+
+	mgr.mu.Lock()
+	mgr.loadErrors["plain"] = "an old failure"
+	mgr.mu.Unlock()
+	addInstance(mgr, "plain", 0, clk.Now())
+
+	for _, row := range fetchCatalog(t, router, "/models") {
+		if row.ID != "plain" {
+			continue
+		}
+		if row.Status.Failed {
+			t.Error("stale failure reported for an alias that is running")
+		}
+		if row.Status.Value != ModelStatusLoaded {
+			t.Errorf("status = %q, want %q", row.Status.Value, ModelStatusLoaded)
+		}
 	}
 }
 
@@ -174,6 +212,10 @@ func TestRouterCatalog_SurfacesLoadFailure(t *testing.T) {
 	// Without failed:true a polling client spins until its own timeout.
 	if !row.Status.Failed {
 		t.Error("status.failed not set after a failed load; clients would poll forever")
+	}
+	// A model that cannot start is not usable, so it must not claim to be.
+	if row.Status.Value != ModelStatusUnloaded {
+		t.Errorf("status = %q, want %q after a failed load", row.Status.Value, ModelStatusUnloaded)
 	}
 	if row.Status.Error != "binary not found" {
 		t.Errorf("status.error = %q, want the failure reason", row.Status.Error)
@@ -276,6 +318,63 @@ func TestRouterModelLoad_RejectsUnmanagedModel(t *testing.T) {
 			}
 			if payload.Error.Message == "" {
 				t.Errorf("no error.message in %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
+	cfg := &ServerConfig{}
+	mgr, _ := newBudgetManager(t, cfg, nil)
+	cfg.Models = append(cfg.Models,
+		ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		ServerModelConfig{Alias: "unpinned", Args: map[string]any{}},
+	)
+	// Native context as read from model metadata at construction.
+	mgr.trainedContext["pinned"] = 131072
+	mgr.trainedContext["unpinned"] = 262144
+
+	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil)
+	rows := map[string]catalogRow{}
+	for _, r := range fetchCatalog(t, router, "/models") {
+		rows[r.ID] = r
+	}
+
+	// Both figures when ctx-size pins a value below the model's native limit.
+	if got := rows["pinned"].Meta; got == nil || got.NCtx != 8192 || got.NCtxTrain != 131072 {
+		t.Errorf("pinned meta = %+v, want n_ctx 8192 and n_ctx_train 131072", got)
+	}
+	// No ctx-size: the native limit still gives clients a real number rather
+	// than leaving them on a generic default.
+	if got := rows["unpinned"].Meta; got == nil || got.NCtx != 0 || got.NCtxTrain != 262144 {
+		t.Errorf("unpinned meta = %+v, want only n_ctx_train 262144", got)
+	}
+}
+
+func TestUpstreamModelRow_ContextLengthFieldNames(t *testing.T) {
+	// Each server family advertises context under a different key; we read
+	// whichever one is present so endpoint models get a real window.
+	tests := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{"vLLM / OMLX", `{"id":"m","max_model_len":262144}`, 262144},
+		{"LM Studio", `{"id":"m","max_context_length":32768}`, 32768},
+		{"context_length", `{"id":"m","context_length":16384}`, 16384},
+		{"context_window", `{"id":"m","context_window":8192}`, 8192},
+		{"llama.cpp meta", `{"id":"m","meta":{"n_ctx":4096}}`, 4096},
+		{"meta n_ctx_train fallback", `{"id":"m","meta":{"n_ctx_train":2048}}`, 2048},
+		{"none advertised", `{"id":"m"}`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var row upstreamModelRow
+			if err := json.Unmarshal([]byte(tc.body), &row); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := row.contextLength(); got != tc.want {
+				t.Errorf("contextLength() = %d, want %d", got, tc.want)
 			}
 		})
 	}

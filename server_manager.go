@@ -193,6 +193,10 @@ type ServerManager struct {
 	// admission control never touches the filesystem while holding mu.
 	memory map[string]int64
 
+	// trainedContext holds each model's native context length, read from
+	// metadata at construction so catalog listings never touch the filesystem.
+	trainedContext map[string]int64
+
 	// loadErrors records why the last explicit StartLoad failed, per alias.
 	// Without it a client polling for "loaded" would spin forever on a model
 	// that can never start.
@@ -239,16 +243,17 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 	}
 
 	m := &ServerManager{
-		profile:    profile,
-		config:     cfg,
-		binaryPath: bin,
-		nextPort:   basePort,
-		instances:  make(map[string]*serverInstance),
-		clock:      DefaultClock,
-		memory:     make(map[string]int64, len(cfg.Models)),
-		loadErrors: make(map[string]string),
-		idleSignal: make(chan struct{}),
-		reaperStop: make(chan struct{}),
+		profile:        profile,
+		config:         cfg,
+		binaryPath:     bin,
+		nextPort:       basePort,
+		instances:      make(map[string]*serverInstance),
+		clock:          DefaultClock,
+		memory:         make(map[string]int64, len(cfg.Models)),
+		trainedContext: make(map[string]int64, len(cfg.Models)),
+		loadErrors:     make(map[string]string),
+		idleSignal:     make(chan struct{}),
+		reaperStop:     make(chan struct{}),
 
 		maxLoaded:        cfg.MaxLoaded,
 		maxMemoryBytes:   int64(cfg.MaxMemoryGB * bytesPerGB),
@@ -265,6 +270,7 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 	for _, mc := range cfg.Models {
 		est := estimateModelMemory(profile, mc, cfg.MemoryHeadroomPercent)
 		m.memory[mc.Alias] = est
+		m.trainedContext[mc.Alias] = modelTrainedContext(profile, mc)
 		slog.Debug("memory estimate", "kind", profile.Kind, "alias", mc.Alias, "estimated", formatGB(est))
 	}
 	if m.maxLoaded > 0 || m.maxMemoryBytes > 0 || m.idleTimeout > 0 {
@@ -524,6 +530,13 @@ func (m *ServerManager) awaitReady(alias string, inst *serverInstance) error {
 
 	inst.healthy.Store(true)
 	close(inst.ready)
+
+	// A successful launch retires any recorded failure for this alias,
+	// whatever route triggered it.
+	m.mu.Lock()
+	delete(m.loadErrors, alias)
+	m.mu.Unlock()
+
 	slog.Info(fmt.Sprintf("%s: server ready", m.profile.Kind), "alias", alias, "port", inst.port)
 	return nil
 }
@@ -924,7 +937,8 @@ type ManagedModelInfo struct {
 	Status         string
 	Failed         bool   // last explicit load failed; clients stop polling on this
 	Error          string // failure detail, empty unless Failed
-	ContextSize    int64
+	ContextSize    int64  // configured ctx-size; 0 when unset
+	TrainedContext int64  // the model's native context; 0 when unknown
 	SupportsImages bool
 }
 
@@ -938,26 +952,44 @@ func (m *ServerManager) ModelCatalog() []ManagedModelInfo {
 
 	out := make([]ManagedModelInfo, 0, len(m.config.Models))
 	for _, cfg := range m.config.Models {
-		status := ModelStatusUnloaded
-		if inst, ok := m.instances[cfg.Alias]; ok && !inst.exited.Load() {
-			// An instance exists but has not passed its health check yet, so
-			// the process is up and still loading weights.
+		// "loaded" here means usable right now, not resident right now.
+		//
+		// llama.cpp's router reports residency because a client there has to
+		// ask for a load before it can use a model. We launch on demand: any
+		// configured alias serves a request immediately, so from a client's
+		// side there is nothing to wait for. Reporting residency instead would
+		// also make models vanish from a client's picker whenever the idle
+		// reaper reclaimed them — clients filter their model list to "loaded",
+		// so a 30-minute lull would silently empty it.
+		//
+		// Actual residency is not hidden, just reported where it belongs:
+		// /api/status instances (with leases, memory, and idle time).
+		inst, running := m.instances[cfg.Alias]
+		if running && inst.exited.Load() {
+			running = false
+		}
+
+		status := ModelStatusLoaded
+		if running && !inst.healthy.Load() {
+			// A launch is genuinely in flight — clients poll this transition
+			// after an explicit load, so it must be reported.
 			status = ModelStatusLoading
-			if inst.healthy.Load() {
-				status = ModelStatusLoaded
-			}
 		}
 
 		entry := ManagedModelInfo{Alias: cfg.Alias, Status: status}
-		if msg, failed := m.loadErrors[cfg.Alias]; failed && status == ModelStatusUnloaded {
-			// Only surface a failure while nothing is running for the alias —
-			// a later successful load supersedes the stale error.
+		// A recorded failure only speaks for the alias while nothing is
+		// running for it; a live instance is proof the error is stale.
+		if msg, failed := m.loadErrors[cfg.Alias]; failed && !running {
+			// Demote from "usable" — it demonstrably is not — and flag it so a
+			// client polling for readiness stops instead of spinning.
+			entry.Status = ModelStatusUnloaded
 			entry.Failed = true
 			entry.Error = msg
 		}
 		if ctx, ok := numericArg(cfg.Args, "ctx-size"); ok && ctx > 0 {
 			entry.ContextSize = int64(ctx)
 		}
+		entry.TrainedContext = m.trainedContext[cfg.Alias]
 		_, entry.SupportsImages = cfg.Args["mmproj"]
 
 		out = append(out, entry)
