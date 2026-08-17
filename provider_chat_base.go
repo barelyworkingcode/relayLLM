@@ -280,13 +280,30 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 	slog.Debug("chat: sending message", "transport", p.transport.Name(),
 		"session", p.session.ID, "tools", len(tools))
 
+	// Managed-server transports resolve their backend here rather than at
+	// Start(), because the process may have been evicted since the last turn
+	// and can come back on a different port. The lease is held for the whole
+	// turn — every tool-loop iteration included — and released when the loop
+	// exits, which is what keeps the memory budget from evicting a model
+	// mid-generation.
+	release := func() {}
+	if acquirer, ok := p.transport.(BackendAcquirer); ok {
+		r, err := acquirer.AcquireBackend(ctx)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("%s: %w", p.transport.Name(), err)
+		}
+		release = r
+	}
+
 	resp, err := p.transport.PostChat(ctx, messages, tools)
 	if err != nil {
+		release()
 		cancel()
 		return fmt.Errorf("%s: %w", p.transport.Name(), err)
 	}
 
-	go p.runToolLoop(ctx, cancel, resp, messages, time.Now(), gen)
+	go p.runToolLoop(ctx, cancel, resp, messages, time.Now(), gen, release)
 	return nil
 }
 
@@ -323,8 +340,11 @@ func (p *BaseChatProvider) toolDefs() []map[string]any {
 // message list until the model stops calling tools (or we hit the iteration
 // cap). Runs in a goroutine — the session layer only observes streaming
 // events and eventually message_complete.
-func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.CancelFunc, resp *http.Response, messages []map[string]any, startTime time.Time, gen uint64) {
+func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.CancelFunc, resp *http.Response, messages []map[string]any, startTime time.Time, gen uint64, release func()) {
 	defer cancel()
+	// Drop the managed-server lease once the turn is fully done, tool
+	// iterations included. Until then the backend is pinned.
+	defer release()
 
 	// Guarded emit: silently discards events if a newer generation has started
 	// (i.e. StopGeneration or a new SendMessage was called).
