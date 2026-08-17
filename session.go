@@ -403,11 +403,26 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if mgr == nil {
 			return fmt.Errorf("%s: manager not configured", kind)
 		}
-		endpoint, err := mgr.GetOrLaunch(modelID)
-		if err != nil {
-			return fmt.Errorf("%s: %w", kind, err)
+		// Validate the alias now so a typo fails at session creation rather
+		// than at the first message — the eager GetOrLaunch used to do this
+		// as a side effect of launching.
+		if !mgr.HasAlias(modelID) {
+			return fmt.Errorf("%s: unknown model alias %q", kind, modelID)
 		}
-		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
+
+		// Resolve per turn rather than once here: the memory budget may evict
+		// this model between messages, and it comes back on a new port. The
+		// lease taken by each Acquire is what stops an eviction landing
+		// mid-generation. Launching eagerly at session start would also pin a
+		// model the user has not sent a message to yet.
+		resolve := func() (OpenAIEndpoint, func(), error) {
+			endpoint, release, err := mgr.Acquire(modelID)
+			if err != nil {
+				return OpenAIEndpoint{}, nil, err
+			}
+			return *endpoint, release, nil
+		}
+		transport := NewManagedChatTransport(resolve, modelID, session.Settings, nil)
 		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "pi":

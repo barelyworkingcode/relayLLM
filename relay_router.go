@@ -147,7 +147,9 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte) {
-	endpoint, err := mgr.GetOrLaunch(alias)
+	// The lease is held for the whole proxied exchange, including the SSE
+	// stream, so the budget cannot evict this instance mid-response.
+	endpoint, release, err := mgr.Acquire(alias)
 	if err != nil {
 		slog.Warn("relay router: failed to launch managed server", "kind", mgr.profile.Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -155,6 +157,8 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	defer release()
+
 	target, _ := url.Parse(endpoint.BaseURL)
 	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias).ServeHTTP(w, r)
 }

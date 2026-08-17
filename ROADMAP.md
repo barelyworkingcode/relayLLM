@@ -19,6 +19,8 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 | Priority | Item | Rough size | Notes |
 |----------|------|-----------|-------|
+| Medium | Relay-router `/v1/models` omits Ollama | small | The router lists managed aliases + OpenAI endpoints only; `/api/models` is the complete list. Ollama is an HTTP upstream like the rest and would slot in. Claude/pi can't be proxied OpenAI-style. |
+| Low | Compute-buffer term in the memory estimate is a flat headroom % | small | Real cost scales with `ubatch-size` and the graph's widest node. If the 10% default proves wrong at ubatch 4096, measure a few models and fit something better (ADR-009). |
 | Low | `ServerManager.StopAll` on test cleanup may terminate orphan llama-server / mlx-serve | small | Edge case. Detect by PID provenance if it becomes a real annoyance. |
 | Low | mlx-serve vision models: per-model attachment capability | small | `mmproj` detection (`server_manager.go` `ListModels`) is llama-specific; mlx configs have no equivalent flag yet. Revisit when a multimodal MLX model is configured. |
 
@@ -36,6 +38,8 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 | Pre-commit hook pattern in `../relay`, `../eve`, `../relayScheduler` | each repo | Apply the `.githooks/pre-commit` pattern landed here. Without it, sibling suites drift. |
 
 ## Closed (recent — for context)
+
+- Managed-server memory budget: `maxLoaded` + `maxMemoryGB` caps with LRU eviction, per-turn leases so eviction never lands mid-generation, and an idle reaper (`idleTimeoutMinutes`). Model sizes are computed from GGUF headers / MLX `config.json` — including sliding-window attention and per-layer GQA, without which Gemma 4 12B over-estimates ~25x. Session transports now resolve their backend per turn (`BackendResolver`), which also fixes sessions being pinned to a dead port after a server crash. New `gguf.go` + `server_memory.go`; budgets surfaced in `/api/status`. See ADR-009.
 
 - `mcp_client.go` `MCPManager` 0% → ~88% hermetic via the SDK's `NewInMemoryTransports` (real in-process MCP server). Extracted `newMCPClient()` so the test drives the production progress-notification handler. Subprocess `Start()` stays live-tier (`mcp_integration_test.go`). `mcp_client_test.go`.
 - Pre-commit hook now runs the hermetic suite under the race detector (`go test -race ./...`). ~+1s steady-state. Caught the `TestWS_RenameSession_UpdatesName` race.
