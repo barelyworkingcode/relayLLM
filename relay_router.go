@@ -102,8 +102,19 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				"status":       status,
 				"architecture": map[string]any{"input_modalities": modalities},
 			}
+			// n_ctx is what the server will actually run with; n_ctx_train is
+			// the model's native limit. Clients read n_ctx first and fall back
+			// to n_ctx_train, so a model with no pinned ctx-size still reports
+			// a real number instead of the client's generic default.
+			meta := map[string]any{}
 			if entry.ContextSize > 0 {
-				row["meta"] = map[string]any{"n_ctx": entry.ContextSize}
+				meta["n_ctx"] = entry.ContextSize
+			}
+			if entry.TrainedContext > 0 {
+				meta["n_ctx_train"] = entry.TrainedContext
+			}
+			if len(meta) > 0 {
+				row["meta"] = meta
 			}
 			data = append(data, row)
 		}
@@ -113,9 +124,9 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			if !status.Online {
 				continue
 			}
-			for _, id := range status.Models {
-				data = append(data, map[string]any{
-					"id":       status.Endpoint.Name + "/" + id,
+			for _, m := range status.Models {
+				row := map[string]any{
+					"id":       status.Endpoint.Name + "/" + m.ID,
 					"object":   "model",
 					"created":  0,
 					"owned_by": status.Endpoint.Name,
@@ -123,7 +134,14 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 					// already dropped the unreachable ones, so anything listed
 					// here is usable right now.
 					"status": map[string]any{"value": ModelStatusLoaded},
-				})
+				}
+				// Only when the upstream actually advertised one — omitting the
+				// field lets the client apply its own default rather than
+				// trusting a number we invented.
+				if m.ContextLength > 0 {
+					row["meta"] = map[string]any{"n_ctx": m.ContextLength}
+				}
+				data = append(data, row)
 			}
 		}
 	}

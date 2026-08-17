@@ -220,8 +220,8 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 			if !status.Online {
 				continue
 			}
-			for _, id := range status.Models {
-				inputs.RouterModels = append(inputs.RouterModels, status.Endpoint.Name+"/"+id)
+			for _, m := range status.Models {
+				inputs.RouterModels = append(inputs.RouterModels, status.Endpoint.Name+"/"+m.ID)
 			}
 		}
 	}

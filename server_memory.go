@@ -224,6 +224,39 @@ func estimateMLXMemory(modelDir string, cfg ServerModelConfig) (weights, kv int6
 	return weights, kv, nil
 }
 
+// modelTrainedContext returns the context length the model was trained with,
+// read from its metadata. Used as the n_ctx_train figure in catalog listings
+// so a model with no explicit ctx-size still reports a real number instead of
+// letting clients fall back to a generic default.
+//
+// Returns 0 when the metadata cannot be read; callers omit the field rather
+// than substituting a guess.
+func modelTrainedContext(profile ServerProfile, cfg ServerModelConfig) int64 {
+	modelPath, _ := cfg.Args["model"].(string)
+	if modelPath == "" {
+		return 0
+	}
+
+	if profile.Kind == "mlx" {
+		raw, err := os.ReadFile(filepath.Join(modelPath, "config.json"))
+		if err != nil {
+			return 0
+		}
+		var mc mlxConfig
+		if json.Unmarshal(raw, &mc) != nil {
+			return 0
+		}
+		return int64(mc.MaxPositions)
+	}
+
+	md, err := ReadGGUFMetadata(modelPath)
+	if err != nil {
+		return 0
+	}
+	trained, _ := md.archInt("context_length")
+	return trained
+}
+
 // numericArg reads a JSON-decoded numeric config value. Values arrive as
 // float64 from encoding/json, but hand-built test configs may use int.
 func numericArg(args map[string]any, key string) (float64, bool) {
