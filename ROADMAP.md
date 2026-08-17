@@ -19,6 +19,7 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 
 | Priority | Item | Rough size | Notes |
 |----------|------|-----------|-------|
+| Low | Relay-router `GET /models/sse` not implemented | small | llama.cpp router mode streams load/download progress here. pi's client swallows the failure and falls back to polling `/models`, so the only loss is progress UI during a load. Needs a pub/sub from `ServerManager` state changes. |
 | Medium | Relay-router `/v1/models` omits Ollama | small | The router lists managed aliases + OpenAI endpoints only; `/api/models` is the complete list. Ollama is an HTTP upstream like the rest and would slot in. Claude/pi can't be proxied OpenAI-style. |
 | Low | Compute-buffer term in the memory estimate is a flat headroom % | small | Real cost scales with `ubatch-size` and the graph's widest node. If the 10% default proves wrong at ubatch 4096, measure a few models and fit something better (ADR-009). |
 | Low | `ServerManager.StopAll` on test cleanup may terminate orphan llama-server / mlx-serve | small | Edge case. Detect by PID provenance if it becomes a real annoyance. |

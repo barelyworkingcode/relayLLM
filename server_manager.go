@@ -193,6 +193,11 @@ type ServerManager struct {
 	// admission control never touches the filesystem while holding mu.
 	memory map[string]int64
 
+	// loadErrors records why the last explicit StartLoad failed, per alias.
+	// Without it a client polling for "loaded" would spin forever on a model
+	// that can never start.
+	loadErrors map[string]string
+
 	// idleSignal is closed and replaced every time an instance releases its
 	// last lease or is removed. A goroutine blocked on admission grabs the
 	// current channel under mu, then selects on it — a broadcast that works
@@ -241,6 +246,7 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 		instances:  make(map[string]*serverInstance),
 		clock:      DefaultClock,
 		memory:     make(map[string]int64, len(cfg.Models)),
+		loadErrors: make(map[string]string),
 		idleSignal: make(chan struct{}),
 		reaperStop: make(chan struct{}),
 
@@ -900,6 +906,97 @@ func buildServerArgs(profile ServerProfile, args map[string]any, port int) []str
 		}
 	}
 	return result
+}
+
+// Model status values, matching llama.cpp router mode's /models vocabulary so
+// clients written against it (pi's built-in llama.cpp extension, for one) can
+// read our catalog unmodified.
+const (
+	ModelStatusLoaded   = "loaded"
+	ModelStatusLoading  = "loading"
+	ModelStatusUnloaded = "unloaded"
+)
+
+// ManagedModelInfo describes one configured alias for catalog listings.
+// ContextSize is 0 when the model does not pin a ctx-size.
+type ManagedModelInfo struct {
+	Alias          string
+	Status         string
+	Failed         bool   // last explicit load failed; clients stop polling on this
+	Error          string // failure detail, empty unless Failed
+	ContextSize    int64
+	SupportsImages bool
+}
+
+// ModelCatalog returns every configured alias with its current load state.
+// Unlike ListInstances, which only knows about processes that exist, this
+// covers the whole configured set — a catalog listing needs the models you
+// could load, not just the ones already running.
+func (m *ServerManager) ModelCatalog() []ManagedModelInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]ManagedModelInfo, 0, len(m.config.Models))
+	for _, cfg := range m.config.Models {
+		status := ModelStatusUnloaded
+		if inst, ok := m.instances[cfg.Alias]; ok && !inst.exited.Load() {
+			// An instance exists but has not passed its health check yet, so
+			// the process is up and still loading weights.
+			status = ModelStatusLoading
+			if inst.healthy.Load() {
+				status = ModelStatusLoaded
+			}
+		}
+
+		entry := ManagedModelInfo{Alias: cfg.Alias, Status: status}
+		if msg, failed := m.loadErrors[cfg.Alias]; failed && status == ModelStatusUnloaded {
+			// Only surface a failure while nothing is running for the alias —
+			// a later successful load supersedes the stale error.
+			entry.Failed = true
+			entry.Error = msg
+		}
+		if ctx, ok := numericArg(cfg.Args, "ctx-size"); ok && ctx > 0 {
+			entry.ContextSize = int64(ctx)
+		}
+		_, entry.SupportsImages = cfg.Args["mmproj"]
+
+		out = append(out, entry)
+	}
+	return out
+}
+
+// StartLoad begins loading alias in the background and returns immediately.
+// Callers poll ModelCatalog for the outcome.
+//
+// Loading asynchronously is not an optimization — llama.cpp router mode's
+// /models/load behaves this way, and clients written against it put a short
+// timeout on the request itself (pi uses 15s). Loading a cold 40GB model
+// synchronously would abort the caller's HTTP request long before the server
+// finished starting.
+func (m *ServerManager) StartLoad(alias string) error {
+	if m.config.FindByAlias(alias) == nil {
+		return fmt.Errorf("%s: unknown model alias %q", m.profile.Kind, alias)
+	}
+
+	m.mu.Lock()
+	delete(m.loadErrors, alias)
+	m.mu.Unlock()
+
+	go func() {
+		_, release, err := m.Acquire(alias)
+		if err != nil {
+			slog.Warn(fmt.Sprintf("%s: explicit load failed", m.profile.Kind), "alias", alias, "error", err)
+			m.mu.Lock()
+			m.loadErrors[alias] = err.Error()
+			m.mu.Unlock()
+			return
+		}
+		// Drop the lease straight away. An explicit load pins nothing — it
+		// makes the model resident, and the idle reaper or a budget eviction
+		// reclaims it on the usual terms.
+		release()
+	}()
+	return nil
 }
 
 // Aliases returns the alias names of all configured models.
