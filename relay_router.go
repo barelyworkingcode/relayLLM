@@ -134,6 +134,13 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 					// already dropped the unreachable ones, so anything listed
 					// here is usable right now.
 					"status": map[string]any{"value": ModelStatusLoaded},
+					// Text unless the upstream advertised otherwise: plain
+					// OpenAI /v1/models has no modality field, so a VLM behind
+					// an endpoint that stays quiet is indistinguishable from a
+					// text model. Emitting the key either way keeps every row
+					// the same shape for clients that read
+					// architecture.input_modalities unconditionally.
+					"architecture": map[string]any{"input_modalities": endpointModalities(m)},
 				}
 				// Only when the upstream actually advertised one — omitting the
 				// field lets the client apply its own default rather than
@@ -358,4 +365,14 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		}
 	}()
 	return p
+}
+
+// endpointModalities renders an upstream model's advertised input modalities.
+// Text is always present: every chat model takes text, and a client that finds
+// an empty list has nothing to fall back on.
+func endpointModalities(m UpstreamModel) []string {
+	if m.SupportsImages {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
