@@ -379,3 +379,72 @@ func TestUpstreamModelRow_ContextLengthFieldNames(t *testing.T) {
 		})
 	}
 }
+
+// Endpoint-backed rows must carry the same keys as managed ones. A client that
+// reads architecture.input_modalities unconditionally panics on a row that
+// omits it, taking the whole catalog down with it.
+func TestRouterCatalog_EndpointRowsCarryArchitecture(t *testing.T) {
+	upstream := newFakeOpenAIUpstream(t, []string{"gpt-test"})
+	registry := NewProxyRegistry(&OpenAIConfig{
+		Endpoints: []OpenAIEndpoint{
+			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "test-key"},
+		},
+	})
+
+	router := NewRelayRouter(":0", nil, registry)
+
+	var row catalogRow
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		if r.ID == "fakeep/gpt-test" {
+			row = r
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("endpoint model missing from catalog")
+	}
+	if row.Architecture == nil {
+		t.Fatal("endpoint row has no architecture; clients reading it unconditionally reject the catalog")
+	}
+	// The upstream advertises no modality field, so text is all we can honestly
+	// claim — a VLM behind the endpoint is indistinguishable from here.
+	if got := row.Architecture.InputModalities; len(got) != 1 || got[0] != "text" {
+		t.Errorf("endpoint modalities = %v, want [text]", got)
+	}
+}
+
+// An upstream that speaks llama.cpp router mode declares its modalities; we
+// pass that through rather than flattening every endpoint model to text. This
+// is the only way a VLM behind an OpenAI endpoint can be distinguished from a
+// text model — plain /v1/models has no field for it.
+func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
+			{"id": "vlm", "architecture": map[string]any{"input_modalities": []string{"text", "image"}}},
+			{"id": "txt", "architecture": map[string]any{"input_modalities": []string{"text"}}},
+			{"id": "quiet"},
+		}})
+	}))
+	defer upstream.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{
+		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	})
+	router := NewRelayRouter(":0", nil, registry)
+
+	rows := map[string]catalogRow{}
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		rows[r.ID] = r
+	}
+
+	if got := rows["ep/vlm"].Architecture.InputModalities; len(got) != 2 || got[1] != "image" {
+		t.Errorf("ep/vlm modalities = %v, want [text image]", got)
+	}
+	if got := rows["ep/txt"].Architecture.InputModalities; len(got) != 1 || got[0] != "text" {
+		t.Errorf("ep/txt modalities = %v, want [text]", got)
+	}
+	// Silence is not a vision claim: sending images to a server that never said
+	// it takes them fails mid-turn, which is worse than not offering it.
+	if got := rows["ep/quiet"].Architecture.InputModalities; len(got) != 1 || got[0] != "text" {
+		t.Errorf("ep/quiet modalities = %v, want [text]", got)
+	}
+}

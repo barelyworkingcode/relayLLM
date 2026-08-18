@@ -210,7 +210,13 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 			}
 			seen[cfg.Alias] = true
 			inputs.ServerModels = append(inputs.ServerModels, cfg)
-			inputs.RouterModels = append(inputs.RouterModels, cfg.Alias)
+			// A configured mmproj is what makes the managed server accept
+			// images — same signal the router's catalog reports.
+			_, hasMmproj := cfg.Args["mmproj"]
+			inputs.RouterModels = append(inputs.RouterModels, PiRouterModel{
+				ID:             cfg.Alias,
+				SupportsImages: hasMmproj,
+			})
 		}
 	}
 	if m.proxyRegistry != nil {
@@ -221,7 +227,12 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 				continue
 			}
 			for _, m := range status.Models {
-				inputs.RouterModels = append(inputs.RouterModels, status.Endpoint.Name+"/"+m.ID)
+				// Only what the upstream advertised — plain OpenAI /v1/models
+				// has no modality field, so a quiet endpoint reads as text.
+				inputs.RouterModels = append(inputs.RouterModels, PiRouterModel{
+					ID:             status.Endpoint.Name + "/" + m.ID,
+					SupportsImages: m.SupportsImages,
+				})
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -43,8 +44,12 @@ func TestPiOverlayMaterialize(t *testing.T) {
 			{Alias: "qwen3-8b"},
 			{Alias: "deepseek-r1"},
 		},
-		RouterPort:   "8091",
-		RouterModels: []string{"qwen3-8b", "deepseek-r1", "lmstudio/Qwen3.5-27B"},
+		RouterPort: "8091",
+		RouterModels: []PiRouterModel{
+			{ID: "qwen3-8b", SupportsImages: true},
+			{ID: "deepseek-r1"},
+			{ID: "lmstudio/Qwen3.5-27B"},
+		},
 	}
 
 	overlayDir, err := MaterializePiOverlay(projectDir, cfg, inputs)
@@ -161,5 +166,56 @@ func mustReadJSON(t *testing.T, path string, v any) {
 	}
 	if err := json.Unmarshal(data, v); err != nil {
 		t.Fatalf("parse %s: %v", path, err)
+	}
+}
+
+// pi gates image attachments on the model's `input` array (model-config.js:
+// input: ("text"|"image")[]). Bare {"id": ...} rows leave every model
+// text-only, so pi answers "Current model does not support images" even when
+// the managed server was launched with an mmproj and can see fine.
+func TestPiOverlay_ModelsCarryInputModalities(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := &PiConfig{
+		ProjectOverlay: PiProjectOverlay{
+			Mode:                 AutoRegenAlways,
+			ExcludeUserProviders: true,
+			ExcludeUserSettings:  true,
+			AuthStrategy:         "none",
+		},
+	}
+	inputs := PiOverlayInputs{
+		RouterPort: "8180",
+		RouterModels: []PiRouterModel{
+			{ID: "vision-model", SupportsImages: true},
+			{ID: "text-model"},
+		},
+	}
+
+	overlayDir, err := MaterializePiOverlay(projectDir, cfg, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var models struct {
+		Providers map[string]struct {
+			Models []struct {
+				ID    string   `json:"id"`
+				Input []string `json:"input"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	mustReadJSON(t, filepath.Join(overlayDir, "models.json"), &models)
+
+	got := map[string][]string{}
+	for _, m := range models.Providers[piRelayRouterProvider].Models {
+		got[m.ID] = m.Input
+	}
+	if want := []string{"text", "image"}; !reflect.DeepEqual(got["vision-model"], want) {
+		t.Errorf("vision-model input = %v, want %v", got["vision-model"], want)
+	}
+	// Stated explicitly rather than left to pi's default, so the contract is
+	// visible in the file.
+	if want := []string{"text"}; !reflect.DeepEqual(got["text-model"], want) {
+		t.Errorf("text-model input = %v, want %v", got["text-model"], want)
 	}
 }

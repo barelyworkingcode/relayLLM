@@ -603,6 +603,10 @@ func buildOpenAIToolCallEntries(scope string, toolCalls []NormalizedToolCall) []
 type UpstreamModel struct {
 	ID            string
 	ContextLength int64
+	// SupportsImages is true only when the upstream said so. Plain OpenAI
+	// /v1/models carries no modality field, so false means "not advertised",
+	// not "proven text-only".
+	SupportsImages bool
 }
 
 // FetchOpenAIModels queries /v1/models on the endpoint and returns the raw
@@ -634,7 +638,11 @@ func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) ([]Upstream
 	}
 	models := make([]UpstreamModel, 0, len(result.Data))
 	for _, m := range result.Data {
-		models = append(models, UpstreamModel{ID: m.ID, ContextLength: m.contextLength()})
+		models = append(models, UpstreamModel{
+			ID:             m.ID,
+			ContextLength:  m.contextLength(),
+			SupportsImages: m.supportsImages(),
+		})
 	}
 	return models, nil
 }
@@ -647,14 +655,36 @@ type upstreamModelRow struct {
 	ID string `json:"id"`
 
 	// Context length under the name each server family happens to use.
-	MaxModelLen      int64 `json:"max_model_len"`       // vLLM, OMLX
-	MaxContextLength int64 `json:"max_context_length"`  // LM Studio
-	ContextLength    int64 `json:"context_length"`      // TGI, some gateways
-	ContextWindow    int64 `json:"context_window"`      // misc
+	MaxModelLen      int64 `json:"max_model_len"`      // vLLM, OMLX
+	MaxContextLength int64 `json:"max_context_length"` // LM Studio
+	ContextLength    int64 `json:"context_length"`     // TGI, some gateways
+	ContextWindow    int64 `json:"context_window"`     // misc
 	Meta             *struct {
 		NCtx      int64 `json:"n_ctx"`
 		NCtxTrain int64 `json:"n_ctx_train"`
 	} `json:"meta"` // llama.cpp
+
+	// llama.cpp router mode. Read opportunistically for the same reason as the
+	// context fields: an upstream that declares its modalities lets us tell a
+	// VLM from a text model, which plain OpenAI /v1/models cannot express.
+	Architecture *struct {
+		InputModalities []string `json:"input_modalities"`
+	} `json:"architecture"`
+}
+
+// supportsImages reports whether the upstream explicitly advertised image
+// input. Absent the field we say no — claiming vision a server does not have
+// makes clients send images that come back as errors mid-turn.
+func (m upstreamModelRow) supportsImages() bool {
+	if m.Architecture == nil {
+		return false
+	}
+	for _, mod := range m.Architecture.InputModalities {
+		if mod == "image" {
+			return true
+		}
+	}
+	return false
 }
 
 // contextLength returns the first context figure the row actually carries,

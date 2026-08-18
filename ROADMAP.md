@@ -34,11 +34,14 @@ For *why* current architectural choices were made, see [`docs/decisions/`](docs/
 | Item | Owner | Notes |
 |------|-------|-------|
 | Bridge wire types duplicated across `../relay/bridge/manifest.go` and `relayLLM/manifest.go` | relay | Shared Go module or codegen from a single source. Brittle today — `ActionDecl.ForEach` was added to both sides manually in a coordinated PR with the Service Inspector landing. |
+| oMLX `/v1/models` does not declare `architecture.input_modalities` | oMLX | oMLX detects VLMs internally (`model_discovery.py`) but its catalog emits only `max_model_len`. relayLLM now passes the field through when present, so adding it upstream is all that stands between an oMLX vision model and pi being willing to send it images. Until then endpoint models read as text-only. |
 | Eve + relay + relayLLM + mock-LLM end-to-end integration tier | platform | No system-level confidence today. Either nightly on a dev box or stays manual. |
 | Single trace-id from Eve → relay → relayLLM → MCP | platform | Today debugging means tailing 5+ log files. Big observability win. |
 | Pre-commit hook pattern in `../relay`, `../eve`, `../relayScheduler` | each repo | Apply the `.githooks/pre-commit` pattern landed here. Without it, sibling suites drift. |
 
 ## Closed (recent — for context)
+
+- Vision capability now reaches pi. Two independent gaps: the pi project overlay wrote bare `{"id": ...}` rows, and pi's `openai-completions` provider does no discovery — it gates image attachments on the model's `input` array (`model-config.js`), so every model read as text-only and pi answered "Current model does not support images" even for a model launched with an `mmproj`. The overlay now states `input: ["text"]` / `["text","image"]` explicitly. Separately, endpoint-backed rows in the router catalog carried no `architecture` key at all, which a client reading it unconditionally would choke on; they now do, populated from the upstream's own `architecture.input_modalities` when it declares one (llama.cpp router mode does). We never infer vision — an upstream that stays quiet reads as text, because sending images to a server that cannot take them fails mid-turn.
 
 - Managed-server memory budget: `maxLoaded` + `maxMemoryGB` caps with LRU eviction, per-turn leases so eviction never lands mid-generation, and an idle reaper (`idleTimeoutMinutes`). Model sizes are computed from GGUF headers / MLX `config.json` — including sliding-window attention and per-layer GQA, without which Gemma 4 12B over-estimates ~25x. Session transports now resolve their backend per turn (`BackendResolver`), which also fixes sessions being pinned to a dead port after a server crash. New `gguf.go` + `server_memory.go`; budgets surfaced in `/api/status`. See ADR-009.
 
