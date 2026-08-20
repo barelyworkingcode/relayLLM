@@ -155,9 +155,15 @@ func settingsSchema() []FieldDecl {
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "/usr/local/bin/llama-server"},
 				{ID: "modelDir", Label: "Model directory", Type: "text", Help: "Base directory for relative model paths."},
 				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "8090", Help: "First port; each model instance increments from here. Blank uses the 8090 default."},
+				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
+				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total estimated memory across loaded models. Sizes are computed from each GGUF (weights + KV cache at the configured ctx-size). Blank = unlimited."},
+				{ID: "idleTimeoutMinutes", Label: "Idle timeout (minutes)", Type: "number", Help: "Stop a model after this long with nothing using it. Blank = never reclaim."},
+				{ID: "memoryHeadroomPercent", Label: "Memory headroom (%)", Type: "number", Placeholder: "10", Help: "Padding added to every estimate for compute buffers, which are not modelled directly. Raise if you run large batch/ubatch sizes."},
+				{ID: "admissionTimeoutSeconds", Label: "Admission timeout (s)", Type: "number", Placeholder: "120", Help: "How long a request waits for a busy model to finish when the budget is full, before failing."},
 				{ID: "models", Label: "Models", Type: "array", Item: &FieldDecl{
 					Type: "object", Label: "model", Fields: []FieldDecl{
 						{ID: "alias", Label: "Alias", Type: "text", Required: true, Help: "Routing name (llama/{alias})."},
+						{ID: "memoryGB", Label: "Memory override (GB)", Type: "number", Help: "Skip the computed estimate for this model and use this figure. Not a llama-server flag."},
 						{ID: "flags", Label: "llama-server flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
 							Help: `Each key becomes --key. true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. model, ctx-size, n-gpu-layers, flash-attn).`},
 					},
@@ -170,9 +176,15 @@ func settingsSchema() []FieldDecl {
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "~/.local/mlx-serve/mlx-serve"},
 				{ID: "modelDir", Label: "Model directory", Type: "text", Help: "Base directory for relative model paths."},
 				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "9400", Help: "First port; each model instance increments from here. Blank uses the 9400 default."},
+				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
+				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total estimated memory across loaded models. Sizes are computed from the model directory (weights + KV cache from config.json). Blank = unlimited."},
+				{ID: "idleTimeoutMinutes", Label: "Idle timeout (minutes)", Type: "number", Help: "Stop a model after this long with nothing using it. Blank = never reclaim."},
+				{ID: "memoryHeadroomPercent", Label: "Memory headroom (%)", Type: "number", Placeholder: "10", Help: "Padding added to every estimate for compute buffers, which are not modelled directly."},
+				{ID: "admissionTimeoutSeconds", Label: "Admission timeout (s)", Type: "number", Placeholder: "120", Help: "How long a request waits for a busy model to finish when the budget is full, before failing."},
 				{ID: "models", Label: "Models", Type: "array", Item: &FieldDecl{
 					Type: "object", Label: "model", Fields: []FieldDecl{
 						{ID: "alias", Label: "Alias", Type: "text", Required: true, Help: "Routing name (mlx/{alias})."},
+						{ID: "memoryGB", Label: "Memory override (GB)", Type: "number", Help: "Skip the computed estimate for this model and use this figure. Not an mlx-serve flag."},
 						{ID: "flags", Label: "mlx-serve flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
 							Help: `Each key becomes --key. model = path to the MLX model DIRECTORY. true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. ctx-size, temp, kv-quant, max-tokens).`},
 					},

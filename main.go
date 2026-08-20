@@ -171,6 +171,7 @@ func main() {
 	var llamaManager *ServerManager
 	if len(cfg.Llama.Models) > 0 {
 		llamaManager = NewServerManager(llamaProfile, cfg.Llama, *llamaServerPath)
+		llamaManager.StartIdleReaper()
 		slog.Info("llama models configured", "count", len(cfg.Llama.Models), "binary", llamaManager.binaryPath)
 	}
 	sessions.SetLlamaManager(llamaManager)
@@ -178,6 +179,7 @@ func main() {
 	var mlxManager *ServerManager
 	if len(cfg.Mlx.Models) > 0 {
 		mlxManager = NewServerManager(mlxProfile, cfg.Mlx, *mlxServePath)
+		mlxManager.StartIdleReaper()
 		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.binaryPath)
 	}
 	sessions.SetMlxManager(mlxManager)

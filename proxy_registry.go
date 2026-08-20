@@ -15,12 +15,12 @@ import (
 const proxyRegistryTTL = 15 * time.Second
 
 // EndpointStatus is one entry in the registry's snapshot. Models holds the
-// upstream IDs (no endpoint prefix); the router prefixes them when emitting
-// the aggregated /v1/models list.
+// upstream models (IDs carry no endpoint prefix); the router prefixes them
+// when emitting the aggregated /v1/models list.
 type EndpointStatus struct {
 	Endpoint    OpenAIEndpoint
 	Online      bool
-	Models      []string
+	Models      []UpstreamModel
 	LastChecked time.Time
 	Err         string // last probe error, for diagnostics; empty when Online
 }
@@ -78,7 +78,7 @@ func (r *ProxyRegistry) Snapshot(ctx context.Context) []EndpointStatus {
 	for _, ep := range r.cfg.Endpoints {
 		if s, ok := r.status[ep.Name]; ok {
 			dup := *s
-			dup.Models = append([]string(nil), s.Models...)
+			dup.Models = append([]UpstreamModel(nil), s.Models...)
 			out = append(out, dup)
 		}
 	}
@@ -97,8 +97,8 @@ func (r *ProxyRegistry) SnapshotModels(ctx context.Context) []ModelInfo {
 		if !status.Online {
 			continue
 		}
-		for _, id := range status.Models {
-			value := status.Endpoint.Name + "/" + id
+		for _, m := range status.Models {
+			value := status.Endpoint.Name + "/" + m.ID
 			out = append(out, ModelInfo{
 				Label:    value,
 				Value:    value,
@@ -168,7 +168,7 @@ func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
 		close(ch)
 	}()
 
-	ids, err := FetchOpenAIModelIDs(ctx, ep)
+	models, err := FetchOpenAIModels(ctx, ep)
 	status := &EndpointStatus{
 		Endpoint:    ep,
 		LastChecked: time.Now(),
@@ -179,7 +179,7 @@ func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
 		slog.Warn("proxy registry: endpoint offline", "endpoint", ep.Name, "error", err)
 	} else {
 		status.Online = true
-		status.Models = ids
+		status.Models = models
 	}
 
 	r.mu.Lock()

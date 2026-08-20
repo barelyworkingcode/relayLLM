@@ -20,7 +20,17 @@ import (
 type PiOverlayInputs struct {
 	ServerModels []ServerModelConfig // consumed by pi_models.go to synthesize Eve picker entries
 	RouterPort   string              // empty disables the relay-router provider entry
-	RouterModels []string
+	RouterModels []PiRouterModel
+}
+
+// PiRouterModel is one row of the router snapshot written into pi's
+// models.json. Capability travels with the id because pi's `openai-completions`
+// provider does no discovery: it trusts models.json and nothing else, so a
+// vision model we describe as bare {"id": ...} is one pi will refuse to send
+// images to ("Current model does not support images").
+type PiRouterModel struct {
+	ID             string
+	SupportsImages bool
 }
 
 // piOverlayFileMode is 0o600 to match pi's own auth.json perms — these files
@@ -166,8 +176,15 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 	//    explicitly — pi treats an empty models array as override-only.
 	if inputs.RouterPort != "" {
 		models := make([]map[string]any, 0, len(inputs.RouterModels))
-		for _, id := range inputs.RouterModels {
-			models = append(models, map[string]any{"id": id})
+		for _, rm := range inputs.RouterModels {
+			// pi's schema: input is ("text"|"image")[]. Omitting it leaves the
+			// model text-only, so state it either way rather than relying on
+			// pi's default.
+			input := []string{"text"}
+			if rm.SupportsImages {
+				input = append(input, "image")
+			}
+			models = append(models, map[string]any{"id": rm.ID, "input": input})
 		}
 		providers[piRelayRouterProvider] = map[string]any{
 			"baseUrl": fmt.Sprintf("http://localhost:%s/v1", inputs.RouterPort),

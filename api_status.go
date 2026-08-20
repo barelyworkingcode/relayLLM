@@ -26,11 +26,20 @@ func RegisterStatusRoutes(
 		if mlx != nil {
 			mlxInstances = mlx.ListInstances()
 		}
+		// Budgets are reported per configured manager so the Service Inspector
+		// can show why a model is loaded, queued, or evicted.
+		budgets := []BudgetInfo{}
+		for _, mgr := range []*ServerManager{llama, mlx} {
+			if mgr != nil {
+				budgets = append(budgets, mgr.Budget())
+			}
+		}
 		writeJSON(w, 200, map[string]interface{}{
 			"uptimeSeconds": int64(time.Since(startTime).Seconds()),
 			"sessions":      len(sessions.ListSessions()),
 			"instances":     instances,
 			"mlxInstances":  mlxInstances,
+			"budgets":       budgets,
 			"terminals":     terminals.ListSummary(),
 		})
 	})
