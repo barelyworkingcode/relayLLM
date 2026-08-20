@@ -10,16 +10,39 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// BackendAcquirer is implemented by transports whose backend is a managed
+// process that can be stopped between turns. BaseChatProvider calls
+// AcquireBackend before each turn and holds the returned release until the
+// tool loop finishes, which both pins the process against eviction and lets
+// the transport re-resolve an endpoint whose port may have changed.
+//
+// Transports without a managed backend simply don't implement it.
+type BackendAcquirer interface {
+	AcquireBackend(ctx context.Context) (release func(), err error)
+}
+
+// BackendResolver launches-or-reuses a managed server and returns the endpoint
+// to talk to plus a lease release. See ServerManager.Acquire.
+type BackendResolver func() (OpenAIEndpoint, func(), error)
 
 // OpenAIChatTransport implements ChatTransport for any server that speaks
 // the OpenAI /v1/chat/completions protocol (OpenAI itself, LM Studio, Ollama's
 // /v1 compat layer, OMLX, llama.cpp server, etc.).
 type OpenAIChatTransport struct {
-	endpoint OpenAIEndpoint
-	model    string // bare model id (after prefix stripping)
+	// endpointMu guards endpoint, which a BackendResolver rewrites between
+	// turns. Reads go through ep(); a turn's tool loop runs on a different
+	// goroutine than the SendMessage that resolved it, so this is not
+	// theoretical.
+	endpointMu sync.RWMutex
+	endpoint   OpenAIEndpoint
+
+	resolve  BackendResolver // nil for plain HTTP endpoints
+	model    string          // bare model id (after prefix stripping)
 	client   *http.Client
 	settings BaseChatSettings
 
@@ -43,7 +66,41 @@ func NewOpenAIChatTransport(endpoint OpenAIEndpoint, model string, settings json
 	}
 }
 
-func (t *OpenAIChatTransport) Name() string { return "openai:" + t.endpoint.Name }
+// NewManagedChatTransport constructs a transport backed by a managed server.
+// The endpoint is resolved per turn via resolve rather than pinned at
+// construction, so the session survives the backing process being evicted and
+// relaunched on a different port.
+func NewManagedChatTransport(resolve BackendResolver, model string, settings json.RawMessage, client *http.Client) *OpenAIChatTransport {
+	t := NewOpenAIChatTransport(OpenAIEndpoint{}, model, settings, client)
+	t.resolve = resolve
+	return t
+}
+
+// ep returns a snapshot of the current endpoint.
+func (t *OpenAIChatTransport) ep() OpenAIEndpoint {
+	t.endpointMu.RLock()
+	defer t.endpointMu.RUnlock()
+	return t.endpoint
+}
+
+// AcquireBackend resolves the managed backend for the coming turn and returns
+// its lease release. A transport with no resolver is a plain HTTP endpoint:
+// nothing to acquire, and the release is a no-op.
+func (t *OpenAIChatTransport) AcquireBackend(ctx context.Context) (func(), error) {
+	if t.resolve == nil {
+		return func() {}, nil
+	}
+	endpoint, release, err := t.resolve()
+	if err != nil {
+		return nil, err
+	}
+	t.endpointMu.Lock()
+	t.endpoint = endpoint
+	t.endpointMu.Unlock()
+	return release, nil
+}
+
+func (t *OpenAIChatTransport) Name() string { return "openai:" + t.ep().Name }
 
 // Ping verifies the endpoint is reachable by calling /models. We accept any
 // 2xx as healthy, and 404 as "endpoint up but /models not implemented" — some
@@ -52,7 +109,15 @@ func (t *OpenAIChatTransport) Name() string { return "openai:" + t.endpoint.Name
 // unusable for no good reason. 401/403 still surface as errors because they
 // indicate misconfigured auth that the chat call would also fail on.
 func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint.BaseURL+"/models", nil)
+	// A managed backend has no endpoint until the first turn acquires one, and
+	// pinging it would mean launching the model at session-create time — the
+	// eager behavior the budget exists to avoid. Readiness is instead proven
+	// by the health check inside ServerManager.Acquire.
+	if t.resolve != nil {
+		return nil
+	}
+	ep := t.ep()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.BaseURL+"/models", nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -60,7 +125,7 @@ func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("not reachable at %s: %w", t.endpoint.BaseURL, err)
+		return fmt.Errorf("not reachable at %s: %w", ep.BaseURL, err)
 	}
 	defer resp.Body.Close()
 	switch {
@@ -68,7 +133,7 @@ func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 		return nil
 	case resp.StatusCode == http.StatusNotFound:
 		slog.Debug("openai: /models not implemented, treating endpoint as healthy",
-			"endpoint", t.endpoint.Name)
+			"endpoint", ep.Name)
 		return nil
 	default:
 		return fmt.Errorf("/models returned %d", resp.StatusCode)
@@ -78,8 +143,8 @@ func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 // addAuth attaches a Bearer token when the endpoint has an API key set.
 // No-op for endpoints (like local Ollama) that don't require auth.
 func (t *OpenAIChatTransport) addAuth(req *http.Request) {
-	if t.endpoint.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+t.endpoint.APIKey)
+	if key := t.ep().APIKey; key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 }
 
@@ -206,7 +271,7 @@ func (t *OpenAIChatTransport) PostChat(ctx context.Context, messages []map[strin
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint.BaseURL+"/chat/completions", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.ep().BaseURL+"/chat/completions", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
@@ -247,6 +312,7 @@ func decodeChatError(status int, body []byte) error {
 }
 
 func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []map[string]any) map[string]any {
+	strict := t.ep().Strict
 	body := map[string]any{
 		"model":    t.model,
 		"messages": messages,
@@ -255,7 +321,7 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 	// stream_options.include_usage is a real OpenAI field that most compat
 	// servers ignore safely — but older LM Studio releases and stricter
 	// gateways 400 on unknown body fields, so gate it on Strict.
-	if !t.endpoint.Strict {
+	if !strict {
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if t.settings.Temperature != nil {
@@ -264,16 +330,16 @@ func (t *OpenAIChatTransport) buildChatBody(messages []map[string]any, tools []m
 	if t.settings.TopP != nil {
 		body["top_p"] = *t.settings.TopP
 	}
-	if t.settings.TopK != nil && !t.endpoint.Strict {
+	if t.settings.TopK != nil && !strict {
 		// Not standard OpenAI, but most compatible servers (LM Studio, Ollama /v1)
 		// accept it as an extension. OpenAI proper rejects unknown fields on
 		// stricter API versions, so omit it when Strict is on.
 		body["top_k"] = *t.settings.TopK
 	}
-	if t.settings.MinP != nil && !t.endpoint.Strict {
+	if t.settings.MinP != nil && !strict {
 		body["min_p"] = *t.settings.MinP
 	}
-	if t.settings.RepetitionPenalty != nil && !t.endpoint.Strict {
+	if t.settings.RepetitionPenalty != nil && !strict {
 		body["repetition_penalty"] = *t.settings.RepetitionPenalty
 	}
 	if t.settings.PresencePenalty != nil {
@@ -532,11 +598,22 @@ func buildOpenAIToolCallEntries(scope string, toolCalls []NormalizedToolCall) []
 	return out
 }
 
-// FetchOpenAIModelIDs queries /v1/models on the endpoint and returns the raw
-// upstream model IDs (no endpoint prefix). The error return distinguishes
+// UpstreamModel is one model offered by a configured OpenAI-compatible
+// endpoint. ContextLength is 0 when the upstream does not advertise one.
+type UpstreamModel struct {
+	ID            string
+	ContextLength int64
+	// SupportsImages is true only when the upstream said so. Plain OpenAI
+	// /v1/models carries no modality field, so false means "not advertised",
+	// not "proven text-only".
+	SupportsImages bool
+}
+
+// FetchOpenAIModels queries /v1/models on the endpoint and returns the raw
+// upstream models (IDs carry no endpoint prefix). The error return distinguishes
 // "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
 // ProxyRegistry can record online/offline state accurately.
-func FetchOpenAIModelIDs(ctx context.Context, endpoint OpenAIEndpoint) ([]string, error) {
+func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) ([]UpstreamModel, error) {
 	client := &http.Client{Timeout: 3 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {
@@ -554,16 +631,73 @@ func FetchOpenAIModelIDs(ctx context.Context, endpoint OpenAIEndpoint) ([]string
 		return nil, fmt.Errorf("non-OK status %d", resp.StatusCode)
 	}
 	var result struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []upstreamModelRow `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode body: %w", err)
 	}
-	ids := make([]string, 0, len(result.Data))
+	models := make([]UpstreamModel, 0, len(result.Data))
 	for _, m := range result.Data {
-		ids = append(ids, m.ID)
+		models = append(models, UpstreamModel{
+			ID:             m.ID,
+			ContextLength:  m.contextLength(),
+			SupportsImages: m.supportsImages(),
+		})
 	}
-	return ids, nil
+	return models, nil
+}
+
+// upstreamModelRow is one entry of an upstream /v1/models response. Only `id`
+// is standard OpenAI; the context-length fields are server-specific extensions
+// that we read opportunistically so clients get a real context window instead
+// of a default.
+type upstreamModelRow struct {
+	ID string `json:"id"`
+
+	// Context length under the name each server family happens to use.
+	MaxModelLen      int64 `json:"max_model_len"`      // vLLM, OMLX
+	MaxContextLength int64 `json:"max_context_length"` // LM Studio
+	ContextLength    int64 `json:"context_length"`     // TGI, some gateways
+	ContextWindow    int64 `json:"context_window"`     // misc
+	Meta             *struct {
+		NCtx      int64 `json:"n_ctx"`
+		NCtxTrain int64 `json:"n_ctx_train"`
+	} `json:"meta"` // llama.cpp
+
+	// llama.cpp router mode. Read opportunistically for the same reason as the
+	// context fields: an upstream that declares its modalities lets us tell a
+	// VLM from a text model, which plain OpenAI /v1/models cannot express.
+	Architecture *struct {
+		InputModalities []string `json:"input_modalities"`
+	} `json:"architecture"`
+}
+
+// supportsImages reports whether the upstream explicitly advertised image
+// input. Absent the field we say no — claiming vision a server does not have
+// makes clients send images that come back as errors mid-turn.
+func (m upstreamModelRow) supportsImages() bool {
+	if m.Architecture == nil {
+		return false
+	}
+	for _, mod := range m.Architecture.InputModalities {
+		if mod == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+// contextLength returns the first context figure the row actually carries,
+// or 0 when the server advertises none.
+func (m upstreamModelRow) contextLength() int64 {
+	candidates := []int64{m.MaxModelLen, m.MaxContextLength, m.ContextLength, m.ContextWindow}
+	if m.Meta != nil {
+		candidates = append(candidates, m.Meta.NCtx, m.Meta.NCtxTrain)
+	}
+	for _, c := range candidates {
+		if c > 0 {
+			return c
+		}
+	}
+	return 0
 }

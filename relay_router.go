@@ -39,6 +39,8 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
 	mux.HandleFunc("GET /models", p.handleModels)
+	mux.HandleFunc("POST /models/load", p.handleModelLoad)
+	mux.HandleFunc("POST /models/unload", p.handleModelUnload)
 	mux.HandleFunc("GET /health", p.handleHealth)
 	mux.HandleFunc("/", p.handleProxy)
 
@@ -58,23 +60,63 @@ func (p *RelayRouter) Close() error {
 	return p.server.Close()
 }
 
+// handleModels serves the catalog for both /v1/models and /models.
+//
+// Rows carry llama.cpp router mode's extra fields (status, meta, architecture)
+// alongside the OpenAI ones. That is deliberate: clients written against
+// llama.cpp's router — pi ships a built-in extension that does exactly this —
+// validate every row has a string `status.value` and reject the whole catalog
+// without it. The fields are additive, so plain OpenAI clients ignore them.
 func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	var data []map[string]any
 	// Dispatch gives an alias to the first manager that has it, so list each
 	// alias once, under the manager that actually serves it.
 	seen := make(map[string]bool)
 	for _, m := range p.managers {
-		for _, alias := range m.Aliases() {
-			if seen[alias] {
+		for _, entry := range m.ModelCatalog() {
+			if seen[entry.Alias] {
 				continue
 			}
-			seen[alias] = true
-			data = append(data, map[string]any{
-				"id":       alias,
-				"object":   "model",
-				"created":  0,
-				"owned_by": m.profile.Group,
-			})
+			seen[entry.Alias] = true
+
+			status := map[string]any{"value": entry.Status}
+			if entry.Failed {
+				// Clients poll until "loaded"; without a failure flag a model
+				// that can never start would be polled forever.
+				status["failed"] = true
+				if entry.Error != "" {
+					status["error"] = entry.Error
+				}
+			}
+
+			modalities := []string{"text"}
+			if entry.SupportsImages {
+				modalities = append(modalities, "image")
+			}
+
+			row := map[string]any{
+				"id":           entry.Alias,
+				"object":       "model",
+				"created":      0,
+				"owned_by":     m.profile.Group,
+				"status":       status,
+				"architecture": map[string]any{"input_modalities": modalities},
+			}
+			// n_ctx is what the server will actually run with; n_ctx_train is
+			// the model's native limit. Clients read n_ctx first and fall back
+			// to n_ctx_train, so a model with no pinned ctx-size still reports
+			// a real number instead of the client's generic default.
+			meta := map[string]any{}
+			if entry.ContextSize > 0 {
+				meta["n_ctx"] = entry.ContextSize
+			}
+			if entry.TrainedContext > 0 {
+				meta["n_ctx_train"] = entry.TrainedContext
+			}
+			if len(meta) > 0 {
+				row["meta"] = meta
+			}
+			data = append(data, row)
 		}
 	}
 	if p.registry != nil {
@@ -82,13 +124,31 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			if !status.Online {
 				continue
 			}
-			for _, id := range status.Models {
-				data = append(data, map[string]any{
-					"id":       status.Endpoint.Name + "/" + id,
+			for _, m := range status.Models {
+				row := map[string]any{
+					"id":       status.Endpoint.Name + "/" + m.ID,
 					"object":   "model",
 					"created":  0,
 					"owned_by": status.Endpoint.Name,
-				})
+					// Remote endpoints have no load step and the registry has
+					// already dropped the unreachable ones, so anything listed
+					// here is usable right now.
+					"status": map[string]any{"value": ModelStatusLoaded},
+					// Text unless the upstream advertised otherwise: plain
+					// OpenAI /v1/models has no modality field, so a VLM behind
+					// an endpoint that stays quiet is indistinguishable from a
+					// text model. Emitting the key either way keeps every row
+					// the same shape for clients that read
+					// architecture.input_modalities unconditionally.
+					"architecture": map[string]any{"input_modalities": endpointModalities(m)},
+				}
+				// Only when the upstream actually advertised one — omitting the
+				// field lets the client apply its own default rather than
+				// trusting a number we invented.
+				if m.ContextLength > 0 {
+					row["meta"] = map[string]any{"n_ctx": m.ContextLength}
+				}
+				data = append(data, row)
 			}
 		}
 	}
@@ -96,10 +156,72 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 		data = []map[string]any{}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	writeRouterJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   data,
+	})
+}
+
+// handleModelLoad starts loading a managed model and returns immediately —
+// see ServerManager.StartLoad for why this must not block.
+func (p *RelayRouter) handleModelLoad(w http.ResponseWriter, r *http.Request) {
+	mgr, model, ok := p.managedModelFromBody(w, r)
+	if !ok {
+		return
+	}
+	if err := mgr.StartLoad(model); err != nil {
+		writeRouterError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeRouterJSON(w, http.StatusOK, map[string]any{"success": true, "model": model})
+}
+
+// handleModelUnload stops a managed model. Unloading something that is not
+// running is a no-op rather than an error: callers use this to reach a state,
+// not to perform a transition.
+func (p *RelayRouter) handleModelUnload(w http.ResponseWriter, r *http.Request) {
+	mgr, model, ok := p.managedModelFromBody(w, r)
+	if !ok {
+		return
+	}
+	if err := mgr.StopInstance(model); err != nil {
+		slog.Debug("relay router: unload of a model that was not running", "model", model, "error", err)
+	}
+	writeRouterJSON(w, http.StatusOK, map[string]any{"success": true, "model": model})
+}
+
+// managedModelFromBody decodes {"model": "..."} and resolves it to the manager
+// that owns it, writing the error response itself when it cannot.
+func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Request) (*ServerManager, string, bool) {
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
+		writeRouterError(w, http.StatusBadRequest, "missing or invalid model field")
+		return nil, "", false
+	}
+	for _, mgr := range p.managers {
+		if mgr.HasAlias(body.Model) {
+			return mgr, body.Model, true
+		}
+	}
+	writeRouterError(w, http.StatusBadRequest,
+		fmt.Sprintf("model %q is not a managed server; only llama-server and mlx-serve models can be loaded or unloaded", body.Model))
+	return nil, "", false
+}
+
+func writeRouterJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(payload)
+}
+
+// writeRouterError emits the {"error":{"message":...}} envelope that
+// OpenAI-compatible and llama.cpp clients both parse for a human-readable
+// reason.
+func writeRouterError(w http.ResponseWriter, status int, msg string) {
+	writeRouterJSON(w, status, map[string]any{
+		"error": map[string]any{"message": msg},
 	})
 }
 
@@ -147,7 +269,9 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte) {
-	endpoint, err := mgr.GetOrLaunch(alias)
+	// The lease is held for the whole proxied exchange, including the SSE
+	// stream, so the budget cannot evict this instance mid-response.
+	endpoint, release, err := mgr.Acquire(alias)
 	if err != nil {
 		slog.Warn("relay router: failed to launch managed server", "kind", mgr.profile.Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -155,6 +279,8 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	defer release()
+
 	target, _ := url.Parse(endpoint.BaseURL)
 	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias).ServeHTTP(w, r)
 }
@@ -239,4 +365,14 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		}
 	}()
 	return p
+}
+
+// endpointModalities renders an upstream model's advertised input modalities.
+// Text is always present: every chat model takes text, and a client that finds
+// an empty list has nothing to fall back on.
+func endpointModalities(m UpstreamModel) []string {
+	if m.SupportsImages {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
