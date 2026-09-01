@@ -82,7 +82,7 @@ func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *FakeClock) {
 	mgr.memory["plain"] = 4 * bytesPerGB
 	mgr.memory["vision"] = 4 * bytesPerGB
 
-	return NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil), mgr, clk
+	return NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil), mgr, clk
 }
 
 func TestRouterCatalog_SatisfiesLlamaCppClientContract(t *testing.T) {
@@ -334,7 +334,7 @@ func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
 	mgr.trainedContext["pinned"] = 131072
 	mgr.trainedContext["unpinned"] = 262144
 
-	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil)
+	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)
 	rows := map[string]catalogRow{}
 	for _, r := range fetchCatalog(t, router, "/models") {
 		rows[r.ID] = r
@@ -391,7 +391,7 @@ func TestRouterCatalog_EndpointRowsCarryArchitecture(t *testing.T) {
 		},
 	})
 
-	router := NewRelayRouter(":0", nil, registry)
+	router := NewRelayRouter(":0", nil, registry, nil)
 
 	var row catalogRow
 	for _, r := range fetchCatalog(t, router, "/v1/models") {
@@ -429,7 +429,7 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
-	router := NewRelayRouter(":0", nil, registry)
+	router := NewRelayRouter(":0", nil, registry, nil)
 
 	rows := map[string]catalogRow{}
 	for _, r := range fetchCatalog(t, router, "/v1/models") {

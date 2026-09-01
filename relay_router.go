@@ -2,22 +2,29 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"time"
 )
 
 // RelayRouter aggregates managed-server aliases (llama.cpp, MLX, …) and
 // reachable OpenAI endpoint models behind one OpenAI-compatible listener.
 // Dispatch is by the request body's `model` field: bare alias → first
-// matching manager; virtual name → first reachable configured target;
-// `endpoint.Name/id` → matching OpenAI upstream.
+// matching manager; virtual name → ordered candidate targets, attempted in
+// turn until one works (see routeVirtual); `endpoint.Name/id` → matching
+// OpenAI upstream.
 // Endpoints that fail their last probe drop out of /v1/models and refuse
-// routing until the next 15s TTL cycle.
+// direct (`endpoint.Name/id`) routing until the next 15s TTL cycle — a
+// virtual model may still route through an offline-believed endpoint as a
+// last resort (see candidatesForVirtual).
 type RelayRouter struct {
 	managers []*ServerManager
 	registry *ProxyRegistry
@@ -26,20 +33,17 @@ type RelayRouter struct {
 }
 
 // NewRelayRouter creates a router on addr. Nil entries in managers are
-// dropped; registry may be nil to disable the endpoint branch. A router with
-// no live backends 400s every request — StartRelayRouter guards against
-// starting one.
-func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual ...*VirtualLLMConfig) *RelayRouter {
+// dropped; registry may be nil to disable the endpoint branch; virtual may be
+// nil to disable the virtual-model branch. A router with no live backends
+// 400s every request — StartRelayRouter guards against starting one.
+func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
 	live := make([]*ServerManager, 0, len(managers))
 	for _, m := range managers {
 		if m != nil {
 			live = append(live, m)
 		}
 	}
-	p := &RelayRouter{managers: live, registry: registry}
-	if len(virtual) > 0 {
-		p.virtual = virtual[0]
-	}
+	p := &RelayRouter{managers: live, registry: registry, virtual: virtual}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
@@ -74,8 +78,9 @@ func (p *RelayRouter) Close() error {
 // without it. The fields are additive, so plain OpenAI clients ignore them.
 func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	var data []map[string]any
-	// Dispatch gives an alias to the first manager that has it, so list each
-	// alias once, under the manager that actually serves it.
+	// Dispatch resolves a model id to exactly one behavior, so every row type
+	// (managed alias, endpoint model, virtual name) shares this dedup set —
+	// a name that collides with an earlier row is dead config either way.
 	seen := make(map[string]bool)
 	for _, m := range p.managers {
 		for _, entry := range m.ModelCatalog() {
@@ -124,14 +129,25 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			data = append(data, row)
 		}
 	}
+	// Snapshotted once and reused for every endpoint row below AND every
+	// virtual row further down — Snapshot is O(endpoints); probing it again
+	// per virtual model would make this handler O(virtuals × endpoints) for
+	// no benefit, since every virtual model shares the same registry state.
+	var epStatuses []EndpointStatus
 	if p.registry != nil {
-		for _, status := range p.registry.Snapshot(r.Context()) {
+		epStatuses = p.registry.Snapshot(r.Context())
+		for _, status := range epStatuses {
 			if !status.Online {
 				continue
 			}
 			for _, m := range status.Models {
+				id := status.Endpoint.Name + "/" + m.ID
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
 				row := map[string]any{
-					"id":       status.Endpoint.Name + "/" + m.ID,
+					"id":       id,
 					"object":   "model",
 					"created":  0,
 					"owned_by": status.Endpoint.Name,
@@ -158,18 +174,18 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if p.virtual != nil {
-		for _, virtual := range p.virtual.Models {
-			if _, ok := p.resolveVirtual(r, virtual.Name); !ok {
+		for i := range p.virtual.Models {
+			virtual := &p.virtual.Models[i]
+			if seen[virtual.Name] {
 				continue
 			}
-			data = append(data, map[string]any{
-				"id":           virtual.Name,
-				"object":       "model",
-				"created":      0,
-				"owned_by":     "virtual",
-				"status":       map[string]any{"value": ModelStatusLoaded},
-				"architecture": map[string]any{"input_modalities": []string{"text"}},
-			})
+			seen[virtual.Name] = true
+			// A virtual name is stable config — unlike an endpoint model, it
+			// doesn't disappear from the catalog just because its targets are
+			// all offline right now. It reports unloaded+failed instead, so a
+			// client polling for readiness stops rather than spinning forever
+			// on a name that will never resolve.
+			data = append(data, p.virtualCatalogRow(virtual, epStatuses))
 		}
 	}
 	if data == nil {
@@ -231,8 +247,9 @@ func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Reques
 	return nil, "", false
 }
 
-// resolveVirtual probes the configured endpoint registry as needed, then
-// chooses the first online target in the virtual model's declared order.
+// resolvedVirtualTarget is one candidate the router will actually try for a
+// virtual model. manager set means an alias target; otherwise it's an
+// endpoint target (endpoint + upstreamID).
 type resolvedVirtualTarget struct {
 	endpoint   OpenAIEndpoint
 	upstreamID string
@@ -240,37 +257,208 @@ type resolvedVirtualTarget struct {
 	alias      string
 }
 
-func (p *RelayRouter) resolveVirtual(r *http.Request, name string) (resolvedVirtualTarget, bool) {
+// label renders the target for a human-readable failure message.
+func (t resolvedVirtualTarget) label() string {
+	if t.manager != nil {
+		return fmt.Sprintf("alias %q", t.alias)
+	}
+	return fmt.Sprintf("endpoint %q", t.endpoint.Name)
+}
+
+// virtualCandidates returns every usable target for a configured virtual
+// model, in the order handleProxy should attempt them. Returns nil when name
+// isn't a configured virtual at all — callers distinguish "not a virtual" from
+// "a virtual with no usable target" by checking p.virtual.Find themselves.
+func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []resolvedVirtualTarget {
 	if p.virtual == nil {
-		return resolvedVirtualTarget{}, false
+		return nil
 	}
 	virtual := p.virtual.Find(name)
-	if virtual == nil || virtual.Name == "" {
-		return resolvedVirtualTarget{}, false
+	if virtual == nil {
+		return nil
 	}
-	online := make(map[string]OpenAIEndpoint)
+	var statuses []EndpointStatus
 	if p.registry != nil {
-		for _, status := range p.registry.Snapshot(r.Context()) {
-			if status.Online {
-				online[status.Endpoint.Name] = status.Endpoint
-			}
+		statuses = p.registry.Snapshot(ctx)
+	}
+	candidates, _ := candidatesForVirtual(virtual, statuses, p.managers)
+	return candidates
+}
+
+// candidatesForVirtual is virtualCandidates' pure ordering logic, factored
+// out so handleModels can snapshot the registry once and reuse it across
+// every configured virtual model instead of probing per model — Snapshot
+// alone is O(endpoints); doing that once per virtual name made the old
+// handleModels O(virtuals × endpoints) for a value it discarded once resolved.
+//
+// The registry's probe cache is 15s stale by design (see ProxyRegistry).
+// Treating "online" as a hard gate — the old resolveVirtual's behavior — made
+// a healthy endpoint unroutable for up to 15s after it recovered, and a dead
+// one look routable for up to 15s after it dropped. Instead we walk the
+// declared targets twice: pass one collects everything currently believed
+// usable (in declared order); pass two appends the rest of the endpoint
+// targets — configured, but currently believed offline — as last-resort
+// attempts, still in declared order. A virtual name then works whenever *any*
+// target actually works, not only when the cache happens to agree with
+// reality. Skipped entirely, in both passes: an endpoint target naming an
+// endpoint that isn't configured at all, a target missing one of its
+// endpoint/model pair, and an alias target no manager has.
+//
+// freshCount reports how many of the returned candidates came from pass one
+// — handleModels reports a virtual as "loaded" only when this is > 0, since
+// the remainder are last-resort attempts the router isn't confident about.
+func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, managers []*ServerManager) (candidates []resolvedVirtualTarget, freshCount int) {
+	online := make(map[string]OpenAIEndpoint)
+	configured := make(map[string]OpenAIEndpoint)
+	for _, status := range statuses {
+		configured[status.Endpoint.Name] = status.Endpoint
+		if status.Online {
+			online[status.Endpoint.Name] = status.Endpoint
 		}
 	}
+
+	var fresh, stale []resolvedVirtualTarget
 	for _, target := range virtual.Targets {
-		if target.Endpoint != "" && target.Model != "" {
+		switch {
+		case target.Endpoint != "" && target.Model != "":
 			if endpoint, ok := online[target.Endpoint]; ok {
-				return resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model}, true
+				fresh = append(fresh, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
+			} else if endpoint, ok := configured[target.Endpoint]; ok {
+				stale = append(stale, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
 			}
-		}
-		if target.Alias != "" {
-			for _, manager := range p.managers {
+			// else: names an endpoint that doesn't exist in config — skip.
+		case target.Alias != "":
+			for _, manager := range managers {
 				if manager.HasAlias(target.Alias) {
-					return resolvedVirtualTarget{manager: manager, alias: target.Alias}, true
+					fresh = append(fresh, resolvedVirtualTarget{manager: manager, alias: target.Alias})
+					break
 				}
 			}
+			// else: no manager has this alias — skip.
+		}
+		// else: neither shape (e.g. endpoint set without model) — skip.
+		// warnVirtualModelConfig flags this at startup.
+	}
+	return append(fresh, stale...), len(fresh)
+}
+
+// virtualCatalogRow builds the /v1/models row for one configured virtual
+// model. A virtual name is stable config, so — unlike an endpoint model,
+// which just disappears when its probe goes offline — the row always
+// appears; status reflects whether the router currently believes a request
+// for it will succeed.
+func (p *RelayRouter) virtualCatalogRow(virtual *VirtualLLM, statuses []EndpointStatus) map[string]any {
+	candidates, freshCount := candidatesForVirtual(virtual, statuses, p.managers)
+
+	modalities := []string{"text"}
+	var meta map[string]any
+	var status map[string]any
+	if freshCount > 0 {
+		status = map[string]any{"value": ModelStatusLoaded}
+		modalities, meta = virtualRowMetadata(candidates[0], statuses)
+	} else {
+		status = map[string]any{
+			"value":  ModelStatusUnloaded,
+			"failed": true,
+			// Same convention as a managed alias's load failure: without this
+			// a client polling for "loaded" spins forever instead of stopping.
+			"error": virtualUnavailableReason(virtual, statuses),
+		}
+		if len(candidates) > 0 {
+			// Still inherit metadata from the best last-resort candidate —
+			// it's what a request would actually hit if it succeeded.
+			modalities, meta = virtualRowMetadata(candidates[0], statuses)
 		}
 	}
-	return resolvedVirtualTarget{}, false
+
+	row := map[string]any{
+		"id":           virtual.Name,
+		"object":       "model",
+		"created":      0,
+		"owned_by":     "virtual",
+		"status":       status,
+		"architecture": map[string]any{"input_modalities": modalities},
+	}
+	if len(meta) > 0 {
+		row["meta"] = meta
+	}
+	return row
+}
+
+// virtualRowMetadata inherits architecture/meta from a virtual model's first
+// attempt-order candidate — the target dispatch will actually try first. A
+// managed alias's metadata is a config fact, available whether or not the
+// server is currently running; an endpoint target's metadata only exists
+// when its last probe succeeded, so an offline candidate falls back to the
+// same text-only/no-meta defaults the rest of /v1/models uses for anything
+// unadvertised. Never claim "image" support that can't be backed — offering
+// images to a server that can't take them fails mid-turn (see CLAUDE.md).
+func virtualRowMetadata(first resolvedVirtualTarget, statuses []EndpointStatus) ([]string, map[string]any) {
+	if first.manager != nil {
+		for _, entry := range first.manager.ModelCatalog() {
+			if entry.Alias != first.alias {
+				continue
+			}
+			modalities := []string{"text"}
+			if entry.SupportsImages {
+				modalities = append(modalities, "image")
+			}
+			meta := map[string]any{}
+			if entry.ContextSize > 0 {
+				meta["n_ctx"] = entry.ContextSize
+			}
+			if entry.TrainedContext > 0 {
+				meta["n_ctx_train"] = entry.TrainedContext
+			}
+			if len(meta) == 0 {
+				return modalities, nil
+			}
+			return modalities, meta
+		}
+		return []string{"text"}, nil
+	}
+
+	for _, status := range statuses {
+		if status.Endpoint.Name != first.endpoint.Name {
+			continue
+		}
+		for _, m := range status.Models {
+			if m.ID != first.upstreamID {
+				continue
+			}
+			var meta map[string]any
+			if m.ContextLength > 0 {
+				meta = map[string]any{"n_ctx": m.ContextLength}
+			}
+			return endpointModalities(m), meta
+		}
+	}
+	return []string{"text"}, nil
+}
+
+// virtualUnavailableReason explains, for the catalog's status.error field,
+// why a virtual model currently has no target believed usable. It only
+// describes reachability (offline endpoints, missing aliases) — config
+// mistakes (bad target shape, unknown endpoint/alias names) are
+// warnVirtualModelConfig's job at startup, not a per-request runtime message.
+func virtualUnavailableReason(virtual *VirtualLLM, statuses []EndpointStatus) string {
+	configured := make(map[string]bool, len(statuses))
+	for _, status := range statuses {
+		configured[status.Endpoint.Name] = true
+	}
+	var reasons []string
+	for _, target := range virtual.Targets {
+		switch {
+		case target.Alias != "":
+			reasons = append(reasons, fmt.Sprintf("alias %q not available", target.Alias))
+		case target.Endpoint != "" && target.Model != "" && configured[target.Endpoint]:
+			reasons = append(reasons, fmt.Sprintf("endpoint %q offline", target.Endpoint))
+		}
+	}
+	if len(reasons) == 0 {
+		return "no usable target configured"
+	}
+	return "no target currently reachable: " + strings.Join(reasons, "; ")
 }
 
 func writeRouterJSON(w http.ResponseWriter, status int, payload any) {
@@ -317,13 +505,23 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if target, ok := p.resolveVirtual(r, envelope.Model); ok {
-		if target.manager != nil {
-			p.routeManaged(w, r, target.manager, target.alias, body)
-		} else {
-			p.routeOpenAI(w, r, target.endpoint, target.upstreamID, body)
+
+	if p.virtual != nil {
+		if virtual := p.virtual.Find(envelope.Model); virtual != nil {
+			candidates := p.virtualCandidates(r.Context(), envelope.Model)
+			if len(candidates) == 0 {
+				// A configured virtual name is never "unknown" — that error
+				// sends whoever's debugging after the wrong problem. Every
+				// target here is misconfigured (bad endpoint/alias
+				// reference), not missing; warnVirtualModelConfig already
+				// flagged this at startup.
+				writeRouterError(w, http.StatusServiceUnavailable,
+					fmt.Sprintf("virtual model %q: no usable target configured", envelope.Model))
+				return
+			}
+			p.routeVirtual(w, r, envelope.Model, candidates, body)
+			return
 		}
-		return
 	}
 
 	if p.registry != nil {
@@ -353,7 +551,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	defer release()
 
 	target, _ := url.Parse(endpoint.BaseURL)
-	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias).ServeHTTP(w, r)
+	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias, nil).ServeHTTP(w, r)
 }
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
@@ -371,14 +569,154 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep Ope
 		http.Error(w, `{"error":"invalid endpoint configuration"}`, http.StatusInternalServerError)
 		return
 	}
-	newUpstreamProxy(target, rewritten, ep.APIKey, "openai", ep.Name).ServeHTTP(w, r)
+	newUpstreamProxy(target, rewritten, ep.APIKey, "openai", ep.Name, nil).ServeHTTP(w, r)
 }
 
-// newUpstreamProxy builds the reverse proxy shared by both branches. The
+// routeVirtual attempts each candidate in declared attempt order, moving to
+// the next only when the previous attempt failed before any response byte
+// reached the client — a dial/connection error, or a managed-server Acquire
+// error. Once the upstream starts replying — including a partial SSE stream
+// that then breaks — the exchange is committed: retrying would either
+// duplicate a side-effecting request onto a second backend or splice two
+// responses together, so we surface what the client already has instead of
+// reaching for another target.
+func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte) {
+	var failures []string
+	for _, target := range candidates {
+		wrote, err := p.attemptVirtual(w, r, target, body)
+		if err == nil {
+			return // upstream answered — whatever it answered stands.
+		}
+		if wrote {
+			return // already committed to the client; nothing left to retry.
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", target.label(), err))
+	}
+	writeRouterError(w, http.StatusServiceUnavailable,
+		fmt.Sprintf("virtual model %q: no target reachable (%s)", name, strings.Join(failures, "; ")))
+}
+
+// attemptVirtual runs one virtual-model candidate against the real
+// ResponseWriter through a recorder that tracks whether anything was written.
+// release is deferred (rather than called after ServeHTTP returns) because a
+// mid-stream backend failure in a real net/http server panics with
+// http.ErrAbortHandler — recovered by the standard library one frame up —
+// and a bare post-call release() would leak the managed-server lease on that
+// path.
+func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target resolvedVirtualTarget, body []byte) (wrote bool, err error) {
+	var backendErr error
+	// onError intercepts the proxy's default 502 write: returning true tells
+	// newUpstreamProxy the caller is handling the failure itself, so a
+	// retryable attempt never leaks a partial error body to the client before
+	// routeVirtual tries the next candidate.
+	proxy, release, buildErr := p.buildVirtualAttempt(target, body, func(e error) bool {
+		backendErr = e
+		return true
+	})
+	if buildErr != nil {
+		return false, buildErr
+	}
+	defer release()
+
+	rec := &virtualResponseRecorder{ResponseWriter: w}
+	proxy.ServeHTTP(rec, r)
+	if backendErr != nil {
+		return rec.wrote, backendErr
+	}
+	return rec.wrote, nil
+}
+
+// buildVirtualAttempt constructs the reverse proxy for one virtual-model
+// candidate, or reports why it couldn't (a managed-server Acquire failure, a
+// bad body rewrite, or a bad endpoint URL) without writing anything —
+// routeVirtual treats that identically to a pre-response backend failure and
+// moves on to the next candidate. release is always non-nil (a no-op for
+// endpoint targets, which have nothing to release).
+//
+// Requests are replayable across attempts because newUpstreamProxy's
+// Director re-installs the body from the captured []byte on every call, so
+// each candidate gets a fresh, undrained body.
+func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []byte, onError func(error) bool) (proxy *httputil.ReverseProxy, release func(), err error) {
+	if target.manager != nil {
+		endpoint, rel, err := target.manager.Acquire(target.alias)
+		if err != nil {
+			return nil, nil, err
+		}
+		targetURL, _ := url.Parse(endpoint.BaseURL)
+		proxy := newUpstreamProxy(targetURL, body, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
+		proxy.Transport = virtualDialTransport
+		return proxy, rel, nil
+	}
+
+	rewritten, err := rewriteModelField(body, target.upstreamID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rewrite model field: %w", err)
+	}
+	targetURL, err := url.Parse(target.endpoint.BaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid endpoint configuration: %w", err)
+	}
+	proxy = newUpstreamProxy(targetURL, rewritten, target.endpoint.APIKey, "openai", target.endpoint.Name, onError)
+	proxy.Transport = virtualDialTransport
+	return proxy, func() {}, nil
+}
+
+// virtualResponseRecorder wraps the client's real ResponseWriter for one
+// virtual-model attempt. routeVirtual reads `wrote` to decide whether the
+// attempt is safe to retry: once a header or body byte has actually reached
+// the client, the exchange is committed.
+type virtualResponseRecorder struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (v *virtualResponseRecorder) WriteHeader(statusCode int) {
+	v.wrote = true
+	v.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (v *virtualResponseRecorder) Write(b []byte) (int, error) {
+	v.wrote = true
+	return v.ResponseWriter.Write(b)
+}
+
+// Flush is required for SSE streaming: newUpstreamProxy sets
+// FlushInterval: -1, which flushes through whatever ResponseWriter it was
+// handed.
+func (v *virtualResponseRecorder) Flush() {
+	if f, ok := v.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// virtualDialTransport is used only by the virtual-model retry path. A
+// target host that black-holes packets (rather than actively refusing the
+// connection — the real case this fixes, an unreachable LAN host) would
+// otherwise eat http.DefaultTransport's ~30s dial timeout per candidate
+// before failover even started trying the next one. ResponseHeaderTimeout is
+// deliberately left unset: generation can legitimately take a long time, and
+// a slow-but-alive backend must not be mistaken for a dead one. Direct
+// (non-virtual) routes keep plain http.DefaultTransport behavior.
+var virtualDialTransport http.RoundTripper = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: 3 * time.Second}).DialContext
+	return t
+}()
+
+// newUpstreamProxy builds the reverse proxy shared by every branch. The
 // Director replaces (or clears) Authorization so the inbound bearer token —
 // which is relayLLM's internal token, meaningless to upstreams — never
 // leaks across the trust boundary.
-func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string) *httputil.ReverseProxy {
+//
+// onError, when non-nil, is consulted before the default 502 is written on a
+// backend failure. httputil.ReverseProxy only invokes ErrorHandler on a
+// RoundTrip failure, which always happens before any response byte is
+// written — a body-copy failure after headers are sent is not routed through
+// here. Returning true means the caller is handling the failure itself (the
+// virtual-model retry path: a failed attempt must emit nothing so the next
+// candidate gets a clean response to write into); false or nil falls through
+// to the normal 502 body.
+func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string, onError func(error) bool) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
@@ -395,6 +733,9 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 		FlushInterval: -1, // flush immediately for SSE streaming
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Warn("relay router: backend error", "branch", branch, "target", label, "error", err)
+			if onError != nil && onError(err) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("backend error: %v", err)})
@@ -422,11 +763,11 @@ func rewriteModelField(body []byte, upstreamID string) ([]byte, error) {
 // StartRelayRouter starts the router in a background goroutine. Returns nil
 // (no-op) when addr is empty or no live backend remains after dropping nil
 // managers.
-func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual ...*VirtualLLMConfig) *RelayRouter {
+func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
 	if addr == "" {
 		return nil
 	}
-	p := NewRelayRouter(addr, managers, registry, virtual...)
+	p := NewRelayRouter(addr, managers, registry, virtual)
 	if len(p.managers) == 0 && p.registry == nil {
 		return nil
 	}

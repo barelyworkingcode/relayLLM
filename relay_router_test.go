@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestRouter_RewriteModelField_InvalidJSON(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRouter_Health_ReturnsOK(t *testing.T) {
-	r := NewRelayRouter(":0", nil, nil)
+	r := NewRelayRouter(":0", nil, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -83,7 +84,7 @@ func TestRouter_Health_ReturnsOK(t *testing.T) {
 }
 
 func TestRouter_ListModels_EmptyWithNilBackends(t *testing.T) {
-	r := NewRelayRouter(":0", nil, nil)
+	r := NewRelayRouter(":0", nil, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -104,7 +105,7 @@ func TestRouter_ListModels_IncludesLlamaAliases(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}, "")
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -129,7 +130,7 @@ func TestRouter_ListModels_PrefixesEndpointModels(t *testing.T) {
 	}
 	registry := NewProxyRegistry(cfg)
 
-	r := NewRelayRouter(":0", nil, registry)
+	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -152,7 +153,7 @@ func TestRouter_ListModels_OmitsOfflineEndpoint(t *testing.T) {
 	}
 	registry := NewProxyRegistry(cfg)
 
-	r := NewRelayRouter(":0", nil, registry)
+	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -172,7 +173,7 @@ func TestRouter_ListModels_OmitsOfflineEndpoint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRouter_Proxy_MissingModelField_Returns400(t *testing.T) {
-	r := NewRelayRouter(":0", nil, nil)
+	r := NewRelayRouter(":0", nil, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -183,7 +184,7 @@ func TestRouter_Proxy_MissingModelField_Returns400(t *testing.T) {
 }
 
 func TestRouter_Proxy_UnknownModel_Returns400(t *testing.T) {
-	r := NewRelayRouter(":0", nil, nil)
+	r := NewRelayRouter(":0", nil, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -207,7 +208,7 @@ func TestRouter_Proxy_LlamaAlias_RoutesToManagedBranch(t *testing.T) {
 		Models:     []ServerModelConfig{{Alias: "test-alias", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -249,7 +250,7 @@ func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 	// Force probe so LookupModel finds the endpoint Online.
 	registry.Snapshot(context.Background())
 
-	r := NewRelayRouter(":0", nil, registry)
+	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -379,9 +380,9 @@ func TestRouter_VirtualModelUsesManagedAliasFallback(t *testing.T) {
 		Name: "vCode", Targets: []VirtualLLMTarget{{Alias: "local-code"}},
 	}}})
 
-	target, ok := router.resolveVirtual(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), "vCode")
-	if !ok || target.manager != mgr || target.alias != "local-code" {
-		t.Errorf("resolved target = %+v, ok=%v; want local managed alias", target, ok)
+	candidates := router.virtualCandidates(context.Background(), "vCode")
+	if len(candidates) != 1 || candidates[0].manager != mgr || candidates[0].alias != "local-code" {
+		t.Errorf("candidates = %+v; want a single local managed alias", candidates)
 	}
 }
 
@@ -404,7 +405,7 @@ func TestRouter_Proxy_LlamaWinsOnCollision(t *testing.T) {
 		Models:     []ServerModelConfig{{Alias: "qwen", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, registry)
+	r := NewRelayRouter(":0", []*ServerManager{mgr}, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -434,7 +435,7 @@ func TestRouter_Proxy_LlamaWinsOverMlxCollision(t *testing.T) {
 		Models:     []ServerModelConfig{{Alias: "shared", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{llamaMgr, mlxMgr}, nil)
+	r := NewRelayRouter(":0", []*ServerManager{llamaMgr, mlxMgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -447,6 +448,294 @@ func TestRouter_Proxy_LlamaWinsOverMlxCollision(t *testing.T) {
 	// detect a priority inversion — the error's kind prefix can.
 	if !strings.Contains(string(body), "llama:") {
 		t.Errorf("expected llama-branch error (llama wins collision); got body=%s", string(body))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Virtual-model preference ordering, retry, and catalog hardening
+// (fix/virtual-llm-failover-hardening)
+// ---------------------------------------------------------------------------
+
+// Every declared target is currently believed offline (probe fails), but the
+// endpoint is still configured — so it must be attempted as a last resort
+// rather than making the virtual name unroutable.
+func TestRouter_Proxy_VirtualModel_AllTargetsOffline_StillRoutesViaLastResort(t *testing.T) {
+	// atomic: incremented from the upstream's handler goroutine, read from the
+	// test's main goroutine — a plain int here is a real data race under -race
+	// once the connection isn't a normal complete-and-read cycle (see the
+	// retry tests below for the case that actually trips it).
+	var chatCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.WriteHeader(http.StatusInternalServerError) // probe sees this endpoint as offline
+		case "/v1/chat/completions":
+			chatCalls.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "flaky", BaseURL: upstream.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vFlaky", Targets: []VirtualLLMTarget{{Endpoint: "flaky", Model: "flaky-model"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vFlaky"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 via the last-resort target, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if got := chatCalls.Load(); got != 1 {
+		t.Errorf("chat calls = %d, want 1", got)
+	}
+}
+
+// Every candidate is genuinely unreachable: the router must 503 naming the
+// virtual model, not 400 "unknown model" — a configured virtual is never
+// "unknown", it's just currently unservable.
+func TestRouter_Proxy_VirtualModel_AllUnreachable_Returns503NotUnknown(t *testing.T) {
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "dead1", BaseURL: "http://127.0.0.1:1/v1"},
+		{Name: "dead2", BaseURL: "http://127.0.0.1:1/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vDead", Targets: []VirtualLLMTarget{
+			{Endpoint: "dead1", Model: "m1"},
+			{Endpoint: "dead2", Model: "m2"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vDead"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	// JSON-encoded, so the literal quotes around the name come out escaped.
+	if !strings.Contains(string(body), "vDead") {
+		t.Errorf("error body doesn't name the virtual model: %s", body)
+	}
+	if strings.Contains(string(body), "unknown model") {
+		t.Errorf("a configured virtual must never read as unknown model: %s", body)
+	}
+}
+
+// A virtual name is stable config: it must appear in the catalog even when
+// every target is currently offline, so a polling client learns it will not
+// resolve right now instead of never seeing it at all.
+func TestRouterCatalog_VirtualModel_AllOffline_ListedAsUnloaded(t *testing.T) {
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "dead", BaseURL: "http://127.0.0.1:1/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vDead", Targets: []VirtualLLMTarget{{Endpoint: "dead", Model: "m1"}},
+	}}})
+
+	var row catalogRow
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		if r.ID == "vDead" {
+			row = r
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("virtual model missing from catalog even though every target is offline")
+	}
+	if row.Status == nil || row.Status.Value != ModelStatusUnloaded {
+		t.Errorf("status.value = %+v, want %q", row.Status, ModelStatusUnloaded)
+	}
+	if row.Status == nil || !row.Status.Failed {
+		t.Errorf("status.failed = %+v, want true so a polling client stops instead of spinning", row.Status)
+	}
+}
+
+// The first candidate fails before writing anything to the client — the
+// router must retry the next candidate rather than surface the failure.
+func TestRouter_Proxy_VirtualModel_RetriesAfterPreResponseFailure(t *testing.T) {
+	// atomic: written from the upstream's own handler goroutine, read from
+	// the test's main goroutine after the outer request completes. Ordering
+	// is guaranteed in practice (the increment happens strictly before the
+	// hijack+close that the router's RoundTrip call is synchronously blocked
+	// on), but the two goroutines are different ones, so the access itself
+	// must be atomic or -race flags it.
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "primary-model"}}})
+		case "/v1/chat/completions":
+			primaryCalls.Add(1)
+			// Close the connection before writing anything — a pre-response
+			// failure indistinguishable, from the proxy's side, from a dial
+			// error: RoundTrip fails, ErrorHandler runs, nothing was written.
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+		}
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "secondary-model"}}})
+		case "/v1/chat/completions":
+			secondaryCalls.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer secondary.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "primary", BaseURL: primary.URL + "/v1"},
+		{Name: "secondary", BaseURL: secondary.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vRetry", Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "primary-model"},
+			{Endpoint: "secondary", Model: "secondary-model"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vRetry"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 from the retried secondary target, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if got := primaryCalls.Load(); got != 1 {
+		t.Errorf("primary calls = %d, want 1 (attempted once, then abandoned)", got)
+	}
+	if got := secondaryCalls.Load(); got != 1 {
+		t.Errorf("secondary calls = %d, want 1 (the retry)", got)
+	}
+}
+
+// Once the primary has written response bytes, a mid-stream break must not
+// trigger a retry — the second target must never be called.
+func TestRouter_Proxy_VirtualModel_NoRetryAfterBytesWritten(t *testing.T) {
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "primary-model"}}})
+		case "/v1/chat/completions":
+			primaryCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"partial":`))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// Break the connection mid-body, after the client already has a
+			// 200 and part of the payload.
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+		}
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "secondary-model"}}})
+		case "/v1/chat/completions":
+			secondaryCalls.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer secondary.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "primary", BaseURL: primary.URL + "/v1"},
+		{Name: "secondary", BaseURL: secondary.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vNoRetry", Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "primary-model"},
+			{Endpoint: "secondary", Model: "secondary-model"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vNoRetry"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the primary's partial response)", resp.StatusCode)
+	}
+	io.ReadAll(resp.Body) // drain; a read error here is expected, the connection broke mid-body
+
+	if got := primaryCalls.Load(); got != 1 {
+		t.Errorf("primary calls = %d, want 1", got)
+	}
+	if got := secondaryCalls.Load(); got != 0 {
+		t.Errorf("secondary calls = %d, want 0 — no retry once bytes reached the client", got)
+	}
+}
+
+// A virtual row must inherit real metadata from its first candidate, not the
+// hardcoded text-only placeholder the old handleModels used.
+func TestRouterCatalog_VirtualModel_InheritsMetadataFromAliasTarget(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
+			"mmproj": "/p.gguf", "ctx-size": 32768.0,
+		}}},
+	}, "")
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vVision", Targets: []VirtualLLMTarget{{Alias: "vision-alias"}},
+	}}})
+
+	var row catalogRow
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		if r.ID == "vVision" {
+			row = r
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("virtual model missing from catalog")
+	}
+	if row.Status == nil || row.Status.Value != ModelStatusLoaded {
+		t.Errorf("status = %+v, want %q", row.Status, ModelStatusLoaded)
+	}
+	if got := row.Architecture.InputModalities; len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Errorf("modalities = %v, want [text image]", got)
+	}
+	if row.Meta == nil || row.Meta.NCtx != 32768 {
+		t.Errorf("meta = %+v, want n_ctx 32768", row.Meta)
+	}
+}
+
+// A Snapshot triggered by an already-canceled caller context must still
+// record a real probe result — the caller hanging up says nothing about
+// whether the upstream is reachable.
+func TestProxyRegistry_Snapshot_CanceledCallerContextDoesNotPoisonProbe(t *testing.T) {
+	upstream := newFakeOpenAIUpstream(t, []string{"m1"})
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "ep", BaseURL: upstream.URL + "/v1"},
+	}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has already hung up before the probe even starts
+
+	statuses := registry.Snapshot(ctx)
+	if len(statuses) != 1 || !statuses[0].Online {
+		t.Errorf("statuses = %+v, want a single Online:true entry despite the canceled caller context", statuses)
 	}
 }
 

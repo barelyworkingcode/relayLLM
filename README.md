@@ -79,10 +79,10 @@ first use, poll `/health` until ready, and are shared across sessions.
 reachable OpenAI endpoint, so any OpenAI client can reach all local models
 through one URL. Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
-Configure `virtual-llms` in `settings.json` to expose a stable model name that
-uses the first reachable target, in order. An endpoint target reuses a name
-from `openai.endpoints` and its `/models` health check is cached for 15
-seconds; an `alias` target selects a local managed llama.cpp or MLX model.
+Configure `virtual-llms` in `settings.json` to expose a stable model name backed
+by an ordered list of fallback targets. An endpoint target reuses a name from
+`openai.endpoints` and its `/models` health check is cached for 15 seconds; an
+`alias` target selects a local managed llama.cpp or MLX model.
 
 ```json
 "virtual-llms": {
@@ -95,6 +95,17 @@ seconds; an `alias` target selects a local managed llama.cpp or MLX model.
   }]
 }
 ```
+
+Declared order is a *preference*, not a hard gate: targets currently believed
+reachable are tried first, but every configured target is still attempted as a
+last resort, and a request retries the next target on any failure that occurs
+before a response byte is sent to the client. A request for a configured
+virtual name only fails (503) when every target genuinely fails; it never
+reads as "unknown model". The name always appears in `/v1/models`, with
+`status`/`meta`/`architecture` inherited from whichever target would be tried
+first — even when every target is currently offline (`status.value` reports
+`"unloaded"` with `failed: true` in that case). Details in
+[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
 ## API
 

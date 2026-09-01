@@ -200,6 +200,7 @@ func main() {
 		managers = append(managers, mlxManager)
 	}
 	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
+	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
 
 	var routerAddr string
 	if *routerPort != "" {
@@ -309,6 +310,87 @@ func warnAliasShadowing(managers []*ServerManager, endpoints []OpenAIEndpoint) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// warnVirtualModelConfig logs startup warnings for virtual-model
+// misconfiguration that would otherwise only surface later as a confusing
+// runtime 503 (or, worse, silently route to the wrong place). Mirrors
+// warnAliasShadowing's dead-config detection, one layer up.
+func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager, endpoints []OpenAIEndpoint) {
+	if virtual == nil {
+		return
+	}
+	seenNames := make(map[string]bool)
+	for i := range virtual.Models {
+		v := &virtual.Models[i]
+
+		if seenNames[v.Name] {
+			slog.Warn("router: two virtual models share a name; only the first definition is reachable",
+				"name", v.Name)
+		}
+		seenNames[v.Name] = true
+
+		for _, mgr := range managers {
+			if mgr.HasAlias(v.Name) {
+				// handleProxy checks managers before virtuals, so this name
+				// can never reach the virtual branch.
+				slog.Warn("router: virtual model name matches a managed alias; dispatch checks managers first so the virtual is unreachable",
+					"name", v.Name, "shadowed-by-kind", mgr.profile.Kind)
+			}
+		}
+		if strings.Contains(v.Name, "/") {
+			// endpoint/id routing parses on the first "/", so a virtual name
+			// containing one can intercept it.
+			slog.Warn("router: virtual model name contains \"/\"; it can intercept endpoint/id routing",
+				"name", v.Name)
+		}
+
+		usable := 0
+		// Case order mirrors candidatesForVirtual's, so a target that sets
+		// both shapes is validated as the one that will actually be routed.
+		for _, target := range v.Targets {
+			switch {
+			case target.Endpoint != "" && target.Model == "":
+				slog.Warn("router: virtual model target sets endpoint without model",
+					"name", v.Name, "endpoint", target.Endpoint)
+			case target.Model != "" && target.Endpoint == "" && target.Alias == "":
+				slog.Warn("router: virtual model target sets model without endpoint",
+					"name", v.Name, "model", target.Model)
+			case target.Endpoint != "" && target.Model != "":
+				found := false
+				for _, ep := range endpoints {
+					if ep.Name == target.Endpoint {
+						found = true
+						break
+					}
+				}
+				if !found {
+					slog.Warn("router: virtual model target names an endpoint absent from openai.endpoints",
+						"name", v.Name, "endpoint", target.Endpoint)
+					continue
+				}
+				usable++
+			case target.Alias != "":
+				found := false
+				for _, mgr := range managers {
+					if mgr.HasAlias(target.Alias) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					slog.Warn("router: virtual model target names an alias no manager has",
+						"name", v.Name, "alias", target.Alias)
+					continue
+				}
+				usable++
+			}
+		}
+		if usable == 0 {
+			slog.Warn("router: virtual model has no usable target; every request for it will fail",
+				"name", v.Name)
 		}
 	}
 }
