@@ -18,6 +18,7 @@ import (
 type LoadedConfig struct {
 	OpenAI  *OpenAIConfig
 	Virtual *VirtualLLMConfig
+	Router  *RouterConfig
 	Llama   *ServerConfig
 	Mlx     *ServerConfig
 	Pi      *PiConfig
@@ -143,6 +144,7 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, err
 	return &LoadedConfig{
 		OpenAI:  openaiCfg,
 		Virtual: &VirtualLLMConfig{},
+		Router:  &RouterConfig{},
 		Llama:   llamaCfg,
 		Mlx:     &ServerConfig{},
 		Pi:      &PiConfig{},
@@ -158,6 +160,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	var raw struct {
 		OpenAI      *OpenAIConfig               `json:"openai"`
 		VirtualLLMs *VirtualLLMConfig           `json:"virtual-llms"`
+		Router      *RouterConfig               `json:"router"`
 		LlamaServer *json.RawMessage            `json:"llama-server"`
 		MlxServer   *json.RawMessage            `json:"mlx-serve"`
 		Pi          *PiConfig                   `json:"pi"`
@@ -175,6 +178,10 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	virtualCfg := &VirtualLLMConfig{}
 	if raw.VirtualLLMs != nil {
 		virtualCfg = raw.VirtualLLMs
+	}
+	routerCfg := &RouterConfig{}
+	if raw.Router != nil {
+		routerCfg = raw.Router
 	}
 
 	llamaCfg := &ServerConfig{}
@@ -206,6 +213,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	return &LoadedConfig{
 		OpenAI:  openaiCfg,
 		Virtual: virtualCfg,
+		Router:  routerCfg,
 		Llama:   llamaCfg,
 		Mlx:     mlxCfg,
 		Pi:      piCfg,

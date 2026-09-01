@@ -118,6 +118,14 @@ pin expires after an hour of disuse, or falls back to the remaining
 candidates immediately if its target has since been removed from config.
 Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
+Configure `router.reasoningEffortMap` in `settings.json` to rewrite a
+`reasoning_effort` value before it reaches a backend, e.g. `{"minimal":
+"none"}` for a llama.cpp server that 500s on `"minimal"` but treats `"none"`
+as off. Absent or empty (the default) disables rewriting entirely. Mapping a
+value to `""` removes the field instead of sending it empty. Applies to
+every proxied path — managed alias, endpoint, and virtual model alike.
+Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+
 ## API
 
 The API is a Unix-socket HTTP + WebSocket surface. Treat it as a public API for
