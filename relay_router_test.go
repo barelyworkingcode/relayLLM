@@ -278,6 +278,113 @@ func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 	}
 }
 
+func TestRouter_Proxy_VirtualModelUsesFirstReachableTarget(t *testing.T) {
+	var primaryCalls, fallbackCalls int
+	newTarget := func(calls *int, id string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/models":
+				json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": id}}})
+			case "/v1/chat/completions":
+				(*calls)++
+				var body struct {
+					Model string `json:"model"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				json.NewEncoder(w).Encode(map[string]any{"model": body.Model})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+	primary := newTarget(&primaryCalls, "remote-code")
+	defer primary.Close()
+	fallback := newTarget(&fallbackCalls, "mac-code")
+	defer fallback.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "remote", BaseURL: primary.URL + "/v1"},
+		{Name: "mac", BaseURL: fallback.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vCode", Targets: []VirtualLLMTarget{
+			{Endpoint: "remote", Model: "remote-code"},
+			{Endpoint: "mac", Model: "mac-code"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+	var catalog struct {
+		Data []map[string]any `json:"data"`
+	}
+	doRouterJSON(t, srv.URL+"/v1/models", http.MethodGet, nil, &catalog)
+	if !sliceContains(modelIDs(catalog.Data), "vCode") {
+		t.Fatalf("virtual model missing from catalog: %v", modelIDs(catalog.Data))
+	}
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vCode"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST virtual model = %d", resp.StatusCode)
+	}
+	if primaryCalls != 1 || fallbackCalls != 0 {
+		t.Errorf("calls primary=%d fallback=%d, want 1, 0", primaryCalls, fallbackCalls)
+	}
+	var response struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Model != "remote-code" {
+		t.Errorf("primary saw model %q, want remote-code", response.Model)
+	}
+}
+
+func TestRouter_Proxy_VirtualModelFallsBackWhenPrimaryIsOffline(t *testing.T) {
+	var calls int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "mac-code"}}})
+		case "/v1/chat/completions":
+			calls++
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer fallback.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "remote", BaseURL: "http://127.0.0.1:1/v1"},
+		{Name: "mac", BaseURL: fallback.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vCode", Targets: []VirtualLLMTarget{{Endpoint: "remote", Model: "remote-code"}, {Endpoint: "mac", Model: "mac-code"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vCode"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 1 {
+		t.Errorf("POST virtual model = %d, fallback calls = %d; want 200, 1", resp.StatusCode, calls)
+	}
+}
+
+func TestRouter_VirtualModelUsesManagedAliasFallback(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "local-code"}},
+	}, "")
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vCode", Targets: []VirtualLLMTarget{{Alias: "local-code"}},
+	}}})
+
+	target, ok := router.resolveVirtual(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), "vCode")
+	if !ok || target.manager != mgr || target.alias != "local-code" {
+		t.Errorf("resolved target = %+v, ok=%v; want local managed alias", target, ok)
+	}
+}
+
 func TestRouter_Proxy_LlamaWinsOnCollision(t *testing.T) {
 	// Both backends advertise "qwen". Llama branch must win (per startup
 	// warning in main.go documenting this policy). We assert by triggering
