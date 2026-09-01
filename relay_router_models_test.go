@@ -30,6 +30,10 @@ type catalogRow struct {
 	Architecture *struct {
 		InputModalities []string `json:"input_modalities"`
 	} `json:"architecture"`
+	// Pointer so a test can tell "omitted" from "present but zero" — a
+	// literal 0 would read to a plain-OpenAI-discovery client as a real
+	// (absurd) context window rather than "unknown".
+	ContextLength *int64 `json:"context_length"`
 }
 
 func fetchCatalog(t *testing.T, router *RelayRouter, path string) []catalogRow {
@@ -446,5 +450,114 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 	// it takes them fails mid-turn, which is worse than not offering it.
 	if got := rows["ep/quiet"].Architecture.InputModalities; len(got) != 1 || got[0] != "text" {
 		t.Errorf("ep/quiet modalities = %v, want [text]", got)
+	}
+}
+
+// A plain OpenAI-discovery client (LM Studio-, vLLM-, OpenRouter-style) never
+// looks inside meta — it reads a top-level context_length and falls back to a
+// hardcoded default when the field is absent. These tests pin that flat field
+// across all three row shapes, additively alongside meta.n_ctx/n_ctx_train.
+func TestRouterCatalog_ManagedContextLengthTopLevel(t *testing.T) {
+	cfg := &ServerConfig{}
+	mgr, _ := newBudgetManager(t, cfg, nil)
+	cfg.Models = append(cfg.Models,
+		ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		ServerModelConfig{Alias: "trained-only", Args: map[string]any{}},
+		ServerModelConfig{Alias: "unknown", Args: map[string]any{}},
+	)
+	mgr.trainedContext["pinned"] = 131072
+	mgr.trainedContext["trained-only"] = 262144
+	// "unknown" has neither a pinned ctx-size nor a recorded trained context.
+
+	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)
+	rows := map[string]catalogRow{}
+	for _, r := range fetchCatalog(t, router, "/models") {
+		rows[r.ID] = r
+	}
+
+	// 1. Pinned ctx-size wins the flat field — it's what the server will
+	// actually run with — and meta.n_ctx must still be present: additive,
+	// not a replacement (regression pin for the additive contract).
+	pinned := rows["pinned"]
+	if pinned.ContextLength == nil || *pinned.ContextLength != 8192 {
+		t.Errorf("pinned context_length = %v, want 8192", pinned.ContextLength)
+	}
+	if pinned.Meta == nil || pinned.Meta.NCtx != 8192 {
+		t.Errorf("pinned meta = %+v, want n_ctx 8192 to still be present", pinned.Meta)
+	}
+
+	// 2. No pinned ctx-size: falls back to the trained context, same
+	// precedence meta already uses for n_ctx_train.
+	trainedOnly := rows["trained-only"]
+	if trainedOnly.ContextLength == nil || *trainedOnly.ContextLength != 262144 {
+		t.Errorf("trained-only context_length = %v, want 262144", trainedOnly.ContextLength)
+	}
+
+	// 3. Neither known: omit the key entirely. A client doing `?? default`
+	// must fall through cleanly — a literal 0 would read as a real (absurd)
+	// context window instead of "unknown".
+	unknown := rows["unknown"]
+	if unknown.ContextLength != nil {
+		t.Errorf("unknown context_length = %v, want omitted, not zero", *unknown.ContextLength)
+	}
+}
+
+// Endpoint rows only ever get one number — whatever the upstream advertised —
+// so unlike managed rows there's no fallback to try before giving up.
+func TestRouterCatalog_EndpointContextLengthTopLevel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
+			{"id": "advertised", "context_length": 65536},
+			{"id": "quiet"},
+		}})
+	}))
+	defer upstream.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{
+		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	})
+	router := NewRelayRouter(":0", nil, registry, nil)
+
+	rows := map[string]catalogRow{}
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		rows[r.ID] = r
+	}
+
+	advertised := rows["ep/advertised"]
+	if advertised.ContextLength == nil || *advertised.ContextLength != 65536 {
+		t.Errorf("advertised context_length = %v, want 65536", advertised.ContextLength)
+	}
+	// Omitted, not invented — letting the client apply its own default beats
+	// us guessing a number the upstream never claimed.
+	quiet := rows["ep/quiet"]
+	if quiet.ContextLength != nil {
+		t.Errorf("quiet context_length = %v, want omitted; upstream advertised nothing", *quiet.ContextLength)
+	}
+}
+
+// A virtual name's flat context_length comes from whatever candidate dispatch
+// would actually try first — same source virtualRowMetadata already uses for
+// meta and modalities.
+func TestRouterCatalog_VirtualModel_ContextLengthTopLevel(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
+			"mmproj": "/p.gguf", "ctx-size": 32768.0,
+		}}},
+	}, "")
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vVision", Targets: []VirtualLLMTarget{{Alias: "vision-alias"}},
+	}}})
+
+	var row catalogRow
+	for _, r := range fetchCatalog(t, router, "/v1/models") {
+		if r.ID == "vVision" {
+			row = r
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("virtual model missing from catalog")
+	}
+	if row.ContextLength == nil || *row.ContextLength != 32768 {
+		t.Errorf("virtual context_length = %v, want 32768 inherited from the first candidate", row.ContextLength)
 	}
 }
