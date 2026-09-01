@@ -104,8 +104,19 @@ virtual name only fails (503) when every target genuinely fails; it never
 reads as "unknown model". The name always appears in `/v1/models`, with
 `status`/`meta`/`architecture` inherited from whichever target would be tried
 first — even when every target is currently offline (`status.value` reports
-`"unloaded"` with `failed: true` in that case). Details in
-[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+`"unloaded"` with `failed: true` in that case).
+
+A conversation sticks to whichever target first serves it: once a target has
+answered, the router pins the conversation to it for as long as the client
+keeps sending the same `prompt_cache_key` (or `user`, if that's absent), and
+a pinned target always wins over the preference ordering above — a
+reachability wobble must not hop an established conversation to a different
+backend, since two backends encode reasoning differently and cannot share a
+transcript (see [ADR-010](docs/decisions/010-virtual-model-conversation-affinity.md)).
+No client identifier means no pin — same behavior as before this existed. A
+pin expires after an hour of disuse, or falls back to the remaining
+candidates immediately if its target has since been removed from config.
+Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
 ## API
 

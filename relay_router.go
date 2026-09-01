@@ -29,6 +29,7 @@ type RelayRouter struct {
 	managers []*ServerManager
 	registry *ProxyRegistry
 	virtual  *VirtualLLMConfig
+	affinity *virtualAffinityStore
 	server   *http.Server
 }
 
@@ -43,7 +44,7 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 			live = append(live, m)
 		}
 	}
-	p := &RelayRouter{managers: live, registry: registry, virtual: virtual}
+	p := &RelayRouter{managers: live, registry: registry, virtual: virtual, affinity: newVirtualAffinityStore(nil)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
@@ -265,6 +266,17 @@ func (t resolvedVirtualTarget) label() string {
 	return fmt.Sprintf("endpoint %q", t.endpoint.Name)
 }
 
+// identity is a stable, comparable value for this target — what
+// virtualAffinityStore actually pins and compares against. Prefixed by kind
+// so an endpoint named "x" and a managed alias named "x" (distinct
+// namespaces everywhere else in the router) never collide here either.
+func (t resolvedVirtualTarget) identity() string {
+	if t.manager != nil {
+		return "alias:" + t.alias
+	}
+	return "endpoint:" + t.endpoint.Name
+}
+
 // virtualCandidates returns every usable target for a configured virtual
 // model, in the order handleProxy should attempt them. Returns nil when name
 // isn't a configured virtual at all — callers distinguish "not a virtual" from
@@ -340,6 +352,49 @@ func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, manage
 		// warnVirtualModelConfig flags this at startup.
 	}
 	return append(fresh, stale...), len(fresh)
+}
+
+// affinityKeyFromBody picks the conversation identifier that pins a virtual
+// model's target — see ADR-010. Only these two standard OpenAI fields are
+// read, in this precedence, because Oh My Pi already sends a stable
+// per-conversation UUID as prompt_cache_key on every request. Deliberately
+// not derived from anything else (headers, client IP): a wrong key pins
+// unrelated conversations together, which is worse than no affinity at all.
+func affinityKeyFromBody(promptCacheKey, user string) string {
+	if promptCacheKey != "" {
+		return promptCacheKey
+	}
+	return user
+}
+
+// applyAffinity moves the candidate matching pinned to the front of the
+// list, ahead of the reachability-preferred ordering candidatesForVirtual
+// already computed. That ordering optimizes for "believed usable right
+// now"; a pin overrides it on purpose, because a 15s reachability-cache
+// wobble must not be allowed to hop an established conversation to a
+// different backend (ADR-010). pinned == "" is a no-op. A pin naming a
+// target no longer present in candidates (e.g. removed from config) is
+// silently ignored and the normal order stands — never invent a target that
+// isn't there.
+func applyAffinity(candidates []resolvedVirtualTarget, pinned string) []resolvedVirtualTarget {
+	if pinned == "" {
+		return candidates
+	}
+	idx := -1
+	for i, c := range candidates {
+		if c.identity() == pinned {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return candidates // not found, or already first: nothing to move.
+	}
+	reordered := make([]resolvedVirtualTarget, 0, len(candidates))
+	reordered = append(reordered, candidates[idx])
+	reordered = append(reordered, candidates[:idx]...)
+	reordered = append(reordered, candidates[idx+1:]...)
+	return reordered
 }
 
 // virtualCatalogRow builds the /v1/models row for one configured virtual
@@ -490,7 +545,9 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var envelope struct {
-		Model string `json:"model"`
+		Model          string `json:"model"`
+		PromptCacheKey string `json:"prompt_cache_key"`
+		User           string `json:"user"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model == "" {
 		http.Error(w, `{"error":"missing or invalid model field"}`, http.StatusBadRequest)
@@ -519,7 +576,15 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("virtual model %q: no usable target configured", envelope.Model))
 				return
 			}
-			p.routeVirtual(w, r, envelope.Model, candidates, body)
+			// A pinned target (see ADR-010) outranks reachability ordering —
+			// it goes to the front even if candidatesForVirtual currently
+			// believes something else is more reachable. A pin naming a
+			// target dropped from candidates (removed from config) is a
+			// no-op inside applyAffinity, so routing falls back to the
+			// normal order.
+			affinityKey := affinityKeyFromBody(envelope.PromptCacheKey, envelope.User)
+			candidates = applyAffinity(candidates, p.affinity.lookup(envelope.Model, affinityKey))
+			p.routeVirtual(w, r, envelope.Model, candidates, body, affinityKey)
 			return
 		}
 	}
@@ -580,11 +645,22 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep Ope
 // duplicate a side-effecting request onto a second backend or splice two
 // responses together, so we surface what the client already has instead of
 // reaching for another target.
-func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte) {
+//
+// affinityKey is "" when the request carried neither prompt_cache_key nor
+// user — in that case p.affinity.record is a no-op (see its own nil/""
+// guard), so this path costs nothing beyond the ordering already applied by
+// the caller.
+func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte, affinityKey string) {
 	var failures []string
 	for _, target := range candidates {
 		wrote, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
+			// Record (or refresh) the pin on whichever target actually
+			// served — including a target other than the one that was
+			// pinned before, if that one just failed. The conversation is
+			// already contaminated by the switch at that point, so pin
+			// forward rather than flap back on the next turn (ADR-010).
+			p.affinity.record(name, affinityKey, target.identity())
 			return // upstream answered — whatever it answered stands.
 		}
 		if wrote {

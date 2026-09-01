@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -718,6 +719,351 @@ func TestRouterCatalog_VirtualModel_InheritsMetadataFromAliasTarget(t *testing.T
 	}
 	if row.Meta == nil || row.Meta.NCtx != 32768 {
 		t.Errorf("meta = %+v, want n_ctx 32768", row.Meta)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Conversation affinity for virtual models (ADR-010). Two backends cannot
+// safely share a reasoning transcript, so once some target has actually
+// served a conversation, later turns must stick to it even when the
+// reachability cache would otherwise prefer something else.
+// ---------------------------------------------------------------------------
+
+// newCountingChatUpstream returns an httptest server that advertises modelID
+// on /v1/models and answers /v1/chat/completions with {"ok":true}, counting
+// calls into the given counter — lets these tests observe which target
+// actually served a request without depending on response bodies or timing.
+func newCountingChatUpstream(t *testing.T, calls *atomic.Int64, modelID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": modelID}}})
+		case "/v1/chat/completions":
+			calls.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedEndpointStatus writes a status directly into the registry's cache,
+// bypassing a real network probe. The affinity tests need specific
+// online/offline states — and, for the re-pin test, to swap an endpoint's
+// BaseURL to a dead port out from under an established pin — without waiting
+// out the registry's real 15s TTL. Locking registry.mu directly is safe here:
+// Snapshot's probe goroutines are joined (wg.Wait()) before it returns, so by
+// the time a request's response has been read, nothing else can be touching
+// this map.
+func seedEndpointStatus(registry *ProxyRegistry, ep OpenAIEndpoint, online bool, models ...UpstreamModel) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.status[ep.Name] = &EndpointStatus{
+		Endpoint:    ep,
+		Online:      online,
+		Models:      models,
+		LastChecked: time.Now(),
+	}
+}
+
+// Requirement 1: pin survives a reachability flip. "primary" starts offline
+// so the first request is forced onto "secondary" and pins there; primary
+// then comes online, and a same-key second request must still land on
+// secondary even though reachability ordering alone would now prefer primary.
+func TestRouterAffinity_PinSurvivesReachabilityFlip(t *testing.T) {
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := newCountingChatUpstream(t, &primaryCalls, "m")
+	secondary := newCountingChatUpstream(t, &secondaryCalls, "m")
+
+	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	secondaryEP := OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP, secondaryEP}})
+	seedEndpointStatus(registry, primaryEP, false)
+	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv",
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "m"},
+			{Endpoint: "secondary", Model: "m"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"vConv","prompt_cache_key":"conv-1"}`)
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request: status = %d, want 200", resp.StatusCode)
+	}
+	if primaryCalls.Load() != 0 || secondaryCalls.Load() != 1 {
+		t.Fatalf("first request calls: primary=%d secondary=%d, want 0,1 (only secondary was online)",
+			primaryCalls.Load(), secondaryCalls.Load())
+	}
+
+	// Primary is now reachable — reachability-preferred ordering would put
+	// it first. The pin must keep the conversation on secondary anyway.
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+
+	resp2 := postBytes(t, srv.URL+"/v1/chat/completions", body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second request: status = %d, want 200", resp2.StatusCode)
+	}
+	if primaryCalls.Load() != 0 || secondaryCalls.Load() != 2 {
+		t.Errorf("second request calls: primary=%d secondary=%d, want 0,2 — the pin must beat reachability ordering",
+			primaryCalls.Load(), secondaryCalls.Load())
+	}
+}
+
+// Requirement 2: distinct conversation keys pin independently. conv-A pins
+// to secondary while primary is offline; conv-B is a fresh key issued after
+// primary comes online, so it pins to primary on its own first request.
+// Replaying both afterward must not cross-contaminate.
+func TestRouterAffinity_DistinctConversationKeysPinIndependently(t *testing.T) {
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := newCountingChatUpstream(t, &primaryCalls, "m")
+	secondary := newCountingChatUpstream(t, &secondaryCalls, "m")
+
+	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	secondaryEP := OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP, secondaryEP}})
+	seedEndpointStatus(registry, primaryEP, false)
+	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv",
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "m"},
+			{Endpoint: "secondary", Model: "m"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	convA := []byte(`{"model":"vConv","prompt_cache_key":"conv-A"}`)
+	postBytes(t, srv.URL+"/v1/chat/completions", convA).Body.Close()
+	if secondaryCalls.Load() != 1 {
+		t.Fatalf("conv-A first request: secondary calls = %d, want 1", secondaryCalls.Load())
+	}
+
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+
+	convB := []byte(`{"model":"vConv","prompt_cache_key":"conv-B"}`)
+	postBytes(t, srv.URL+"/v1/chat/completions", convB).Body.Close()
+	if primaryCalls.Load() != 1 {
+		t.Fatalf("conv-B first request: primary calls = %d, want 1 (fresh key, no pin yet, primary now preferred)", primaryCalls.Load())
+	}
+
+	// Replay both — each must stick to its own established target, even
+	// though both endpoints are now online and reachability ordering alone
+	// would send everything to primary.
+	postBytes(t, srv.URL+"/v1/chat/completions", convA).Body.Close()
+	postBytes(t, srv.URL+"/v1/chat/completions", convB).Body.Close()
+
+	if primaryCalls.Load() != 2 || secondaryCalls.Load() != 2 {
+		t.Errorf("after replay: primary=%d (want 2: conv-B x2) secondary=%d (want 2: conv-A x2) — pins must not cross-contaminate",
+			primaryCalls.Load(), secondaryCalls.Load())
+	}
+}
+
+// Requirement 3: no prompt_cache_key and no user means today's behavior —
+// normal reachability-preferred ordering, and critically, no pin recorded.
+func TestRouterAffinity_NoKeyMeansNoAffinity(t *testing.T) {
+	var primaryCalls atomic.Int64
+	primary := newCountingChatUpstream(t, &primaryCalls, "m")
+	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP}})
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv", Targets: []VirtualLLMTarget{{Endpoint: "primary", Model: "m"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vConv"}`))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || primaryCalls.Load() != 1 {
+		t.Fatalf("status=%d calls=%d, want 200,1", resp.StatusCode, primaryCalls.Load())
+	}
+	if got := router.affinity.size(); got != 0 {
+		t.Errorf("affinity store size = %d, want 0 — no key means no pin is ever recorded", got)
+	}
+}
+
+// Requirement 4: `user` is used when prompt_cache_key is absent.
+func TestRouterAffinity_FallsBackToUserField(t *testing.T) {
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := newCountingChatUpstream(t, &primaryCalls, "m")
+	secondary := newCountingChatUpstream(t, &secondaryCalls, "m")
+
+	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	secondaryEP := OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP, secondaryEP}})
+	seedEndpointStatus(registry, primaryEP, false)
+	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv",
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "m"},
+			{Endpoint: "secondary", Model: "m"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"vConv","user":"user-1"}`)
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+	if secondaryCalls.Load() != 1 {
+		t.Fatalf("first request: secondary calls = %d, want 1", secondaryCalls.Load())
+	}
+
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+
+	if primaryCalls.Load() != 0 || secondaryCalls.Load() != 2 {
+		t.Errorf("second request calls: primary=%d secondary=%d, want 0,2 — user field must pin same as prompt_cache_key",
+			primaryCalls.Load(), secondaryCalls.Load())
+	}
+}
+
+// Requirement 5: a pin naming a target removed from config entirely (not
+// merely offline — actually gone from virtual.Targets) is ignored, and
+// routing falls back to whatever candidates remain.
+func TestRouterAffinity_PinnedTargetRemovedFromConfigFallsBack(t *testing.T) {
+	var aCalls, bCalls atomic.Int64
+	a := newCountingChatUpstream(t, &aCalls, "m")
+	b := newCountingChatUpstream(t, &bCalls, "m")
+
+	aEP := OpenAIEndpoint{Name: "a", BaseURL: a.URL + "/v1"}
+	bEP := OpenAIEndpoint{Name: "b", BaseURL: b.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{aEP, bEP}})
+	seedEndpointStatus(registry, aEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, bEP, true, UpstreamModel{ID: "m"})
+
+	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv",
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "a", Model: "m"},
+			{Endpoint: "b", Model: "m"},
+		},
+	}}}
+	router := NewRelayRouter(":0", nil, registry, virtual)
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"vConv","prompt_cache_key":"conv-1"}`)
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+	if aCalls.Load() != 1 {
+		t.Fatalf("first request: a calls = %d, want 1 (declared first, both online)", aCalls.Load())
+	}
+
+	// Remove "a" from config entirely — as if the operator dropped the
+	// target, not merely took it offline.
+	virtual.Models[0].Targets = virtual.Models[0].Targets[1:]
+
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+	if aCalls.Load() != 1 || bCalls.Load() != 1 {
+		t.Errorf("after removing the pinned target: a=%d (want 1, untouched) b=%d (want 1, took over)",
+			aCalls.Load(), bCalls.Load())
+	}
+}
+
+// Requirement 6: a pinned target that fails at connection time falls through
+// to the next candidate, and the pin re-points to whatever actually served —
+// proven by a third request going straight to the new target even after the
+// originally pinned one becomes healthy again.
+func TestRouterAffinity_RepinsAfterPinnedTargetFails(t *testing.T) {
+	var primaryCalls, secondaryCalls atomic.Int64
+	primary := newCountingChatUpstream(t, &primaryCalls, "m")
+	secondary := newCountingChatUpstream(t, &secondaryCalls, "m")
+
+	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	secondaryEP := OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP, secondaryEP}})
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vConv",
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "primary", Model: "m"},
+			{Endpoint: "secondary", Model: "m"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"vConv","prompt_cache_key":"conv-1"}`)
+
+	// Request 1: both online, declared order preferred — primary serves and
+	// is pinned.
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+	if primaryCalls.Load() != 1 {
+		t.Fatalf("request 1: primary calls = %d, want 1", primaryCalls.Load())
+	}
+
+	// Simulate primary failing at connection time: point the cached status
+	// at a closed port while still marking it "online" — the registry's own
+	// 15s-stale cache wouldn't know it just died until the next real probe,
+	// which is exactly the scenario the retry path exists for.
+	seedEndpointStatus(registry, OpenAIEndpoint{Name: "primary", BaseURL: "http://127.0.0.1:1/v1"}, true, UpstreamModel{ID: "m"})
+
+	// Request 2: the pin still points at primary (order unchanged by
+	// applyAffinity — already first), but primary now fails pre-response, so
+	// the router falls through to secondary and re-pins to it.
+	resp2 := postBytes(t, srv.URL+"/v1/chat/completions", body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("request 2: status = %d, want 200 (served by the fallback)", resp2.StatusCode)
+	}
+	if secondaryCalls.Load() != 1 {
+		t.Fatalf("request 2: secondary calls = %d, want 1 (took over after primary failed)", secondaryCalls.Load())
+	}
+
+	// Restore primary to full health — reachability ordering alone would now
+	// prefer it again (declared first, believed online).
+	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+
+	// Request 3: the pin now points at secondary, so it must go straight
+	// there — primary, though healthy again, must not receive a call.
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+	if primaryCalls.Load() != 1 || secondaryCalls.Load() != 2 {
+		t.Errorf("request 3: primary=%d (want 1, still untouched) secondary=%d (want 2, pin held)",
+			primaryCalls.Load(), secondaryCalls.Load())
+	}
+}
+
+// Requirement 8: a failed attempt must never record a pin — only a genuine
+// success does. Every target here is unreachable, so the store must stay
+// empty after the 503.
+func TestRouterAffinity_FailedAttemptRecordsNoPin(t *testing.T) {
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "dead1", BaseURL: "http://127.0.0.1:1/v1"},
+		{Name: "dead2", BaseURL: "http://127.0.0.1:1/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vDead", Targets: []VirtualLLMTarget{
+			{Endpoint: "dead1", Model: "m1"},
+			{Endpoint: "dead2", Model: "m2"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vDead","prompt_cache_key":"conv-1"}`))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got := router.affinity.size(); got != 0 {
+		t.Errorf("affinity store size = %d, want 0 — a failed attempt must never pin", got)
 	}
 }
 
