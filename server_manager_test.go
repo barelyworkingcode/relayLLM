@@ -415,6 +415,25 @@ func TestParseUnifiedConfig_MlxServeSection(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedConfig_VirtualLLMs(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{
+		"virtual-llms": {"models": [{
+			"name": "vCode",
+			"targets": [{"endpoint": "remote", "model": "code"}, {"alias": "local-code"}]
+		}]}
+	}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Virtual == nil || len(cfg.Virtual.Models) != 1 {
+		t.Fatalf("virtual models = %+v, want one", cfg.Virtual)
+	}
+	got := cfg.Virtual.Models[0]
+	if got.Name != "vCode" || len(got.Targets) != 2 || got.Targets[0].Endpoint != "remote" || got.Targets[1].Alias != "local-code" {
+		t.Errorf("virtual model = %+v, want vCode with ordered remote/local targets", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
