@@ -24,9 +24,14 @@ type OpenAIConfig struct {
 	Endpoints []OpenAIEndpoint `json:"endpoints"`
 }
 
-// VirtualLLMConfig defines user-facing model names that select the first
-// reachable target in declaration order. Targets can refer to configured
-// OpenAI endpoints or managed-server aliases on this relayLLM host.
+// VirtualLLMConfig defines user-facing model names that attempt an ordered
+// list of fallback targets. Targets can refer to configured OpenAI endpoints
+// or managed-server aliases on this relayLLM host. Declared order is a
+// preference, not a hard gate: RelayRouter.candidatesForVirtual prefers
+// targets it currently believes are reachable, but still attempts the rest
+// as a last resort, and RelayRouter.routeVirtual retries the next candidate
+// on any pre-response failure — see relay_router.go for why (the reachability
+// cache is 15s stale by design).
 type VirtualLLMConfig struct {
 	Models []VirtualLLM `json:"models"`
 }
@@ -34,6 +39,9 @@ type VirtualLLMConfig struct {
 // VirtualLLM is one stable model name (for example, "vCode") with ordered
 // fallback targets. A target either names an OpenAI endpoint plus its bare
 // upstream model id, or names a managed-server alias on this relayLLM host.
+// The name always appears in /v1/models — even when every target is
+// currently unreachable — because the point of a virtual name is that it's
+// stable config a client can poll and dispatch against.
 type VirtualLLM struct {
 	Name    string             `json:"name"`
 	Targets []VirtualLLMTarget `json:"targets"`
