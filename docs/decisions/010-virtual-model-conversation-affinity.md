@@ -23,13 +23,28 @@ the replayed history with `400 item['content'] is not an array`. Every retry
 replayed the same poisoned history, so the conversation was permanently
 wedged — not degraded, not slower, dead.
 
-This is not a translation problem. `encrypted_content` is an opaque token
-valid only for the model that produced it; there is no shape that both
-backends accept, and there is no way to reconstruct a `content` array from an
-oMLX `summary` field or vice versa. The two backends simply cannot share a
-reasoning transcript. The only fix is to stop trying: **a conversation must
-stick to one target for its entire lifetime**, independent of what the
-reachability cache prefers turn to turn.
+The incompatibility is one-directional, which is worth stating precisely
+because it is easy to assume otherwise. Measured against both backends:
+
+| reasoning item shape | llama.cpp | oMLX |
+|---|---|---|
+| `summary` only (what oMLX emits) | reject: `item['content'] is not an array` | accept |
+| `content` array (what llama.cpp emits) | accept | accept |
+| both `summary` and `content` | accept | accept |
+| `content: []` | reject: `item['content'] is empty` | — |
+
+So llama.cpp's transcript replays into oMLX without complaint; only the
+reverse breaks. llama.cpp requires a non-empty `content` array on every
+reasoning item, and oMLX never produces one — it emits `summary` with
+`content: null` and no `encrypted_content`.
+
+That still leaves nothing to translate. There is no way to reconstruct a
+`content` array from an oMLX `summary`: the raw reasoning was never sent, and
+`encrypted_content` is an opaque token valid only for the model that produced
+it, so it cannot be synthesized either. A conversation that has taken even one
+oMLX turn can never be replayed to llama.cpp. The only fix is to stop mixing:
+**a conversation must stick to one target for its entire lifetime**,
+independent of what the reachability cache prefers turn to turn.
 
 ## Decision
 
