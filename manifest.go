@@ -150,6 +150,22 @@ func settingsSchema() []FieldDecl {
 			},
 		},
 		{
+			ID: "virtual-llms", Label: "Virtual LLM failover", Type: "object",
+			Help: "Stable model names that route to the first reachable target in order.",
+			Fields: []FieldDecl{
+				{ID: "models", Label: "Virtual models", Type: "array", Item: &FieldDecl{
+					Type: "object", Label: "virtual model", Fields: []FieldDecl{
+						{ID: "name", Label: "Name", Type: "text", Required: true, Help: `The model callers use, e.g. "vCode".`},
+						{ID: "targets", Label: "Targets", Type: "array", Item: &FieldDecl{Type: "object", Label: "target", Fields: []FieldDecl{
+							{ID: "endpoint", Label: "Endpoint", Type: "text", Help: "Name of an OpenAI-compatible endpoint (with Upstream model)."},
+							{ID: "model", Label: "Upstream model", Type: "text", Help: "Model id sent to the OpenAI-compatible endpoint."},
+							{ID: "alias", Label: "Managed alias", Type: "text", Help: "Local llama.cpp or MLX model alias; use instead of Endpoint/Upstream model."},
+						}}},
+					},
+				}},
+			},
+		},
+		{
 			ID: "llama-server", Label: "llama.cpp server", Type: "object",
 			Fields: []FieldDecl{
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "/usr/local/bin/llama-server"},

@@ -24,6 +24,39 @@ type OpenAIConfig struct {
 	Endpoints []OpenAIEndpoint `json:"endpoints"`
 }
 
+// VirtualLLMConfig defines user-facing model names that select the first
+// reachable target in declaration order. Targets can refer to configured
+// OpenAI endpoints or managed-server aliases on this relayLLM host.
+type VirtualLLMConfig struct {
+	Models []VirtualLLM `json:"models"`
+}
+
+// VirtualLLM is one stable model name (for example, "vCode") with ordered
+// fallback targets. A target either names an OpenAI endpoint plus its bare
+// upstream model id, or names a managed-server alias on this relayLLM host.
+type VirtualLLM struct {
+	Name    string             `json:"name"`
+	Targets []VirtualLLMTarget `json:"targets"`
+}
+
+type VirtualLLMTarget struct {
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model"`
+	Alias    string `json:"alias"`
+}
+
+func (c *VirtualLLMConfig) Find(name string) *VirtualLLM {
+	if c == nil {
+		return nil
+	}
+	for i := range c.Models {
+		if c.Models[i].Name == name {
+			return &c.Models[i]
+		}
+	}
+	return nil
+}
+
 // Find returns a pointer to the endpoint with the given Name, or nil if none
 // matches. Comparison is case-sensitive to match how model prefixes are
 // parsed elsewhere.
