@@ -79,6 +79,23 @@ first use, poll `/health` until ready, and are shared across sessions.
 reachable OpenAI endpoint, so any OpenAI client can reach all local models
 through one URL. Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
+Configure `virtual-llms` in `settings.json` to expose a stable model name that
+uses the first reachable target, in order. An endpoint target reuses a name
+from `openai.endpoints` and its `/models` health check is cached for 15
+seconds; an `alias` target selects a local managed llama.cpp or MLX model.
+
+```json
+"virtual-llms": {
+  "models": [{
+    "name": "vCode",
+    "targets": [
+      {"endpoint": "remote-llama", "model": "code"},
+      {"alias": "local-code"}
+    ]
+  }]
+}
+```
+
 ## API
 
 The API is a Unix-socket HTTP + WebSocket surface. Treat it as a public API for

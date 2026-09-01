@@ -16,11 +16,12 @@ import (
 // PTY is the raw settings.json `pty` section and may be nil when absent —
 // seeding happens in TemplateStore.Load, not here.
 type LoadedConfig struct {
-	OpenAI *OpenAIConfig
-	Llama  *ServerConfig
-	Mlx    *ServerConfig
-	Pi     *PiConfig
-	PTY    map[string]TerminalTemplate
+	OpenAI  *OpenAIConfig
+	Virtual *VirtualLLMConfig
+	Llama   *ServerConfig
+	Mlx     *ServerConfig
+	Pi      *PiConfig
+	PTY     map[string]TerminalTemplate
 }
 
 // PiConfig configures the pi.dev coding-agent provider. All fields optional.
@@ -140,10 +141,11 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, err
 	}
 
 	return &LoadedConfig{
-		OpenAI: openaiCfg,
-		Llama:  llamaCfg,
-		Mlx:    &ServerConfig{},
-		Pi:     &PiConfig{},
+		OpenAI:  openaiCfg,
+		Virtual: &VirtualLLMConfig{},
+		Llama:   llamaCfg,
+		Mlx:     &ServerConfig{},
+		Pi:      &PiConfig{},
 	}, nil
 }
 
@@ -155,6 +157,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	// stay as map[string]any for the generic CLI flag translation.
 	var raw struct {
 		OpenAI      *OpenAIConfig               `json:"openai"`
+		VirtualLLMs *VirtualLLMConfig           `json:"virtual-llms"`
 		LlamaServer *json.RawMessage            `json:"llama-server"`
 		MlxServer   *json.RawMessage            `json:"mlx-serve"`
 		Pi          *PiConfig                   `json:"pi"`
@@ -168,6 +171,10 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	if raw.OpenAI != nil {
 		openaiCfg = raw.OpenAI
 		normalizeOpenAI(openaiCfg)
+	}
+	virtualCfg := &VirtualLLMConfig{}
+	if raw.VirtualLLMs != nil {
+		virtualCfg = raw.VirtualLLMs
 	}
 
 	llamaCfg := &ServerConfig{}
@@ -197,11 +204,12 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	}
 
 	return &LoadedConfig{
-		OpenAI: openaiCfg,
-		Llama:  llamaCfg,
-		Mlx:    mlxCfg,
-		Pi:     piCfg,
-		PTY:    raw.PTY,
+		OpenAI:  openaiCfg,
+		Virtual: virtualCfg,
+		Llama:   llamaCfg,
+		Mlx:     mlxCfg,
+		Pi:      piCfg,
+		PTY:     raw.PTY,
 	}, nil
 }
 

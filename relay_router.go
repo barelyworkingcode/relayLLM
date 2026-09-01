@@ -14,12 +14,14 @@ import (
 // RelayRouter aggregates managed-server aliases (llama.cpp, MLX, …) and
 // reachable OpenAI endpoint models behind one OpenAI-compatible listener.
 // Dispatch is by the request body's `model` field: bare alias → first
-// matching manager; `endpoint.Name/id` → matching OpenAI upstream.
+// matching manager; virtual name → first reachable configured target;
+// `endpoint.Name/id` → matching OpenAI upstream.
 // Endpoints that fail their last probe drop out of /v1/models and refuse
 // routing until the next 15s TTL cycle.
 type RelayRouter struct {
 	managers []*ServerManager
 	registry *ProxyRegistry
+	virtual  *VirtualLLMConfig
 	server   *http.Server
 }
 
@@ -27,7 +29,7 @@ type RelayRouter struct {
 // dropped; registry may be nil to disable the endpoint branch. A router with
 // no live backends 400s every request — StartRelayRouter guards against
 // starting one.
-func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry) *RelayRouter {
+func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual ...*VirtualLLMConfig) *RelayRouter {
 	live := make([]*ServerManager, 0, len(managers))
 	for _, m := range managers {
 		if m != nil {
@@ -35,6 +37,9 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 		}
 	}
 	p := &RelayRouter{managers: live, registry: registry}
+	if len(virtual) > 0 {
+		p.virtual = virtual[0]
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
@@ -152,6 +157,21 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if p.virtual != nil {
+		for _, virtual := range p.virtual.Models {
+			if _, ok := p.resolveVirtual(r, virtual.Name); !ok {
+				continue
+			}
+			data = append(data, map[string]any{
+				"id":           virtual.Name,
+				"object":       "model",
+				"created":      0,
+				"owned_by":     "virtual",
+				"status":       map[string]any{"value": ModelStatusLoaded},
+				"architecture": map[string]any{"input_modalities": []string{"text"}},
+			})
+		}
+	}
 	if data == nil {
 		data = []map[string]any{}
 	}
@@ -205,9 +225,52 @@ func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Reques
 			return mgr, body.Model, true
 		}
 	}
+
 	writeRouterError(w, http.StatusBadRequest,
 		fmt.Sprintf("model %q is not a managed server; only llama-server and mlx-serve models can be loaded or unloaded", body.Model))
 	return nil, "", false
+}
+
+// resolveVirtual probes the configured endpoint registry as needed, then
+// chooses the first online target in the virtual model's declared order.
+type resolvedVirtualTarget struct {
+	endpoint   OpenAIEndpoint
+	upstreamID string
+	manager    *ServerManager
+	alias      string
+}
+
+func (p *RelayRouter) resolveVirtual(r *http.Request, name string) (resolvedVirtualTarget, bool) {
+	if p.virtual == nil {
+		return resolvedVirtualTarget{}, false
+	}
+	virtual := p.virtual.Find(name)
+	if virtual == nil || virtual.Name == "" {
+		return resolvedVirtualTarget{}, false
+	}
+	online := make(map[string]OpenAIEndpoint)
+	if p.registry != nil {
+		for _, status := range p.registry.Snapshot(r.Context()) {
+			if status.Online {
+				online[status.Endpoint.Name] = status.Endpoint
+			}
+		}
+	}
+	for _, target := range virtual.Targets {
+		if target.Endpoint != "" && target.Model != "" {
+			if endpoint, ok := online[target.Endpoint]; ok {
+				return resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model}, true
+			}
+		}
+		if target.Alias != "" {
+			for _, manager := range p.managers {
+				if manager.HasAlias(target.Alias) {
+					return resolvedVirtualTarget{manager: manager, alias: target.Alias}, true
+				}
+			}
+		}
+	}
+	return resolvedVirtualTarget{}, false
 }
 
 func writeRouterJSON(w http.ResponseWriter, status int, payload any) {
@@ -253,6 +316,14 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 			p.routeManaged(w, r, mgr, envelope.Model, body)
 			return
 		}
+	}
+	if target, ok := p.resolveVirtual(r, envelope.Model); ok {
+		if target.manager != nil {
+			p.routeManaged(w, r, target.manager, target.alias, body)
+		} else {
+			p.routeOpenAI(w, r, target.endpoint, target.upstreamID, body)
+		}
+		return
 	}
 
 	if p.registry != nil {
@@ -351,11 +422,11 @@ func rewriteModelField(body []byte, upstreamID string) ([]byte, error) {
 // StartRelayRouter starts the router in a background goroutine. Returns nil
 // (no-op) when addr is empty or no live backend remains after dropping nil
 // managers.
-func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry) *RelayRouter {
+func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual ...*VirtualLLMConfig) *RelayRouter {
 	if addr == "" {
 		return nil
 	}
-	p := NewRelayRouter(addr, managers, registry)
+	p := NewRelayRouter(addr, managers, registry, virtual...)
 	if len(p.managers) == 0 && p.registry == nil {
 		return nil
 	}
