@@ -207,6 +207,9 @@ func main() {
 		routerAddr = ":" + *routerPort
 	}
 	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual)
+	if relayRouter != nil {
+		relayRouter.SetReasoningEffortMap(cfg.Router.ReasoningEffortMap)
+	}
 	sessions.SetRouterPort(*routerPort)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
 

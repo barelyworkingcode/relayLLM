@@ -97,6 +97,18 @@ A virtual name always appears in `/v1/models`, unlike an endpoint model that sim
 
 Startup validation (`warnVirtualModelConfig` in `main.go`, sibling to `warnAliasShadowing`) warns about virtual-model dead config: a virtual name shadowed by a managed alias (dispatch checks managers first), a name containing `/` (would intercept `endpoint/id` routing), a target with only one of `endpoint`/`model` set, a target naming an endpoint or alias that doesn't exist, a virtual with zero usable targets, and two virtuals sharing a name.
 
+**Reasoning-effort rewrite** (`router.reasoningEffortMap` config, `RouterConfig` / `rewriteProxyBody` / `applyReasoningEffortMap`). Clients and backends do not agree on what "reasoning off" looks like on the wire. Measured against a real llama.cpp server (`/v1/chat/completions`, Qwen3.8-27B):
+
+| `reasoning_effort` sent | result |
+|---|---|
+| `none` | accepted, **zero reasoning returned** |
+| `low` / `medium` / `high` / `xhigh` | accepted, reasoning returned |
+| `minimal` | **500 server error**: `Unexpected reasoning effort minimal. Supported types are xhigh (default), medium, and low.` |
+
+Oh My Pi has no wire value meaning "off" at all: its `--thinking off` clamps to the *lowest entry in the model's configured `efforts` list* and sends that verbatim. Captured twice against the same prompt, only the list changed: `efforts: [low, medium, xhigh]` → sends `"low"`; `efforts: [medium, xhigh]` → sends `"medium"`. So a client can be configured to send `minimal` (by giving it an `efforts` list whose lowest entry is `minimal`) but never `none` — there is no client-side way to ask for the value that actually works. When a client does send `minimal`, the 500 above sent one production client into a tight retry loop (150 identical requests observed from a single prompt).
+
+`router.reasoningEffortMap` closes that gap by rewriting the value in flight: `{"minimal": "none"}` turns the lowest value a stuck client can be made to send into the value the backend actually treats as off. It's a router-level, opt-in body rewrite — absent or empty (the default) means zero behavior change, not even a JSON round-trip on the managed-alias path (see `rewriteProxyBody`'s short-circuit). Keys and values are free-form strings on purpose, not a fixed vocabulary: the table above is this backend's answer, not a general truth, and hardcoding one would just move the problem to the next backend that disagrees. Only a top-level string `reasoning_effort` field with an exact, case-sensitive key match is rewritten; a mapped value of `""` removes the key entirely rather than sending an empty string, since some backends reject that too. Applies uniformly to every proxied path — managed-alias, endpoint, and virtual-model routes all funnel through the same rewrite so a client hitting a bare managed alias gets the same fix as one hitting an endpoint.
+
 ## Built-in Tools
 
 `BuiltinToolRegistry` (`builtin_tools.go`) is the generic mechanism for in-process tools that run alongside MCP tools in the `BaseChatProvider` loop (`provider_chat_base.go`) and need an `emit` progress callback MCP tools can't provide. Dispatch order in `runToolLoop()`: built-ins first (`builtinTools.Has()`), then MCP.
@@ -171,6 +183,9 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
         {"name": "lmstudio", "baseURL": "http://localhost:1234/v1", "group": "LM Studio"}
       ]
     },
+    "router": {
+      "reasoningEffortMap": {"minimal": "none"}
+    },
     "llama-server": {
       "binaryPath": "/usr/local/bin/llama-server",
       "modelDir": "~/models/",
@@ -211,6 +226,8 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
     }
   }
   ```
+  **`router`** (optional; empty/absent means no rewriting, byte-identical to a settings.json with no `router` section at all): `reasoningEffortMap` rewrites a top-level string `reasoning_effort` field on every proxied request body — see the Relay-router section above for why. Free-form string keys/values, not a fixed vocabulary: map a value to `""` to remove the field entirely instead of sending it as an empty string.
+
   **Memory budget** (optional, per managed-server section; all default to off so behavior is unchanged until set — see `docs/decisions/009-managed-server-memory-budget.md`): `maxLoaded` caps concurrent instances, `maxMemoryGB` caps the sum of estimated resident memory, `idleTimeoutMinutes` reclaims instances nobody is using. Either cap evicts the least-recently-used *idle* instance; a leased instance (mid-turn) is never evicted — when everything is busy, admission waits up to `admissionTimeoutSeconds` (default 120) and then errors naming the busy aliases. Model sizes are computed, not declared: weights from the file size, KV cache from the GGUF header (`gguf.go`) honoring sliding-window attention and per-layer GQA, plus `memoryHeadroomPercent` (default 10) for compute buffers. Per-model `memoryGB` overrides the estimate; a model whose size can't be determined counts against `maxLoaded` but not `maxMemoryGB`. Current usage is reported in `/api/status` under `budgets`, and per-instance `leases` / `estimatedGB` / `idleSeconds` in `instances`.
 
   Each llama-server / mlx-serve model key except `alias` (and the budget-only `memoryGB`) maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths (for mlx-serve, `model` is an MLX model *directory*). `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `relay_spawn.go`: `useRelayToken` (or, for terminals, a non-empty `projectID`) injects a project-scoped `RELAY_PROJECT_TOKEN` env var, resolved just-in-time from relay's bridge — never the full-access service token; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. Skill *generation* is owned by relay (see relay ADR-004 + `docs/decisions/006-skill-regen-owned-by-relay.md`); relayLLM no longer regenerates SKILL.md. Skills load from the convention `<project>/.claude/skills`: the pi `--mode rpc` provider auto-appends `--skill <project>/.claude/skills` (skipped if `extraArgs` already contains `--skill`), and PTY templates reference `${PROJECT_PATH}/.claude/skills` in their args (e.g. the `pidev` template: `"args": ["--skill", "${PROJECT_PATH}/.claude/skills"]`).

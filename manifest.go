@@ -166,6 +166,14 @@ func settingsSchema() []FieldDecl {
 			},
 		},
 		{
+			ID: "router", Label: "Relay router", Type: "object",
+			Help: "Rewrites applied to every proxied request body, regardless of which backend it lands on.",
+			Fields: []FieldDecl{
+				{ID: "reasoningEffortMap", Label: "Reasoning effort map", Type: "stringMap",
+					Help: `Rewrites a top-level "reasoning_effort" string field before it reaches the backend, e.g. minimal -> none. Map a value to an empty string to remove the field instead of sending it empty (some backends reject ""). Absent or empty disables rewriting entirely.`},
+			},
+		},
+		{
 			ID: "llama-server", Label: "llama.cpp server", Type: "object",
 			Fields: []FieldDecl{
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "/usr/local/bin/llama-server"},

@@ -31,6 +31,48 @@ type RelayRouter struct {
 	virtual  *VirtualLLMConfig
 	affinity *virtualAffinityStore
 	server   *http.Server
+
+	// reasoningEffortMap rewrites a top-level "reasoning_effort" string field
+	// on every proxied body before it reaches a backend — see RouterConfig
+	// and rewriteProxyBody. nil/empty (the zero value, and what every
+	// constructor leaves it at) means no rewriting at all; wired in from
+	// settings.json via SetReasoningEffortMap once at startup rather than a
+	// constructor parameter, to keep this opt-in feature from touching every
+	// existing NewRelayRouter call site.
+	reasoningEffortMap map[string]string
+}
+
+// RouterConfig holds relay-router behavior that doesn't belong to any one
+// backend — currently just the reasoning-effort rewrite table. Maps to
+// settings.json's optional top-level "router" section.
+type RouterConfig struct {
+	// ReasoningEffortMap rewrites (or, mapped to "", removes) a top-level
+	// string "reasoning_effort" field on every proxied request body. Absent
+	// or empty disables rewriting entirely — the default, so behavior is
+	// byte-identical to a settings.json with no "router" section at all.
+	//
+	// Keys and values are free-form strings on purpose, not a fixed
+	// vocabulary: backends disagree about what they accept. Measured against
+	// a real llama.cpp server (Qwen3.8-27B): "none" is accepted and turns
+	// reasoning off; "low"/"medium"/"high"/"xhigh" are accepted and produce
+	// reasoning; "minimal" 500s ("Unexpected reasoning effort minimal.
+	// Supported types are xhigh (default), medium, and low."). Oh My Pi has
+	// no wire value that means "off" — its `--thinking off` clamps to the
+	// lowest entry in the model's configured `efforts` list and sends that
+	// verbatim, so "minimal" is the lowest value such a client can be made
+	// to send. Mapping {"minimal": "none"} turns that into the off signal
+	// the backend actually understands. See CLAUDE.md's Relay-router section
+	// for the full story.
+	ReasoningEffortMap map[string]string `json:"reasoningEffortMap,omitempty"`
+}
+
+// SetReasoningEffortMap installs the router-level reasoning_effort rewrite
+// table (settings.json's router.reasoningEffortMap). Called once from main
+// after StartRelayRouter returns; nil or empty disables rewriting, which is
+// also this field's zero value, so a router this is never called on behaves
+// exactly as it did before the feature existed.
+func (p *RelayRouter) SetReasoningEffortMap(m map[string]string) {
+	p.reasoningEffortMap = m
 }
 
 // NewRelayRouter creates a router on addr. Nil entries in managers are
@@ -660,14 +702,25 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	}
 	defer release()
 
+	// No model swap needed here — the client already sent the bare alias the
+	// managed server expects — but the reasoning_effort rewrite still applies
+	// (see RouterConfig): a client hitting a managed alias has exactly the
+	// same backend-vocabulary problem as one hitting an endpoint.
+	rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap)
+	if err != nil {
+		slog.Warn("relay router: body rewrite failed", "alias", alias, "error", err)
+		writeRouterError(w, http.StatusBadRequest, "failed to rewrite request body")
+		return
+	}
+
 	target, _ := url.Parse(endpoint.BaseURL)
-	newUpstreamProxy(target, body, endpoint.APIKey, mgr.profile.Kind, alias, nil).ServeHTTP(w, r)
+	newUpstreamProxy(target, rewritten, endpoint.APIKey, mgr.profile.Kind, alias, nil).ServeHTTP(w, r)
 }
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
 func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep OpenAIEndpoint, upstreamID string, body []byte) {
-	rewritten, err := rewriteModelField(body, upstreamID)
+	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
 		http.Error(w, `{"error":"failed to rewrite model field"}`, http.StatusBadRequest)
@@ -763,15 +816,20 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 		if err != nil {
 			return nil, nil, err
 		}
+		rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap)
+		if err != nil {
+			rel()
+			return nil, nil, fmt.Errorf("rewrite request body: %w", err)
+		}
 		targetURL, _ := url.Parse(endpoint.BaseURL)
-		proxy := newUpstreamProxy(targetURL, body, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
+		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
 		proxy.Transport = virtualDialTransport
 		return proxy, rel, nil
 	}
 
-	rewritten, err := rewriteModelField(body, target.upstreamID)
+	rewritten, err := rewriteProxyBody(body, target.upstreamID, p.reasoningEffortMap)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rewrite model field: %w", err)
+		return nil, nil, fmt.Errorf("rewrite request body: %w", err)
 	}
 	targetURL, err := url.Parse(target.endpoint.BaseURL)
 	if err != nil {
@@ -864,21 +922,84 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 	}
 }
 
-// rewriteModelField swaps the top-level "model" field for upstreamID,
-// preserving every other field verbatim (RawMessage avoids re-marshalling
-// nested payloads — large image_url parts, ordered tool definitions, etc.).
-// Top-level key order is not preserved: json.Marshal of a map sorts keys.
-func rewriteModelField(body []byte, upstreamID string) ([]byte, error) {
+// rewriteProxyBody applies the router's field-level body rewrites in one
+// decode/encode pass, so an endpoint-routed body is never unmarshalled and
+// remarshalled twice for two independent rewrites. model, when non-empty,
+// replaces the top-level "model" field (endpoint routes rewrite
+// "endpoint.Name/id" down to the bare id the endpoint itself expects — this
+// used to be rewriteModelField's whole job). effortMap, when non-empty,
+// rewrites or removes a top-level string "reasoning_effort" field; see
+// applyReasoningEffortMap.
+//
+// When both are no-ops (no model swap, no configured map) the body is
+// returned completely untouched rather than round-tripped through
+// encoding/json — that's load-bearing for the managed-alias route, which has
+// no model to swap: with reasoningEffortMap unset (the default), it must
+// stay byte-identical to before this feature existed, not just semantically
+// unchanged with reordered keys.
+//
+// RawMessage avoids re-marshalling nested payloads verbatim (large
+// image_url parts, ordered tool definitions, etc.) when a rewrite does
+// happen. Top-level key order is not preserved in that case: json.Marshal of
+// a map sorts keys.
+func rewriteProxyBody(body []byte, model string, effortMap map[string]string) ([]byte, error) {
+	if model == "" && len(effortMap) == 0 {
+		return body, nil
+	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal envelope: %w", err)
 	}
-	encoded, err := json.Marshal(upstreamID)
-	if err != nil {
-		return nil, fmt.Errorf("encode upstream id: %w", err)
+	if model != "" {
+		encoded, err := json.Marshal(model)
+		if err != nil {
+			return nil, fmt.Errorf("encode upstream id: %w", err)
+		}
+		raw["model"] = encoded
 	}
-	raw["model"] = encoded
+	applyReasoningEffortMap(raw, effortMap)
 	return json.Marshal(raw)
+}
+
+// applyReasoningEffortMap rewrites, or removes, a top-level string
+// "reasoning_effort" field in raw per effortMap — see RouterConfig for why
+// this exists. Mutates raw in place; a no-op effortMap or a body with
+// nothing to rewrite leaves raw untouched.
+//
+// Only an exact, case-sensitive match on the field's current string value is
+// rewritten. Everything else passes through deliberately: a missing field, a
+// non-string value (some other client sending a number isn't ours to
+// interpret), and a string that isn't a configured key (it may already be
+// exactly what the backend wants).
+func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[string]string) {
+	if len(effortMap) == 0 {
+		return
+	}
+	rawEffort, ok := raw["reasoning_effort"]
+	if !ok {
+		return
+	}
+	var effort string
+	if err := json.Unmarshal(rawEffort, &effort); err != nil {
+		return // not a JSON string — leave whatever it is alone.
+	}
+	mapped, ok := effortMap[effort]
+	if !ok {
+		return
+	}
+	if mapped == "" {
+		// Some backends reject an empty string outright; "omit the field" is
+		// a distinct, useful outcome from "set it to none" — see RouterConfig.
+		delete(raw, "reasoning_effort")
+		slog.Debug("relay router: removed reasoning_effort", "from", effort)
+		return
+	}
+	encoded, err := json.Marshal(mapped)
+	if err != nil {
+		return // unreachable in practice (marshalling a string cannot fail)
+	}
+	raw["reasoning_effort"] = encoded
+	slog.Debug("relay router: rewrote reasoning_effort", "from", effort, "to", mapped)
 }
 
 // StartRelayRouter starts the router in a background goroutine. Returns nil

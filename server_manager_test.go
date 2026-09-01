@@ -434,6 +434,36 @@ func TestParseUnifiedConfig_VirtualLLMs(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedConfig_RouterSection(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{
+		"router": {"reasoningEffortMap": {"minimal": "none"}}
+	}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Router == nil {
+		t.Fatal("cfg.Router is nil")
+	}
+	if got := cfg.Router.ReasoningEffortMap["minimal"]; got != "none" {
+		t.Errorf("reasoningEffortMap[minimal] = %q, want %q", got, "none")
+	}
+}
+
+// Absent "router" section → empty, non-nil config, exactly like Virtual/Llama
+// above: callers dereference cfg.Router without a nil check.
+func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Router == nil {
+		t.Fatal("cfg.Router should be non-nil even when absent")
+	}
+	if len(cfg.Router.ReasoningEffortMap) != 0 {
+		t.Errorf("reasoningEffortMap = %v, want empty", cfg.Router.ReasoningEffortMap)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
