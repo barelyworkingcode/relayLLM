@@ -127,6 +127,19 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			if len(meta) > 0 {
 				row["meta"] = meta
 			}
+			// context_length mirrors the same number at the top level, for
+			// clients that discover models the plain-OpenAI way (LM Studio-,
+			// vLLM-, OpenRouter-style) and never look inside meta at all —
+			// Oh My Pi's openai-models-list branch is one, and its fallback
+			// on a missing field is a hardcoded 128K, not an error. That's
+			// silently wrong for a model actually pinned smaller: a client
+			// that trusts it builds an oversized request and fails mid-turn.
+			// Omitted, never zero, when neither number is known, so `??
+			// default` in the client falls through instead of landing on an
+			// invented context window.
+			if v, ok := resolveContextLength(entry.ContextSize, entry.TrainedContext); ok {
+				row["context_length"] = v
+			}
 			data = append(data, row)
 		}
 	}
@@ -166,9 +179,12 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				}
 				// Only when the upstream actually advertised one — omitting the
 				// field lets the client apply its own default rather than
-				// trusting a number we invented.
-				if m.ContextLength > 0 {
-					row["meta"] = map[string]any{"n_ctx": m.ContextLength}
+				// trusting a number we invented. context_length is the flat
+				// counterpart to meta.n_ctx above, for the same reason it
+				// exists on managed rows: see the comment there.
+				if v, ok := resolveContextLength(m.ContextLength); ok {
+					row["meta"] = map[string]any{"n_ctx": v}
+					row["context_length"] = v
 				}
 				data = append(data, row)
 			}
@@ -408,9 +424,11 @@ func (p *RelayRouter) virtualCatalogRow(virtual *VirtualLLM, statuses []Endpoint
 	modalities := []string{"text"}
 	var meta map[string]any
 	var status map[string]any
+	var contextLength int64
+	var hasContextLength bool
 	if freshCount > 0 {
 		status = map[string]any{"value": ModelStatusLoaded}
-		modalities, meta = virtualRowMetadata(candidates[0], statuses)
+		modalities, meta, contextLength, hasContextLength = virtualRowMetadata(candidates[0], statuses)
 	} else {
 		status = map[string]any{
 			"value":  ModelStatusUnloaded,
@@ -422,7 +440,7 @@ func (p *RelayRouter) virtualCatalogRow(virtual *VirtualLLM, statuses []Endpoint
 		if len(candidates) > 0 {
 			// Still inherit metadata from the best last-resort candidate —
 			// it's what a request would actually hit if it succeeded.
-			modalities, meta = virtualRowMetadata(candidates[0], statuses)
+			modalities, meta, contextLength, hasContextLength = virtualRowMetadata(candidates[0], statuses)
 		}
 	}
 
@@ -437,40 +455,48 @@ func (p *RelayRouter) virtualCatalogRow(virtual *VirtualLLM, statuses []Endpoint
 	if len(meta) > 0 {
 		row["meta"] = meta
 	}
+	// context_length inherits the same precedence as a managed row's — see
+	// the comment in handleModels — because a virtual name resolves to
+	// whatever candidates[0] is, managed alias or endpoint target alike.
+	if hasContextLength {
+		row["context_length"] = contextLength
+	}
 	return row
 }
 
-// virtualRowMetadata inherits architecture/meta from a virtual model's first
-// attempt-order candidate — the target dispatch will actually try first. A
-// managed alias's metadata is a config fact, available whether or not the
-// server is currently running; an endpoint target's metadata only exists
-// when its last probe succeeded, so an offline candidate falls back to the
-// same text-only/no-meta defaults the rest of /v1/models uses for anything
-// unadvertised. Never claim "image" support that can't be backed — offering
-// images to a server that can't take them fails mid-turn (see CLAUDE.md).
-func virtualRowMetadata(first resolvedVirtualTarget, statuses []EndpointStatus) ([]string, map[string]any) {
+// virtualRowMetadata inherits architecture/meta/context_length from a virtual
+// model's first attempt-order candidate — the target dispatch will actually
+// try first. A managed alias's metadata is a config fact, available whether
+// or not the server is currently running; an endpoint target's metadata only
+// exists when its last probe succeeded, so an offline candidate falls back to
+// the same text-only/no-meta defaults the rest of /v1/models uses for
+// anything unadvertised. Never claim "image" support that can't be backed —
+// offering images to a server that can't take them fails mid-turn (see
+// CLAUDE.md).
+func virtualRowMetadata(first resolvedVirtualTarget, statuses []EndpointStatus) (modalities []string, meta map[string]any, contextLength int64, hasContextLength bool) {
 	if first.manager != nil {
 		for _, entry := range first.manager.ModelCatalog() {
 			if entry.Alias != first.alias {
 				continue
 			}
-			modalities := []string{"text"}
+			modalities = []string{"text"}
 			if entry.SupportsImages {
 				modalities = append(modalities, "image")
 			}
-			meta := map[string]any{}
+			metaOut := map[string]any{}
 			if entry.ContextSize > 0 {
-				meta["n_ctx"] = entry.ContextSize
+				metaOut["n_ctx"] = entry.ContextSize
 			}
 			if entry.TrainedContext > 0 {
-				meta["n_ctx_train"] = entry.TrainedContext
+				metaOut["n_ctx_train"] = entry.TrainedContext
 			}
-			if len(meta) == 0 {
-				return modalities, nil
+			contextLength, hasContextLength = resolveContextLength(entry.ContextSize, entry.TrainedContext)
+			if len(metaOut) == 0 {
+				return modalities, nil, contextLength, hasContextLength
 			}
-			return modalities, meta
+			return modalities, metaOut, contextLength, hasContextLength
 		}
-		return []string{"text"}, nil
+		return []string{"text"}, nil, 0, false
 	}
 
 	for _, status := range statuses {
@@ -481,14 +507,33 @@ func virtualRowMetadata(first resolvedVirtualTarget, statuses []EndpointStatus) 
 			if m.ID != first.upstreamID {
 				continue
 			}
-			var meta map[string]any
-			if m.ContextLength > 0 {
-				meta = map[string]any{"n_ctx": m.ContextLength}
+			var metaOut map[string]any
+			contextLength, hasContextLength = resolveContextLength(m.ContextLength)
+			if hasContextLength {
+				metaOut = map[string]any{"n_ctx": contextLength}
 			}
-			return endpointModalities(m), meta
+			return endpointModalities(m), metaOut, contextLength, hasContextLength
 		}
 	}
-	return []string{"text"}, nil
+	return []string{"text"}, nil, 0, false
+}
+
+// resolveContextLength picks the single number a catalog row's flat
+// context_length field reports, in priority order: the first positive value
+// wins. For a managed model that's (ContextSize, TrainedContext) — the
+// pinned ctx-size is what the server will actually run with, the trained
+// context is the honest fallback for a model with no pin — the same
+// precedence as the meta block's n_ctx/n_ctx_train pair. For an endpoint
+// model there's only ever one number (ContextLength). One function serves
+// both because context_length is flat: unlike meta, it has no room to carry
+// two numbers, so every row type must collapse to this single call.
+func resolveContextLength(candidates ...int64) (int64, bool) {
+	for _, v := range candidates {
+		if v > 0 {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // virtualUnavailableReason explains, for the catalog's status.error field,

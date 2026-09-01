@@ -102,9 +102,9 @@ last resort, and a request retries the next target on any failure that occurs
 before a response byte is sent to the client. A request for a configured
 virtual name only fails (503) when every target genuinely fails; it never
 reads as "unknown model". The name always appears in `/v1/models`, with
-`status`/`meta`/`architecture` inherited from whichever target would be tried
-first — even when every target is currently offline (`status.value` reports
-`"unloaded"` with `failed: true` in that case).
+`status`/`meta`/`architecture`/`context_length` inherited from whichever
+target would be tried first — even when every target is currently offline
+(`status.value` reports `"unloaded"` with `failed: true` in that case).
 
 A conversation sticks to whichever target first serves it: once a target has
 answered, the router pins the conversation to it for as long as the client
