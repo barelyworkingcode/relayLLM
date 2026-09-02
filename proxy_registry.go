@@ -151,6 +151,10 @@ func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
 	r.mu.Lock()
 	if ch, ok := r.inflight[ep.Name]; ok {
 		r.mu.Unlock()
+		// A waiter may still give up early if its own caller hangs up — that's
+		// fine, it just returns without a result to read. It says nothing
+		// about whether the in-flight probe itself succeeds, so it must not
+		// affect what gets recorded (see the WithoutCancel use below).
 		select {
 		case <-ch:
 		case <-ctx.Done():
@@ -168,7 +172,15 @@ func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
 		close(ch)
 	}()
 
-	models, err := FetchOpenAIModels(ctx, ep)
+	// Detach the network call from the triggering request's context. A probe
+	// is shared across every concurrent Snapshot() caller (single-flighted
+	// above), and the caller that happened to trigger it can disconnect for
+	// reasons that say nothing about the upstream (client gave up, browser
+	// tab closed). Cancelling on that basis would record the endpoint
+	// offline with a fresh LastChecked, poisoning the 15s cache for what may
+	// be a perfectly healthy endpoint. FetchOpenAIModels has its own 3s
+	// client timeout, so this can't hang indefinitely even detached.
+	models, err := FetchOpenAIModels(context.WithoutCancel(ctx), ep)
 	status := &EndpointStatus{
 		Endpoint:    ep,
 		LastChecked: time.Now(),

@@ -79,10 +79,10 @@ first use, poll `/health` until ready, and are shared across sessions.
 reachable OpenAI endpoint, so any OpenAI client can reach all local models
 through one URL. Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
-Configure `virtual-llms` in `settings.json` to expose a stable model name that
-uses the first reachable target, in order. An endpoint target reuses a name
-from `openai.endpoints` and its `/models` health check is cached for 15
-seconds; an `alias` target selects a local managed llama.cpp or MLX model.
+Configure `virtual-llms` in `settings.json` to expose a stable model name backed
+by an ordered list of fallback targets. An endpoint target reuses a name from
+`openai.endpoints` and its `/models` health check is cached for 15 seconds; an
+`alias` target selects a local managed llama.cpp or MLX model.
 
 ```json
 "virtual-llms": {
@@ -95,6 +95,36 @@ seconds; an `alias` target selects a local managed llama.cpp or MLX model.
   }]
 }
 ```
+
+Declared order is a *preference*, not a hard gate: targets currently believed
+reachable are tried first, but every configured target is still attempted as a
+last resort, and a request retries the next target on any failure that occurs
+before a response byte is sent to the client. A request for a configured
+virtual name only fails (503) when every target genuinely fails; it never
+reads as "unknown model". The name always appears in `/v1/models`, with
+`status`/`meta`/`architecture`/`context_length` inherited from whichever
+target would be tried first — even when every target is currently offline
+(`status.value` reports `"unloaded"` with `failed: true` in that case).
+
+A conversation sticks to whichever target first serves it: once a target has
+answered, the router pins the conversation to it for as long as the client
+keeps sending the same `prompt_cache_key` (or `user`, if that's absent), and
+a pinned target always wins over the preference ordering above — a
+reachability wobble must not hop an established conversation to a different
+backend, since two backends encode reasoning differently and cannot share a
+transcript (see [ADR-010](docs/decisions/010-virtual-model-conversation-affinity.md)).
+No client identifier means no pin — same behavior as before this existed. A
+pin expires after an hour of disuse, or falls back to the remaining
+candidates immediately if its target has since been removed from config.
+Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+
+Configure `router.reasoningEffortMap` in `settings.json` to rewrite a
+`reasoning_effort` value before it reaches a backend, e.g. `{"minimal":
+"none"}` for a llama.cpp server that 500s on `"minimal"` but treats `"none"`
+as off. Absent or empty (the default) disables rewriting entirely. Mapping a
+value to `""` removes the field instead of sending it empty. Applies to
+every proxied path — managed alias, endpoint, and virtual model alike.
+Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
 ## API
 
