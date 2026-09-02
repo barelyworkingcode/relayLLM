@@ -35,7 +35,7 @@ import (
 
 func TestRouter_RewriteModelField_SwapsTopLevelModel(t *testing.T) {
 	body := []byte(`{"model":"omlx/Qwen3.5-27B","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := rewriteProxyBody(body, "Qwen3.5-27B", nil)
+	out, err := rewriteProxyBody(body, "Qwen3.5-27B", nil, nil)
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestRouter_RewriteModelField_SwapsTopLevelModel(t *testing.T) {
 }
 
 func TestRouter_RewriteModelField_InvalidJSON(t *testing.T) {
-	_, err := rewriteProxyBody([]byte(`{not json`), "x", nil)
+	_, err := rewriteProxyBody([]byte(`{not json`), "x", nil, nil)
 	if err == nil {
 		t.Error("expected error on malformed body, got nil")
 	}

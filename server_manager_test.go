@@ -449,6 +449,24 @@ func TestParseUnifiedConfig_RouterSection(t *testing.T) {
 	}
 }
 
+// Sibling of TestParseUnifiedConfig_RouterSection above, for the
+// chat_template_kwargs merge table — see RouterConfig.ReasoningEffortTemplateKwargs.
+func TestParseUnifiedConfig_RouterSection_ReasoningEffortTemplateKwargs(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{
+		"router": {"reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}}}
+	}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Router == nil {
+		t.Fatal("cfg.Router is nil")
+	}
+	got, ok := cfg.Router.ReasoningEffortTemplateKwargs["minimal"]["enable_thinking"]
+	if boolVal, isBool := got.(bool); !ok || !isBool || boolVal {
+		t.Errorf("reasoningEffortTemplateKwargs[minimal][enable_thinking] = %v (present=%v), want false", got, ok)
+	}
+}
+
 // Absent "router" section → empty, non-nil config, exactly like Virtual/Llama
 // above: callers dereference cfg.Router without a nil check.
 func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
@@ -461,6 +479,9 @@ func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
 	}
 	if len(cfg.Router.ReasoningEffortMap) != 0 {
 		t.Errorf("reasoningEffortMap = %v, want empty", cfg.Router.ReasoningEffortMap)
+	}
+	if len(cfg.Router.ReasoningEffortTemplateKwargs) != 0 {
+		t.Errorf("reasoningEffortTemplateKwargs = %v, want empty", cfg.Router.ReasoningEffortTemplateKwargs)
 	}
 }
 
