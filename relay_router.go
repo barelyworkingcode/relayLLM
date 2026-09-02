@@ -847,7 +847,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.registry != nil {
-		if ep, upstreamID, ok := p.registry.LookupModel(envelope.Model); ok {
+		if ep, upstreamID, ok := p.registry.LookupModel(r.Context(), envelope.Model); ok {
 			p.routeOpenAI(w, r, ep, upstreamID, body)
 			return
 		}

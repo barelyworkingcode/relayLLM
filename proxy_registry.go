@@ -111,10 +111,18 @@ func (r *ProxyRegistry) SnapshotModels(ctx context.Context) []ModelInfo {
 }
 
 // LookupModel parses "endpoint.Name/upstreamID" and resolves the endpoint
-// from the registry, returning the upstream id with the prefix stripped. Only
-// returns ok when the endpoint is currently believed online — the router
-// responds 400 rather than forwarding to a known-down upstream.
-func (r *ProxyRegistry) LookupModel(modelID string) (OpenAIEndpoint, string, bool) {
+// from the registry, returning the upstream id with the prefix stripped. An
+// unconfigured endpoint name is an immediate miss with no network call —
+// an unrecognized model id must never be able to trigger a probe. For a
+// configured endpoint whose cached status is missing or stale (past the
+// TTL), it probes before answering: on a freshly started process nothing
+// has called Snapshot yet, and without this the first chat request naming a
+// live endpoint would misreport it as unknown. A believed-offline entry that
+// is still fresh is a miss without probing — deliberate, so a request isn't
+// forwarded into a known-down upstream, and the TTL bounds how long that
+// lasts. Reuses the same single-flighted probe as Snapshot, so concurrent
+// callers for the same cold endpoint share one network round trip.
+func (r *ProxyRegistry) LookupModel(ctx context.Context, modelID string) (OpenAIEndpoint, string, bool) {
 	if r == nil {
 		return OpenAIEndpoint{}, "", false
 	}
@@ -125,6 +133,9 @@ func (r *ProxyRegistry) LookupModel(modelID string) (OpenAIEndpoint, string, boo
 	ep := r.cfg.Find(name)
 	if ep == nil {
 		return OpenAIEndpoint{}, "", false
+	}
+	if !r.isFresh(name) {
+		r.probe(ctx, *ep)
 	}
 	r.mu.Lock()
 	s, known := r.status[name]

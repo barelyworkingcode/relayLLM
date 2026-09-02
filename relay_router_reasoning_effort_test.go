@@ -11,7 +11,6 @@ package main
 // backends, postBytes to drive the router's real HTTP handler.
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -136,7 +135,6 @@ func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
@@ -172,7 +170,6 @@ func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
@@ -201,7 +198,6 @@ func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
@@ -233,7 +229,6 @@ func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
@@ -284,7 +279,6 @@ func TestReasoningEffort_VirtualModelPath_RewritesMappedValue(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
 		Name:    "vCode",
@@ -525,7 +519,6 @@ func TestReasoningEffortTemplateKwargs_EndpointPath_MergesKwargs(t *testing.T) {
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setReasoningEffortTemplateKwargs(map[string]map[string]any{"minimal": {"enable_thinking": false}})
@@ -553,7 +546,6 @@ func TestReasoningEffortTemplateKwargs_VirtualModelPath_MergesKwargs(t *testing.
 	registry := NewProxyRegistry(&OpenAIConfig{
 		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
-	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
 		Name:    "vCode",
