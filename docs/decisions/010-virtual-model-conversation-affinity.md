@@ -59,10 +59,18 @@ conversations together, which is worse than the status quo of no pinning.
 conversation)]{target, lastUsed}` under a mutex. The key pairs the virtual
 model name with the conversation key so two virtual models can reuse the same
 client-generated key without colliding. The stored target is a string
-identity — `"endpoint:<name>"` or `"alias:<name>"` — so an endpoint and a
-managed alias that happen to share a bare name can never be confused with
-each other, matching how every other namespace in the router already keeps
-those two apart.
+identity — `"alias:<name>"` for a managed alias, or `"endpoint:<name>/<model>"`
+for an endpoint target — so an endpoint and a managed alias that happen to
+share a bare name can never be confused with each other, matching how every
+other namespace in the router already keeps those two apart. The endpoint
+form carries the upstream model id too, not just the endpoint name: two
+targets on the same endpoint but different models (a big-then-small fallback
+pair) are different pins, not the same one — collapsing them to
+`"endpoint:<name>"` alone let `applyAffinity` match whichever candidate
+happened to come first and permanently re-pin a conversation onto the wrong
+model. Each half of the endpoint form is escaped so `endpoint "a"` /
+`model "b/c"` and `endpoint "a/b"` / `model "c"` can't collide on the `/`
+join.
 
 In `handleProxy`, once `candidatesForVirtual` has produced its normal
 reachability-preferred ordering, a lookup by (virtual, conversation) moves
@@ -72,11 +80,25 @@ wobble must not be allowed to hop an established conversation to a different
 backend. If the pin names a target no longer present in the candidate list
 (removed from config since it was recorded), it is silently ignored and the
 normal order stands — never invent a target that isn't there. `routeVirtual`
-records (or refreshes) the pin only after an attempt actually succeeds,
-including onto a target other than the one that was pinned before, if that
-one just failed pre-response and a later candidate served instead — the
-conversation is already contaminated by the switch at that point, so the fix
-is to pin forward, not to flap back on the next turn.
+records (or refreshes) the pin only after an attempt actually succeeds *and*
+answered with a status below 500, including onto a target other than the one
+that was pinned before, if that one just failed pre-response and a later
+candidate served instead — the conversation is already contaminated by the
+switch at that point, so the fix is to pin forward, not to flap back on the
+next turn.
+
+A 5xx response is excluded from pinning on purpose — it is not merely "an
+attempt that didn't succeed," it's the other half of the incident this ADR
+already documents: a backend that answers with a 500 (llama.cpp on
+`reasoning_effort:"minimal"`, see the Relay-router section of CLAUDE.md) must
+not get the conversation pinned to it, or every later turn returns there
+instead of getting a chance to fail over. The response itself is still never
+retried — `routeVirtual`'s "upstream answered, whatever it answered stands"
+policy is unchanged, because retrying a response the upstream actually
+produced risks duplicating a side-effecting request. Only whether that
+response is worth remembering changes. A 4xx still pins: the backend
+answered fine and the client sent something it didn't like, so refusing to
+pin would reintroduce the backend-hopping this ADR exists to prevent.
 
 Bounded like `ProxyRegistry`'s reachability cache: a 1-hour TTL since last
 use and a hard cap of 1024 entries evicting the least-recently-used survivor,

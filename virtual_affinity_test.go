@@ -7,6 +7,7 @@ package main
 // relay_router_test.go alongside the rest of the virtual-model routing tests.
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +67,46 @@ func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing
 	aliasTarget := resolvedVirtualTarget{alias: "shared", manager: &ServerManager{}}
 	if endpointTarget.identity() == aliasTarget.identity() {
 		t.Errorf("endpoint and alias with the same name must have distinct identities, both got %q", endpointTarget.identity())
+	}
+}
+
+// Code review item 1 (HIGH): identity() used to be just "endpoint:<name>",
+// so two targets on the same endpoint with different models — a natural
+// big-then-small fallback pair — hashed to the same pin. applyAffinity then
+// matched whichever one happened to come first in candidates and could
+// permanently re-pin a conversation that was actually served by the small
+// model onto the big one next turn. The upstream model id must be part of
+// the identity.
+func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *testing.T) {
+	big := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	if big.identity() == small.identity() {
+		t.Errorf("same-endpoint targets with different models must have distinct identities, both got %q", big.identity())
+	}
+}
+
+// The identity join ("endpoint:<name>/<model>") must not let two distinct
+// (endpoint, model) pairs collide by shifting where the "/" falls — escaping
+// is what prevents that.
+func TestResolvedVirtualTarget_IdentityEscapesJoinAmbiguity(t *testing.T) {
+	a := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "a"}, upstreamID: "b/c"}
+	b := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "a/b"}, upstreamID: "c"}
+	if a.identity() == b.identity() {
+		t.Errorf("endpoint %q model %q and endpoint %q model %q must not collide, both got %q",
+			"a", "b/c", "a/b", "c", a.identity())
+	}
+}
+
+// label() must also name the upstream model — a 503's per-target failure
+// list is useless for distinguishing two same-endpoint targets otherwise.
+func TestResolvedVirtualTarget_LabelIncludesUpstreamModel(t *testing.T) {
+	big := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	if big.label() == small.label() {
+		t.Errorf("same-endpoint targets with different models must have distinct labels, both got %q", big.label())
+	}
+	if !strings.Contains(big.label(), "qwen-70b") {
+		t.Errorf("label() = %q, want it to name the upstream model", big.label())
 	}
 }
 

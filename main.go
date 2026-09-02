@@ -206,10 +206,11 @@ func main() {
 	if *routerPort != "" {
 		routerAddr = ":" + *routerPort
 	}
-	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual)
-	if relayRouter != nil {
-		relayRouter.SetReasoningEffortMap(cfg.Router.ReasoningEffortMap)
-	}
+	// cfg.Router is passed straight into StartRelayRouter rather than set on
+	// the router afterward — see StartRelayRouter's doc comment for why a
+	// separate post-construction setter call raced the router's first
+	// accepted connection.
+	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual, cfg.Router)
 	sessions.SetRouterPort(*routerPort)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
 
@@ -351,17 +352,17 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 		}
 
 		usable := 0
-		// Case order mirrors candidatesForVirtual's, so a target that sets
-		// both shapes is validated as the one that will actually be routed.
+		// Dispatches on classifyVirtualTarget — the same classification
+		// candidatesForVirtual uses — rather than a hand-maintained switch of
+		// its own. The two used to drift apart: this validator's first case
+		// used to be "endpoint set, model not," which swallowed a target that
+		// set endpoint (without model) *and* alias; candidatesForVirtual
+		// checks alias second and routes that target fine via the alias, so
+		// this validator flagged a virtual that actually works (code review
+		// item 5). Sharing one classifier makes that drift impossible.
 		for _, target := range v.Targets {
-			switch {
-			case target.Endpoint != "" && target.Model == "":
-				slog.Warn("router: virtual model target sets endpoint without model",
-					"name", v.Name, "endpoint", target.Endpoint)
-			case target.Model != "" && target.Endpoint == "" && target.Alias == "":
-				slog.Warn("router: virtual model target sets model without endpoint",
-					"name", v.Name, "model", target.Model)
-			case target.Endpoint != "" && target.Model != "":
+			switch classifyVirtualTarget(target) {
+			case virtualTargetEndpoint:
 				found := false
 				for _, ep := range endpoints {
 					if ep.Name == target.Endpoint {
@@ -375,7 +376,7 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 					continue
 				}
 				usable++
-			case target.Alias != "":
+			case virtualTargetAlias:
 				found := false
 				for _, mgr := range managers {
 					if mgr.HasAlias(target.Alias) {
@@ -389,6 +390,16 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 					continue
 				}
 				usable++
+			default: // virtualTargetInvalid
+				switch {
+				case target.Endpoint != "" && target.Model == "":
+					slog.Warn("router: virtual model target sets endpoint without model",
+						"name", v.Name, "endpoint", target.Endpoint)
+				case target.Model != "" && target.Endpoint == "" && target.Alias == "":
+					slog.Warn("router: virtual model target sets model without endpoint",
+						"name", v.Name, "model", target.Model)
+				}
+				// else: neither shape set at all — nothing specific to warn.
 			}
 		}
 		if usable == 0 {
