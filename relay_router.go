@@ -40,13 +40,23 @@ type RelayRouter struct {
 	// (see setReasoningEffortMap), applied before the serving goroutine is
 	// spawned rather than a NewRelayRouter constructor parameter, to keep
 	// this opt-in feature from touching NewRelayRouter's much larger set of
-	// call sites.
+	// call sites. reasoningEffortTemplateKwargs, below, is its sibling knob.
 	reasoningEffortMap map[string]string
+
+	// reasoningEffortTemplateKwargs merges an object into the proxied body's
+	// top-level "chat_template_kwargs" field — see RouterConfig for the
+	// oMLX/llama.cpp measurements this exists to satisfy, and
+	// rewriteProxyBody / applyReasoningEffortTemplateKwargs for the merge
+	// semantics. Same nil/empty-means-off shape, wired in the same way
+	// (setReasoningEffortTemplateKwargs, called before serving starts), as
+	// reasoningEffortMap above.
+	reasoningEffortTemplateKwargs map[string]map[string]any
 }
 
 // RouterConfig holds relay-router behavior that doesn't belong to any one
-// backend — currently just the reasoning-effort rewrite table. Maps to
-// settings.json's optional top-level "router" section.
+// backend — the reasoning-effort rewrite table and its sibling
+// chat_template_kwargs merge table. Maps to settings.json's optional
+// top-level "router" section.
 type RouterConfig struct {
 	// ReasoningEffortMap rewrites (or, mapped to "", removes) a top-level
 	// string "reasoning_effort" field on every proxied request body. Absent
@@ -66,6 +76,59 @@ type RouterConfig struct {
 	// the backend actually understands. See CLAUDE.md's Relay-router section
 	// for the full story.
 	ReasoningEffortMap map[string]string `json:"reasoningEffortMap,omitempty"`
+
+	// ReasoningEffortTemplateKwargs merges an object into a proxied body's
+	// top-level "chat_template_kwargs" field when the request's ORIGINAL
+	// "reasoning_effort" string value — matched the same way, and BEFORE,
+	// ReasoningEffortMap rewrites it (see rewriteProxyBody) — matches a
+	// configured key. Absent or empty disables this entirely, the default,
+	// so behavior is unchanged from before this field existed.
+	//
+	// ReasoningEffortMap's value swap only fixes backends that interpret
+	// reasoning_effort server-side (llama.cpp does). It does not fix oMLX:
+	// measured at omlx/server.py:3594, oMLX merges request.reasoning_effort
+	// verbatim into chat_template_kwargs and hands it to the model's Jinja
+	// template — there is no server-side meaning to rewrite. The MLX build
+	// of the measured model (CodeFast) uses the older Qwen convention
+	// (enable_thinking), not reasoning_effort, so no VALUE swap of
+	// reasoning_effort can reach it — the template never reads that field at
+	// all. It needs a field-SHAPE rewrite: inject a different field.
+	// Measured reasoning output length against oMLX CodeFast:
+	//
+	//	request                                            reasoning returned
+	//	baseline                                            101 chars
+	//	reasoning_effort: "none"                             94 chars — no effect
+	//	chat_template_kwargs: {"enable_thinking": false}      0 chars — off
+	//
+	// The same chat_template_kwargs also turns reasoning off against
+	// llama.cpp (0 chars, measured on "europa"), so each backend tolerates
+	// the other's mechanism harmlessly — llama.cpp ignores an
+	// unrecognized chat_template_kwargs key, oMLX ignores reasoning_effort
+	// once nothing reads it. Configuring both knobs together (this field and
+	// ReasoningEffortMap) is what makes "turn reasoning off" portable across
+	// both backends from one client-side value.
+	//
+	// Matched against the value BEFORE ReasoningEffortMap's rewrite, not
+	// after, because the two knobs describe ONE inbound client value
+	// triggering TWO independent rewrites: configuring
+	// {"minimal": "none"} (ReasoningEffortMap) alongside
+	// {"minimal": {"enable_thinking": false}} (this field) must both fire
+	// off the client's original "minimal". Matching post-rewrite would
+	// require this field's keys to track whatever ReasoningEffortMap
+	// happens to rewrite "minimal" INTO ("none") rather than what the client
+	// actually sent — coupling the two maps together for no reason, and
+	// breaking silently if either is reconfigured independently.
+	//
+	// Values are arbitrary JSON (bool, string, number, …), not just bools:
+	// oMLX forwards chat_template_kwargs to the Jinja template verbatim, so
+	// this passes values through untyped exactly like ReasoningEffortMap's
+	// free-form string values do.
+	//
+	// The merge never overwrites a key the client's own body already sets
+	// under chat_template_kwargs — mirroring oMLX's own
+	// merged.setdefault(...) server-side, so the client's explicit choice
+	// always wins over ours. See applyReasoningEffortTemplateKwargs.
+	ReasoningEffortTemplateKwargs map[string]map[string]any `json:"reasoningEffortTemplateKwargs,omitempty"`
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -86,6 +149,17 @@ type RouterConfig struct {
 // can still configure it post-construction.
 func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
 	p.reasoningEffortMap = m
+}
+
+// setReasoningEffortTemplateKwargs installs the router-level
+// chat_template_kwargs merge table (settings.json's
+// router.reasoningEffortTemplateKwargs). nil or empty disables it — also
+// this field's zero value — so a router this is never called on behaves
+// exactly as it did before the feature existed. Subject to the same
+// pre-serve constraint as setReasoningEffortMap above (see its comment):
+// StartRelayRouter calls this before spawning the ListenAndServe goroutine.
+func (p *RelayRouter) setReasoningEffortTemplateKwargs(m map[string]map[string]any) {
+	p.reasoningEffortTemplateKwargs = m
 }
 
 // NewRelayRouter creates a router on addr. Nil entries in managers are
@@ -802,7 +876,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// managed server expects — but the reasoning_effort rewrite still applies
 	// (see RouterConfig): a client hitting a managed alias has exactly the
 	// same backend-vocabulary problem as one hitting an endpoint.
-	rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap)
+	rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "alias", alias, "error", err)
 		writeRouterError(w, http.StatusBadRequest, "failed to rewrite request body")
@@ -827,7 +901,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
 func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep OpenAIEndpoint, upstreamID string, body []byte) {
-	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap)
+	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
 		http.Error(w, `{"error":"failed to rewrite model field"}`, http.StatusBadRequest)
@@ -953,7 +1027,7 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 		if err != nil {
 			return nil, nil, err
 		}
-		rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap)
+		rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 		if err != nil {
 			rel()
 			return nil, nil, fmt.Errorf("rewrite request body: %w", err)
@@ -971,7 +1045,7 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 		return proxy, rel, nil
 	}
 
-	rewritten, err := rewriteProxyBody(body, target.upstreamID, p.reasoningEffortMap)
+	rewritten, err := rewriteProxyBody(body, target.upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("rewrite request body: %w", err)
 	}
@@ -1080,26 +1154,28 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 
 // rewriteProxyBody applies the router's field-level body rewrites in one
 // decode/encode pass, so an endpoint-routed body is never unmarshalled and
-// remarshalled twice for two independent rewrites. model, when non-empty,
+// remarshalled twice for independent rewrites. model, when non-empty,
 // replaces the top-level "model" field (endpoint routes rewrite
 // "endpoint.Name/id" down to the bare id the endpoint itself expects — this
 // used to be rewriteModelField's whole job). effortMap, when non-empty,
 // rewrites or removes a top-level string "reasoning_effort" field; see
-// applyReasoningEffortMap.
+// applyReasoningEffortMap. templateKwargsMap, when non-empty, merges an
+// object into a top-level "chat_template_kwargs" field; see
+// applyReasoningEffortTemplateKwargs.
 //
-// When both are no-ops (no model swap, no configured map) the body is
+// When all three are no-ops (no model swap, no configured maps) the body is
 // returned completely untouched rather than round-tripped through
 // encoding/json — that's load-bearing for the managed-alias route, which has
-// no model to swap: with reasoningEffortMap unset (the default), it must
-// stay byte-identical to before this feature existed, not just semantically
+// no model to swap: with neither map configured (the default), it must stay
+// byte-identical to before these features existed, not just semantically
 // unchanged with reordered keys.
 //
 // RawMessage avoids re-marshalling nested payloads verbatim (large
 // image_url parts, ordered tool definitions, etc.) when a rewrite does
 // happen. Top-level key order is not preserved in that case: json.Marshal of
 // a map sorts keys.
-func rewriteProxyBody(body []byte, model string, effortMap map[string]string) ([]byte, error) {
-	if model == "" && len(effortMap) == 0 {
+func rewriteProxyBody(body []byte, model string, effortMap map[string]string, templateKwargsMap map[string]map[string]any) ([]byte, error) {
+	if model == "" && len(effortMap) == 0 && len(templateKwargsMap) == 0 {
 		return body, nil
 	}
 	var raw map[string]json.RawMessage
@@ -1113,8 +1189,42 @@ func rewriteProxyBody(body []byte, model string, effortMap map[string]string) ([
 		}
 		raw["model"] = encoded
 	}
+
+	// Capture the client's ORIGINAL reasoning_effort value before
+	// applyReasoningEffortMap gets a chance to rewrite or remove it. Both
+	// reasoning_effort rewrites key off this same original value — see
+	// RouterConfig.ReasoningEffortTemplateKwargs for why matching after the
+	// value-map swap would be wrong: {"minimal":"none"} (effortMap) and
+	// {"minimal":{"enable_thinking":false}} (templateKwargsMap) describe two
+	// independent reactions to ONE client value, "minimal". Reading the
+	// field again after applyReasoningEffortMap ran would see "none" instead
+	// (or nothing, if minimal maps to removal), silently breaking that
+	// combination.
+	effort, hasEffort := reasoningEffortValue(raw)
+
 	applyReasoningEffortMap(raw, effortMap)
+	if hasEffort {
+		applyReasoningEffortTemplateKwargs(raw, templateKwargsMap, effort)
+	}
 	return json.Marshal(raw)
+}
+
+// reasoningEffortValue reads raw's top-level "reasoning_effort" field as a
+// string, reporting ok=false when the field is absent or not a JSON string.
+// Factored out of applyReasoningEffortMap so rewriteProxyBody can capture
+// the field's value BEFORE that function has a chance to mutate or remove
+// it — see rewriteProxyBody's comment on why the original value is what
+// applyReasoningEffortTemplateKwargs must match against.
+func reasoningEffortValue(raw map[string]json.RawMessage) (string, bool) {
+	rawEffort, ok := raw["reasoning_effort"]
+	if !ok {
+		return "", false
+	}
+	var effort string
+	if err := json.Unmarshal(rawEffort, &effort); err != nil {
+		return "", false // not a JSON string — leave whatever it is alone.
+	}
+	return effort, true
 }
 
 // applyReasoningEffortMap rewrites, or removes, a top-level string
@@ -1131,13 +1241,9 @@ func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[strin
 	if len(effortMap) == 0 {
 		return
 	}
-	rawEffort, ok := raw["reasoning_effort"]
+	effort, ok := reasoningEffortValue(raw)
 	if !ok {
 		return
-	}
-	var effort string
-	if err := json.Unmarshal(rawEffort, &effort); err != nil {
-		return // not a JSON string — leave whatever it is alone.
 	}
 	mapped, ok := effortMap[effort]
 	if !ok {
@@ -1158,24 +1264,78 @@ func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[strin
 	slog.Debug("relay router: rewrote reasoning_effort", "from", effort, "to", mapped)
 }
 
+// applyReasoningEffortTemplateKwargs merges kwargsMap[effort] into raw's
+// top-level "chat_template_kwargs" object, creating it if absent. effort is
+// the client's ORIGINAL "reasoning_effort" value — the caller (
+// rewriteProxyBody) captures it before applyReasoningEffortMap runs, per
+// RouterConfig.ReasoningEffortTemplateKwargs's doc comment. Mutates raw in
+// place; a no-op kwargsMap, a non-matching effort, or an empty configured
+// object leave raw untouched.
+//
+// A key the merge would set is left alone if raw's existing
+// chat_template_kwargs already defines it — mirroring oMLX's own
+// merged.setdefault(...) server-side, so a client's explicit choice always
+// wins over ours (see RouterConfig).
+func applyReasoningEffortTemplateKwargs(raw map[string]json.RawMessage, kwargsMap map[string]map[string]any, effort string) {
+	if len(kwargsMap) == 0 {
+		return
+	}
+	kwargs, ok := kwargsMap[effort]
+	if !ok || len(kwargs) == 0 {
+		return
+	}
+
+	existing := map[string]json.RawMessage{}
+	if rawExisting, present := raw["chat_template_kwargs"]; present {
+		if err := json.Unmarshal(rawExisting, &existing); err != nil {
+			// Not a JSON object — a malformed client body isn't ours to fix;
+			// leave it untouched rather than clobbering it with our own.
+			return
+		}
+	}
+
+	changed := false
+	for k, v := range kwargs {
+		if _, present := existing[k]; present {
+			continue // client-supplied value wins — setdefault semantics.
+		}
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			continue // unreachable: config values decode from JSON already
+		}
+		existing[k] = encoded
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	encoded, err := json.Marshal(existing)
+	if err != nil {
+		return // unreachable: existing is built entirely from valid RawMessages
+	}
+	raw["chat_template_kwargs"] = encoded
+	slog.Debug("relay router: merged reasoning_effort template kwargs", "reasoning_effort", effort, "keys", kwargs)
+}
+
 // StartRelayRouter starts the router in a background goroutine. Returns nil
 // (no-op) when addr is empty or no live backend remains after dropping nil
 // managers.
 //
-// router (may be nil) carries RouterConfig-level behavior — currently just
-// the reasoning_effort rewrite map — and is applied via setReasoningEffortMap
-// before the serving goroutine is spawned, not after StartRelayRouter
-// returns. That ordering is load-bearing, not stylistic: Go's memory model
-// guarantees a goroutine's creation happens-before its execution, so setting
-// the field first means every connection-handling goroutine transitively
-// spawned from the one below is guaranteed to observe it. The previous shape
-// — main calling the router's (then-exported) SetReasoningEffortMap after
-// StartRelayRouter had already returned — left a window where a request
-// accepted the instant the listener came up could read the field
-// concurrently with that write, an unsynchronized race the detector flags
-// under real traffic (code review item 4). StartRelayRouter is the one
-// production call site for this, chosen over adding the parameter to
-// NewRelayRouter because it has far fewer call sites to touch.
+// router (may be nil) carries RouterConfig-level behavior — the
+// reasoning_effort rewrite map and its sibling chat_template_kwargs merge
+// table — and both are applied via their setters before the serving
+// goroutine is spawned, not after StartRelayRouter returns. That ordering is
+// load-bearing, not stylistic: Go's memory model guarantees a goroutine's
+// creation happens-before its execution, so setting the fields first means
+// every connection-handling goroutine transitively spawned from the one
+// below is guaranteed to observe them. The previous shape — main calling the
+// router's (then-exported) SetReasoningEffortMap after StartRelayRouter had
+// already returned — left a window where a request accepted the instant the
+// listener came up could read the field concurrently with that write, an
+// unsynchronized race the detector flags under real traffic (code review
+// item 4). StartRelayRouter is the one production call site for this,
+// chosen over adding the parameters to NewRelayRouter because it has far
+// fewer call sites to touch.
 func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig) *RelayRouter {
 	if addr == "" {
 		return nil
@@ -1186,6 +1346,7 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 	}
 	if router != nil {
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
+		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
 	}
 	go func() {
 		if err := p.ListenAndServe(); err != nil && err != http.ErrServerClosed {
