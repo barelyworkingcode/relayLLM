@@ -36,9 +36,11 @@ type RelayRouter struct {
 	// on every proxied body before it reaches a backend — see RouterConfig
 	// and rewriteProxyBody. nil/empty (the zero value, and what every
 	// constructor leaves it at) means no rewriting at all; wired in from
-	// settings.json via SetReasoningEffortMap once at startup rather than a
-	// constructor parameter, to keep this opt-in feature from touching every
-	// existing NewRelayRouter call site.
+	// settings.json via StartRelayRouter's trailing *RouterConfig parameter
+	// (see setReasoningEffortMap), applied before the serving goroutine is
+	// spawned rather than a NewRelayRouter constructor parameter, to keep
+	// this opt-in feature from touching NewRelayRouter's much larger set of
+	// call sites.
 	reasoningEffortMap map[string]string
 }
 
@@ -66,12 +68,23 @@ type RouterConfig struct {
 	ReasoningEffortMap map[string]string `json:"reasoningEffortMap,omitempty"`
 }
 
-// SetReasoningEffortMap installs the router-level reasoning_effort rewrite
-// table (settings.json's router.reasoningEffortMap). Called once from main
-// after StartRelayRouter returns; nil or empty disables rewriting, which is
-// also this field's zero value, so a router this is never called on behaves
-// exactly as it did before the feature existed.
-func (p *RelayRouter) SetReasoningEffortMap(m map[string]string) {
+// setReasoningEffortMap installs the router-level reasoning_effort rewrite
+// table (settings.json's router.reasoningEffortMap). nil or empty disables
+// rewriting, which is also this field's zero value, so a router this is
+// never called on behaves exactly as it did before the feature existed.
+//
+// MUST be called before the router starts serving — StartRelayRouter is the
+// only production call site, and it calls this before spawning the
+// ListenAndServe goroutine. Go's memory model guarantees a goroutine's
+// creation happens-before its execution, so every request-handling goroutine
+// transitively spawned from that one is guaranteed to observe the write; a
+// call made after the goroutine is already running (the previous shape:
+// main called the exported SetReasoningEffortMap after StartRelayRouter had
+// already returned) races the first accepted connection under -race. Kept
+// unexported, rather than removed, so tests that drive a router's handler
+// directly without ever calling ListenAndServe (no goroutine, so no race)
+// can still configure it post-construction.
+func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
 	p.reasoningEffortMap = m
 }
 
@@ -121,9 +134,19 @@ func (p *RelayRouter) Close() error {
 // without it. The fields are additive, so plain OpenAI clients ignore them.
 func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	var data []map[string]any
-	// Dispatch resolves a model id to exactly one behavior, so every row type
-	// (managed alias, endpoint model, virtual name) shares this dedup set —
-	// a name that collides with an earlier row is dead config either way.
+	// Dispatch resolves a model id to exactly one behavior — managed alias,
+	// then virtual name, then endpoint model, in that priority order (see
+	// handleProxy) — so every row type shares this dedup set, built in that
+	// same order, and the row that survives here is the one that will
+	// actually serve a request for that id. A collision with a managed alias
+	// is dead config no matter which section declares it: managers are
+	// checked first in handleProxy regardless of catalog order. A collision
+	// between a virtual name and an endpoint's prefixed id is NOT symmetric
+	// the same way — handleProxy checks p.virtual.Find before
+	// p.registry.LookupModel, so it's always the endpoint side that's
+	// unreachable, never the virtual side. Building rows in dispatch order
+	// (managed, virtual, endpoint — it used to be managed, endpoint, virtual)
+	// is what keeps this listing honest about which one that is.
 	seen := make(map[string]bool)
 	for _, m := range p.managers {
 		for _, entry := range m.ModelCatalog() {
@@ -185,53 +208,21 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			data = append(data, row)
 		}
 	}
-	// Snapshotted once and reused for every endpoint row below AND every
-	// virtual row further down — Snapshot is O(endpoints); probing it again
+	// Snapshotted once and reused for every virtual row below AND every
+	// endpoint row further down — Snapshot is O(endpoints); probing it again
 	// per virtual model would make this handler O(virtuals × endpoints) for
 	// no benefit, since every virtual model shares the same registry state.
 	var epStatuses []EndpointStatus
 	if p.registry != nil {
 		epStatuses = p.registry.Snapshot(r.Context())
-		for _, status := range epStatuses {
-			if !status.Online {
-				continue
-			}
-			for _, m := range status.Models {
-				id := status.Endpoint.Name + "/" + m.ID
-				if seen[id] {
-					continue
-				}
-				seen[id] = true
-				row := map[string]any{
-					"id":       id,
-					"object":   "model",
-					"created":  0,
-					"owned_by": status.Endpoint.Name,
-					// Remote endpoints have no load step and the registry has
-					// already dropped the unreachable ones, so anything listed
-					// here is usable right now.
-					"status": map[string]any{"value": ModelStatusLoaded},
-					// Text unless the upstream advertised otherwise: plain
-					// OpenAI /v1/models has no modality field, so a VLM behind
-					// an endpoint that stays quiet is indistinguishable from a
-					// text model. Emitting the key either way keeps every row
-					// the same shape for clients that read
-					// architecture.input_modalities unconditionally.
-					"architecture": map[string]any{"input_modalities": endpointModalities(m)},
-				}
-				// Only when the upstream actually advertised one — omitting the
-				// field lets the client apply its own default rather than
-				// trusting a number we invented. context_length is the flat
-				// counterpart to meta.n_ctx above, for the same reason it
-				// exists on managed rows: see the comment there.
-				if v, ok := resolveContextLength(m.ContextLength); ok {
-					row["meta"] = map[string]any{"n_ctx": v}
-					row["context_length"] = v
-				}
-				data = append(data, row)
-			}
-		}
 	}
+
+	// Virtual rows come before endpoint rows: dispatch (handleProxy) checks
+	// p.virtual.Find before p.registry.LookupModel, so a virtual name that
+	// happens to collide with an endpoint's prefixed id (e.g. a virtual
+	// literally named "ep/model") must win the dedup here too, or the
+	// catalog would list a row a request for that id would never actually
+	// reach (see the dedup comment above / code review item 6).
 	if p.virtual != nil {
 		for i := range p.virtual.Models {
 			virtual := &p.virtual.Models[i]
@@ -245,6 +236,46 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			// client polling for readiness stops rather than spinning forever
 			// on a name that will never resolve.
 			data = append(data, p.virtualCatalogRow(virtual, epStatuses))
+		}
+	}
+
+	for _, status := range epStatuses {
+		if !status.Online {
+			continue
+		}
+		for _, m := range status.Models {
+			id := status.Endpoint.Name + "/" + m.ID
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			row := map[string]any{
+				"id":       id,
+				"object":   "model",
+				"created":  0,
+				"owned_by": status.Endpoint.Name,
+				// Remote endpoints have no load step and the registry has
+				// already dropped the unreachable ones, so anything listed
+				// here is usable right now.
+				"status": map[string]any{"value": ModelStatusLoaded},
+				// Text unless the upstream advertised otherwise: plain
+				// OpenAI /v1/models has no modality field, so a VLM behind
+				// an endpoint that stays quiet is indistinguishable from a
+				// text model. Emitting the key either way keeps every row
+				// the same shape for clients that read
+				// architecture.input_modalities unconditionally.
+				"architecture": map[string]any{"input_modalities": endpointModalities(m)},
+			}
+			// Only when the upstream actually advertised one — omitting the
+			// field lets the client apply its own default rather than
+			// trusting a number we invented. context_length is the flat
+			// counterpart to meta.n_ctx above, for the same reason it
+			// exists on managed rows: see the comment there.
+			if v, ok := resolveContextLength(m.ContextLength); ok {
+				row["meta"] = map[string]any{"n_ctx": v}
+				row["context_length"] = v
+			}
+			data = append(data, row)
 		}
 	}
 	if data == nil {
@@ -316,23 +347,49 @@ type resolvedVirtualTarget struct {
 	alias      string
 }
 
-// label renders the target for a human-readable failure message.
+// label renders the target for a human-readable failure message. Includes
+// the upstream model id for an endpoint target — two targets on the same
+// endpoint with different models (a big-then-small fallback pair) must be
+// distinguishable in a 503's per-target failure list, or an operator reading
+// it can't tell which one actually failed.
 func (t resolvedVirtualTarget) label() string {
 	if t.manager != nil {
 		return fmt.Sprintf("alias %q", t.alias)
 	}
-	return fmt.Sprintf("endpoint %q", t.endpoint.Name)
+	return fmt.Sprintf("endpoint %q model %q", t.endpoint.Name, t.upstreamID)
 }
 
 // identity is a stable, comparable value for this target — what
 // virtualAffinityStore actually pins and compares against. Prefixed by kind
 // so an endpoint named "x" and a managed alias named "x" (distinct
 // namespaces everywhere else in the router) never collide here either.
+//
+// An endpoint target's identity also carries its upstream model id, not just
+// the endpoint name. Two targets on the same endpoint but different models —
+// e.g. a big-then-small fallback pair, [{endpoint:"lmstudio",model:"qwen-70b"},
+// {endpoint:"lmstudio",model:"qwen-7b"}] — are different pins, not the same
+// one: without the model id both candidates hash to "endpoint:lmstudio", so
+// applyAffinity matches whichever of them happens to come first in
+// candidates and can permanently re-pin a conversation that was actually
+// served by qwen-7b onto qwen-70b next turn (code review item 1) — exactly
+// the silent mid-conversation switch ADR-010 exists to prevent, and here it
+// would never even self-correct. Each part is escaped so endpoint "a" model
+// "b/c" and endpoint "a/b" model "c" can't collide on the "/" join.
 func (t resolvedVirtualTarget) identity() string {
 	if t.manager != nil {
 		return "alias:" + t.alias
 	}
-	return "endpoint:" + t.endpoint.Name
+	return "endpoint:" + escapeIdentityPart(t.endpoint.Name) + "/" + escapeIdentityPart(t.upstreamID)
+}
+
+// escapeIdentityPart escapes "\" and "/" in one component of a
+// resolvedVirtualTarget identity, so joining endpoint-name and
+// upstream-model-id with "/" can't produce the same string two different
+// ways.
+func escapeIdentityPart(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "/", `\/`)
+	return s
 }
 
 // virtualCandidates returns every usable target for a configured virtual
@@ -389,15 +446,15 @@ func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, manage
 
 	var fresh, stale []resolvedVirtualTarget
 	for _, target := range virtual.Targets {
-		switch {
-		case target.Endpoint != "" && target.Model != "":
+		switch classifyVirtualTarget(target) {
+		case virtualTargetEndpoint:
 			if endpoint, ok := online[target.Endpoint]; ok {
 				fresh = append(fresh, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
 			} else if endpoint, ok := configured[target.Endpoint]; ok {
 				stale = append(stale, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
 			}
 			// else: names an endpoint that doesn't exist in config — skip.
-		case target.Alias != "":
+		case virtualTargetAlias:
 			for _, manager := range managers {
 				if manager.HasAlias(target.Alias) {
 					fresh = append(fresh, resolvedVirtualTarget{manager: manager, alias: target.Alias})
@@ -405,11 +462,50 @@ func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, manage
 				}
 			}
 			// else: no manager has this alias — skip.
+		default: // virtualTargetInvalid: neither shape (e.g. endpoint set
+			// without model, and no alias either) — skip. warnVirtualModelConfig
+			// flags this at startup, using the same classifyVirtualTarget call,
+			// so the two can no longer drift apart (code review item 5).
 		}
-		// else: neither shape (e.g. endpoint set without model) — skip.
-		// warnVirtualModelConfig flags this at startup.
 	}
 	return append(fresh, stale...), len(fresh)
+}
+
+// virtualTargetShape is what classifyVirtualTarget resolves a configured
+// VirtualLLMTarget to.
+type virtualTargetShape int
+
+const (
+	virtualTargetInvalid virtualTargetShape = iota
+	virtualTargetEndpoint
+	virtualTargetAlias
+)
+
+// classifyVirtualTarget is the single source of truth for what shape a
+// configured target actually is — both candidatesForVirtual (routing) and
+// warnVirtualModelConfig (startup validation, main.go) dispatch on this
+// instead of hand-maintaining parallel switch statements. They used to do
+// exactly that, and the case orders drifted apart (code review item 5): the
+// validator checked "endpoint set, model not" before "alias set", so a
+// target with both an endpoint (no model) *and* an alias — which
+// candidatesForVirtual, checking alias second, routes fine via the alias —
+// was flagged as the broken "endpoint without model" shape instead, and
+// could even make the validator warn "no usable target" about a virtual that
+// actually works.
+//
+// Precedence matches candidatesForVirtual exactly: endpoint+model wins when
+// both are set, then alias. Anything else (endpoint without model and no
+// alias, model without endpoint or alias, nothing set at all) is
+// virtualTargetInvalid.
+func classifyVirtualTarget(target VirtualLLMTarget) virtualTargetShape {
+	switch {
+	case target.Endpoint != "" && target.Model != "":
+		return virtualTargetEndpoint
+	case target.Alias != "":
+		return virtualTargetAlias
+	default:
+		return virtualTargetInvalid
+	}
 }
 
 // affinityKeyFromBody picks the conversation identifier that pins a virtual
@@ -713,7 +809,18 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		return
 	}
 
-	target, _ := url.Parse(endpoint.BaseURL)
+	target, err := url.Parse(endpoint.BaseURL)
+	if err != nil {
+		// endpoint.BaseURL is normally built internally (e.g.
+		// "http://127.0.0.1:<port>/v1") and always valid, but a dropped error
+		// here used to leave target nil — newUpstreamProxy's Director
+		// dereferences target.Scheme unconditionally, so a bad URL panicked
+		// inside the handler instead of failing the request (code review
+		// item 7).
+		slog.Warn("relay router: bad managed server endpoint", "kind", mgr.profile.Kind, "alias", alias, "error", err)
+		writeRouterError(w, http.StatusBadGateway, fmt.Sprintf("invalid managed server endpoint: %v", err))
+		return
+	}
 	newUpstreamProxy(target, rewritten, endpoint.APIKey, mgr.profile.Kind, alias, nil).ServeHTTP(w, r)
 }
 
@@ -751,14 +858,42 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep Ope
 func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte, affinityKey string) {
 	var failures []string
 	for _, target := range candidates {
-		wrote, err := p.attemptVirtual(w, r, target, body)
+		// A caller that has already hung up (client disconnect →
+		// context.Canceled, or a request deadline) must stop the failover
+		// walk here rather than plow through every remaining candidate: each
+		// remaining managed-alias candidate calls ServerManager.Acquire,
+		// which takes no context and can cold-launch a model or block up to
+		// admissionTimeoutSeconds (default 120s) — for a response nobody is
+		// waiting on. Checked at the top of every iteration (not just once
+		// before the loop) because the cancellation is typically what the
+		// *previous* iteration's attemptVirtual just observed and reported
+		// as its error, not something known in advance (code review item 2).
+		if r.Context().Err() != nil {
+			slog.Debug("relay router: caller context done, abandoning remaining virtual-model candidates",
+				"model", name, "error", r.Context().Err())
+			return
+		}
+		wrote, status, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
-			// Record (or refresh) the pin on whichever target actually
-			// served — including a target other than the one that was
-			// pinned before, if that one just failed. The conversation is
-			// already contaminated by the switch at that point, so pin
-			// forward rather than flap back on the next turn (ADR-010).
-			p.affinity.record(name, affinityKey, target.identity())
+			// Pin only a response the backend actually stands behind. A 5xx
+			// is exactly the ADR-010 incident this guards against: llama.cpp
+			// 500s on reasoning_effort:"minimal", and pinning that response
+			// would lock every later turn onto the backend that just failed
+			// instead of leaving the door open to fail over next time
+			// (code review item 3). The response itself is NOT retried
+			// either way — "upstream answered, whatever it answered stands"
+			// — only whether it's worth remembering changes. A 4xx still
+			// pins: the backend answered fine, the client sent something it
+			// didn't like, and refusing to pin that would reintroduce the
+			// backend-hopping ADR-010 exists to prevent.
+			if status < http.StatusInternalServerError {
+				// Record (or refresh) the pin on whichever target actually
+				// served — including a target other than the one that was
+				// pinned before, if that one just failed. The conversation is
+				// already contaminated by the switch at that point, so pin
+				// forward rather than flap back on the next turn (ADR-010).
+				p.affinity.record(name, affinityKey, target.identity())
+			}
 			return // upstream answered — whatever it answered stands.
 		}
 		if wrote {
@@ -771,13 +906,15 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 }
 
 // attemptVirtual runs one virtual-model candidate against the real
-// ResponseWriter through a recorder that tracks whether anything was written.
-// release is deferred (rather than called after ServeHTTP returns) because a
-// mid-stream backend failure in a real net/http server panics with
-// http.ErrAbortHandler — recovered by the standard library one frame up —
-// and a bare post-call release() would leak the managed-server lease on that
-// path.
-func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target resolvedVirtualTarget, body []byte) (wrote bool, err error) {
+// ResponseWriter through a recorder that tracks whether anything was written
+// and, when it was, what status code the backend actually answered with —
+// routeVirtual uses that to decide whether the response is worth pinning
+// (see its 5xx handling, code review item 3). release is deferred (rather
+// than called after ServeHTTP returns) because a mid-stream backend failure
+// in a real net/http server panics with http.ErrAbortHandler — recovered by
+// the standard library one frame up — and a bare post-call release() would
+// leak the managed-server lease on that path.
+func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target resolvedVirtualTarget, body []byte) (wrote bool, status int, err error) {
 	var backendErr error
 	// onError intercepts the proxy's default 502 write: returning true tells
 	// newUpstreamProxy the caller is handling the failure itself, so a
@@ -788,16 +925,16 @@ func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, tar
 		return true
 	})
 	if buildErr != nil {
-		return false, buildErr
+		return false, 0, buildErr
 	}
 	defer release()
 
 	rec := &virtualResponseRecorder{ResponseWriter: w}
 	proxy.ServeHTTP(rec, r)
 	if backendErr != nil {
-		return rec.wrote, backendErr
+		return rec.wrote, rec.statusCode, backendErr
 	}
-	return rec.wrote, nil
+	return rec.wrote, rec.statusCode, nil
 }
 
 // buildVirtualAttempt constructs the reverse proxy for one virtual-model
@@ -821,7 +958,14 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 			rel()
 			return nil, nil, fmt.Errorf("rewrite request body: %w", err)
 		}
-		targetURL, _ := url.Parse(endpoint.BaseURL)
+		targetURL, err := url.Parse(endpoint.BaseURL)
+		if err != nil {
+			rel()
+			// Same nil-target panic risk routeManaged guards against (code
+			// review item 7) — but here it's just one failed candidate, not
+			// the whole request: the loop moves on to the next target.
+			return nil, nil, fmt.Errorf("invalid managed server endpoint: %w", err)
+		}
 		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
 		proxy.Transport = virtualDialTransport
 		return proxy, rel, nil
@@ -843,19 +987,31 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 // virtualResponseRecorder wraps the client's real ResponseWriter for one
 // virtual-model attempt. routeVirtual reads `wrote` to decide whether the
 // attempt is safe to retry: once a header or body byte has actually reached
-// the client, the exchange is committed.
+// the client, the exchange is committed. It also captures the status code
+// the backend answered with, so routeVirtual can decide whether the response
+// is worth pinning (a 5xx is not — see code review item 3).
 type virtualResponseRecorder struct {
 	http.ResponseWriter
-	wrote bool
+	wrote      bool
+	statusCode int
 }
 
 func (v *virtualResponseRecorder) WriteHeader(statusCode int) {
 	v.wrote = true
+	v.statusCode = statusCode
 	v.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (v *virtualResponseRecorder) Write(b []byte) (int, error) {
 	v.wrote = true
+	if v.statusCode == 0 {
+		// Write without a prior WriteHeader implies 200, same as the
+		// standard library's own http.ResponseWriter — the reverse proxy
+		// always calls WriteHeader itself before copying the body, so this
+		// only matters for a handler that skips straight to Write (none of
+		// ours do, but the zero value must not read as "unknown status").
+		v.statusCode = http.StatusOK
+	}
 	return v.ResponseWriter.Write(b)
 }
 
@@ -1005,13 +1161,31 @@ func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[strin
 // StartRelayRouter starts the router in a background goroutine. Returns nil
 // (no-op) when addr is empty or no live backend remains after dropping nil
 // managers.
-func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
+//
+// router (may be nil) carries RouterConfig-level behavior — currently just
+// the reasoning_effort rewrite map — and is applied via setReasoningEffortMap
+// before the serving goroutine is spawned, not after StartRelayRouter
+// returns. That ordering is load-bearing, not stylistic: Go's memory model
+// guarantees a goroutine's creation happens-before its execution, so setting
+// the field first means every connection-handling goroutine transitively
+// spawned from the one below is guaranteed to observe it. The previous shape
+// — main calling the router's (then-exported) SetReasoningEffortMap after
+// StartRelayRouter had already returned — left a window where a request
+// accepted the instant the listener came up could read the field
+// concurrently with that write, an unsynchronized race the detector flags
+// under real traffic (code review item 4). StartRelayRouter is the one
+// production call site for this, chosen over adding the parameter to
+// NewRelayRouter because it has far fewer call sites to touch.
+func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig) *RelayRouter {
 	if addr == "" {
 		return nil
 	}
 	p := NewRelayRouter(addr, managers, registry, virtual)
 	if len(p.managers) == 0 && p.registry == nil {
 		return nil
+	}
+	if router != nil {
+		p.setReasoningEffortMap(router.ReasoningEffortMap)
 	}
 	go func() {
 		if err := p.ListenAndServe(); err != nil && err != http.ErrServerClosed {

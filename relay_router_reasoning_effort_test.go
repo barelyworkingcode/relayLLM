@@ -41,7 +41,7 @@ func newManagedAliasRouter(t *testing.T, alias string, upstream *httptest.Server
 
 	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	if effortMap != nil {
-		r.SetReasoningEffortMap(effortMap)
+		r.setReasoningEffortMap(effortMap)
 	}
 	return r
 }
@@ -78,7 +78,7 @@ func bodyRecordingUpstream(t *testing.T, seen *[]byte) *httptest.Server {
 func TestReasoningEffort_NoRouterConfig_ManagedAliasPathUnchanged(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	r := newManagedAliasRouter(t, "reasoning-alias", upstream, nil) // no SetReasoningEffortMap call
+	r := newManagedAliasRouter(t, "reasoning-alias", upstream, nil) // no setReasoningEffortMap call
 
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
@@ -139,7 +139,7 @@ func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
-	r.SetReasoningEffortMap(map[string]string{"minimal": "none"})
+	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -175,7 +175,7 @@ func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
-	r.SetReasoningEffortMap(map[string]string{"minimal": "none"})
+	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -204,7 +204,7 @@ func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
-	r.SetReasoningEffortMap(map[string]string{"minimal": "none"})
+	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -236,7 +236,7 @@ func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 	registry.Snapshot(context.Background()) // force a probe so LookupModel sees the endpoint online
 
 	r := NewRelayRouter(":0", nil, registry, nil)
-	r.SetReasoningEffortMap(map[string]string{"minimal": "none"})
+	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -291,7 +291,7 @@ func TestReasoningEffort_VirtualModelPath_RewritesMappedValue(t *testing.T) {
 		Targets: []VirtualLLMTarget{{Endpoint: "fakeep", Model: "upstream-model"}},
 	}}}
 	r := NewRelayRouter(":0", nil, registry, virtual)
-	r.SetReasoningEffortMap(map[string]string{"minimal": "none"})
+	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 

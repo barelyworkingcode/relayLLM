@@ -1067,6 +1067,471 @@ func TestRouterAffinity_FailedAttemptRecordsNoPin(t *testing.T) {
 	}
 }
 
+// Code review item 1 (HIGH), end to end: a virtual model with two targets on
+// the SAME endpoint but different models — a natural big-then-small fallback
+// pair — must pin independently. Before the fix, identity() was just
+// "endpoint:<name>", so both targets hashed identically and applyAffinity
+// matched whichever one happened to come first in declared order (here,
+// qwen-70b) regardless of which one the pin actually named — silently
+// re-pinning a conversation onto the wrong model, permanently.
+func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T) {
+	var bigCalls, smallCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "qwen-70b"}, {"id": "qwen-7b"}}})
+		case "/v1/chat/completions":
+			buf, _ := io.ReadAll(r.Body)
+			var body struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(buf, &body)
+			switch body.Model {
+			case "qwen-70b":
+				bigCalls.Add(1)
+			case "qwen-7b":
+				smallCalls.Add(1)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer upstream.Close()
+
+	ep := OpenAIEndpoint{Name: "lmstudio", BaseURL: upstream.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "qwen-70b"}, UpstreamModel{ID: "qwen-7b"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vBigSmall",
+		// Declared order: big first, small second — the order candidatesForVirtual
+		// would prefer absent a pin.
+		Targets: []VirtualLLMTarget{
+			{Endpoint: "lmstudio", Model: "qwen-70b"},
+			{Endpoint: "lmstudio", Model: "qwen-7b"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	// Simulate "a previous turn was served by the small model and pinned
+	// there" directly, rather than needing a third failing server to force
+	// failover onto it.
+	router.affinity.record("vBigSmall", "conv-1", resolvedVirtualTarget{endpoint: ep, upstreamID: "qwen-7b"}.identity())
+
+	body := []byte(`{"model":"vBigSmall","prompt_cache_key":"conv-1"}`)
+	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
+
+	if bigCalls.Load() != 0 || smallCalls.Load() != 1 {
+		t.Errorf("calls: big=%d small=%d, want 0,1 — a pin to the small model must never be reinterpreted as the big one",
+			bigCalls.Load(), smallCalls.Load())
+	}
+}
+
+// Code review item 2 (MEDIUM): a client disconnect must not send the router
+// walking every remaining candidate. Pre-fix, a canceled request context was
+// treated exactly like any other pre-response failure and the loop simply
+// advanced — for a managed-alias candidate that means an unbounded
+// ServerManager.Acquire call (cold launch, or up to admissionTimeoutSeconds)
+// for a response nobody is waiting on. This drives the router's real HTTP
+// handler directly with a pre-canceled request context so the check is
+// exercised exactly where routeVirtual added it: at the top of the loop,
+// before any candidate is attempted.
+func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testing.T) {
+	var firstCalls, secondCalls, thirdCalls atomic.Int64
+	newTarget := func(calls *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/models":
+				json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "m"}}})
+			case "/v1/chat/completions":
+				calls.Add(1)
+				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			}
+		}))
+	}
+	first := newTarget(&firstCalls)
+	defer first.Close()
+	second := newTarget(&secondCalls)
+	defer second.Close()
+	third := newTarget(&thirdCalls)
+	defer third.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "first", BaseURL: first.URL + "/v1"},
+		{Name: "second", BaseURL: second.URL + "/v1"},
+		{Name: "third", BaseURL: third.URL + "/v1"},
+	}})
+	registry.Snapshot(context.Background()) // populate all three as online
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vAbandoned", Targets: []VirtualLLMTarget{
+			{Endpoint: "first", Model: "m"},
+			{Endpoint: "second", Model: "m"},
+			{Endpoint: "third", Model: "m"},
+		},
+	}}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has already hung up
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"vAbandoned"}`))).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	router.server.Handler.ServeHTTP(rec, req)
+
+	if firstCalls.Load() != 0 || secondCalls.Load() != 0 || thirdCalls.Load() != 0 {
+		t.Errorf("calls: first=%d second=%d third=%d, want 0,0,0 — a canceled request context must abandon every candidate",
+			firstCalls.Load(), secondCalls.Load(), thirdCalls.Load())
+	}
+}
+
+// Code review item 2, the sharper reproduction: an endpoint target's
+// RoundTrip already respects context cancellation on its own (it fails fast,
+// without dialing, the instant the context is Done), so a test built only
+// from endpoint targets can't actually distinguish the fix from the bug — a
+// pre-canceled context makes every endpoint candidate fail near-instantly
+// either way. ServerManager.Acquire is different: it takes no context
+// parameter at all, so nothing about a canceled request stops it from
+// actually entering its admission wait. This seeds a manager at its instance
+// cap with a busy, non-idle instance (leases > 0) on a FakeClock that is
+// never advanced, so a real call to Acquire("wanted") would park in that
+// wait indefinitely — proving, if the request ever returns, that Acquire was
+// never called at all rather than merely "returned quickly by luck."
+func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmission(t *testing.T) {
+	mgr, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
+		map[string]float64{"busy": 1, "wanted": 1})
+	addInstance(mgr, "busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
+
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vGuard", Targets: []VirtualLLMTarget{{Alias: "wanted"}},
+	}}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has already hung up
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"vGuard"}`))).WithContext(ctx)
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		router.server.Handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good: the router bailed on the canceled context before ever
+		// calling Acquire("wanted"), which would otherwise have parked in
+		// the admission wait forever (the FakeClock here is never advanced
+		// and "busy" is never released).
+	case <-time.After(2 * time.Second):
+		t.Fatal("request never returned — the router appears stuck inside ServerManager.Acquire's admission wait for a response nobody will read")
+	}
+}
+
+// Code review item 3 (MEDIUM): a backend that answers with a 5xx must not
+// get pinned. This is the exact ADR-010 incident — llama.cpp 500s on
+// reasoning_effort:"minimal" — pinning that response would lock every later
+// turn onto the backend that just failed instead of leaving the door open to
+// fail over. The 500 itself is NOT retried: "upstream answered, whatever it
+// answered stands" is unchanged; only whether it's worth remembering does.
+func TestRouterAffinity_FailingBackendGets500ButNoPin(t *testing.T) {
+	var calls atomic.Int64
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "m"}}})
+		case "/v1/chat/completions":
+			calls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"boom"}`))
+		}
+	}))
+	defer failing.Close()
+
+	ep := OpenAIEndpoint{Name: "failing", BaseURL: failing.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vFail", Targets: []VirtualLLMTarget{{Endpoint: "failing", Model: "m"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vFail","prompt_cache_key":"conv-1"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (the router must surface, not retry, a real upstream response)", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("backend calls = %d, want 1 — a 5xx response must not be retried", got)
+	}
+	if got := router.affinity.size(); got != 0 {
+		t.Errorf("affinity store size = %d, want 0 — a 5xx response must never be pinned", got)
+	}
+}
+
+// A 4xx is a client-side problem — the backend answered fine — so it must
+// still pin, same as any other success. Only 5xx is excluded.
+func TestRouterAffinity_4xxResponseStillPins(t *testing.T) {
+	var calls atomic.Int64
+	badRequest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "m"}}})
+		case "/v1/chat/completions":
+			calls.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer badRequest.Close()
+
+	ep := OpenAIEndpoint{Name: "bad", BaseURL: badRequest.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vBad", Targets: []VirtualLLMTarget{{Endpoint: "bad", Model: "m"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vBad","prompt_cache_key":"conv-1"}`))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("backend calls = %d, want 1 — a 4xx must not be retried either", got)
+	}
+	if got := router.affinity.size(); got != 1 {
+		t.Errorf("affinity store size = %d, want 1 — a 4xx is a client problem, not a backend failure; it must still pin", got)
+	}
+}
+
+// Code review item 5 (LOW): classifyVirtualTarget is the single classifier
+// both candidatesForVirtual and warnVirtualModelConfig now dispatch on. This
+// pins the exact case that used to make them disagree: a target that sets
+// endpoint (without model) *and* alias. candidatesForVirtual's original case
+// order checks endpoint+model first (fails, model is empty), then alias
+// (matches) — so it routes fine via the alias. The old validator's first
+// case was "endpoint set, model not," which caught this target before ever
+// reaching its alias case, and warned about a virtual that actually works.
+func TestClassifyVirtualTarget_EndpointWithoutModelButWithAliasIsAlias(t *testing.T) {
+	target := VirtualLLMTarget{Endpoint: "ep", Alias: "local"}
+	if got := classifyVirtualTarget(target); got != virtualTargetAlias {
+		t.Errorf("classify(%+v) = %v, want virtualTargetAlias", target, got)
+	}
+}
+
+func TestClassifyVirtualTarget_EndpointAndModelIsEndpoint(t *testing.T) {
+	target := VirtualLLMTarget{Endpoint: "ep", Model: "m", Alias: "local"}
+	if got := classifyVirtualTarget(target); got != virtualTargetEndpoint {
+		t.Errorf("classify(%+v) = %v, want virtualTargetEndpoint (endpoint+model wins when both shapes are set)", target, got)
+	}
+}
+
+func TestClassifyVirtualTarget_EndpointWithoutModelOrAliasIsInvalid(t *testing.T) {
+	target := VirtualLLMTarget{Endpoint: "ep"}
+	if got := classifyVirtualTarget(target); got != virtualTargetInvalid {
+		t.Errorf("classify(%+v) = %v, want virtualTargetInvalid", target, got)
+	}
+}
+
+func TestClassifyVirtualTarget_ModelWithoutEndpointOrAliasIsInvalid(t *testing.T) {
+	target := VirtualLLMTarget{Model: "m"}
+	if got := classifyVirtualTarget(target); got != virtualTargetInvalid {
+		t.Errorf("classify(%+v) = %v, want virtualTargetInvalid", target, got)
+	}
+}
+
+// The classifier's output must actually be what candidatesForVirtual routes
+// — proving the shared-classifier fix, not just the classifier in isolation.
+func TestCandidatesForVirtual_EndpointWithoutModelButWithAliasRoutesViaAlias(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "local"}},
+	}, "")
+	virtual := &VirtualLLM{Name: "v", Targets: []VirtualLLMTarget{{Endpoint: "ep", Alias: "local"}}}
+	candidates, freshCount := candidatesForVirtual(virtual, nil, []*ServerManager{mgr})
+	if len(candidates) != 1 || candidates[0].alias != "local" {
+		t.Fatalf("candidatesForVirtual = %+v, want a single alias candidate", candidates)
+	}
+	if freshCount != 1 {
+		t.Errorf("freshCount = %d, want 1", freshCount)
+	}
+}
+
+// Code review item 6 (LOW): a virtual named exactly like an endpoint's
+// prefixed id (<endpoint>/<upstream-id>) must be listed in the catalog as
+// the row that will actually serve — the virtual, since handleProxy checks
+// p.virtual.Find before p.registry.LookupModel. Before the fix, handleModels
+// built endpoint rows before virtual rows, so the catalog listed the
+// endpoint (which a request for that id would never actually reach) while
+// dispatch served the virtual — a client saw one behavior advertised and got
+// another.
+func TestRouterCatalog_VirtualNameCollidesWithEndpointID_CatalogMatchesDispatch(t *testing.T) {
+	endpointBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "shared-id"}}})
+		case "/v1/chat/completions":
+			json.NewEncoder(w).Encode(map[string]any{"source": "endpoint"})
+		}
+	}))
+	defer endpointBackend.Close()
+
+	virtualBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "vm"}}})
+		case "/v1/chat/completions":
+			json.NewEncoder(w).Encode(map[string]any{"source": "virtual"})
+		}
+	}))
+	defer virtualBackend.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "ep", BaseURL: endpointBackend.URL + "/v1"},
+		{Name: "backend", BaseURL: virtualBackend.URL + "/v1"},
+	}})
+	// Deliberately collides with the endpoint-prefixed id "ep/shared-id".
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "ep/shared-id", Targets: []VirtualLLMTarget{{Endpoint: "backend", Model: "vm"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	var matches []catalogRow
+	for _, row := range fetchCatalog(t, router, "/v1/models") {
+		if row.ID == "ep/shared-id" {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("catalog rows for the colliding id = %d, want exactly 1: %+v", len(matches), matches)
+	}
+	if matches[0].OwnedBy != "virtual" {
+		t.Errorf("owned_by = %q, want %q — the listed row must be the one dispatch will actually use", matches[0].OwnedBy, "virtual")
+	}
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"ep/shared-id"}`))
+	defer resp.Body.Close()
+	var got struct {
+		Source string `json:"source"`
+	}
+	json.NewDecoder(resp.Body).Decode(&got)
+	if got.Source != "virtual" {
+		t.Errorf("dispatch source = %q, want %q — must match the row the catalog listed", got.Source, "virtual")
+	}
+}
+
+// Code review item 7 (LOW): a managed instance with a malformed BaseURL used
+// to panic inside the handler (newUpstreamProxy's Director dereferences a
+// nil target.Scheme after a dropped url.Parse error). Seeding an instance
+// with a negative port reproduces this hermetically: endpointForPort's
+// "http://127.0.0.1:%d/v1" formats a negative port into an unparseable
+// ":-1" port suffix.
+func TestRouter_Proxy_ManagedAlias_BadEndpointURL_Returns502NotPanic(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "bad-url"}},
+	}, "")
+	inst := &serverInstance{ready: make(chan struct{}), port: -1}
+	inst.healthy.Store(true)
+	mgr.mu.Lock()
+	mgr.instances["bad-url"] = inst
+	mgr.mu.Unlock()
+
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"bad-url"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 502 (a bad BaseURL must fail the request, not panic the handler); body=%s", resp.StatusCode, body)
+	}
+}
+
+// Same defect, virtual-failover path: a bad managed BaseURL for one alias
+// candidate must just be one failed candidate, not an aborted request.
+func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandidate(t *testing.T) {
+	badMgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "bad-alias"}},
+	}, "")
+	inst := &serverInstance{ready: make(chan struct{}), port: -1}
+	inst.healthy.Store(true)
+	badMgr.mu.Lock()
+	badMgr.instances["bad-alias"] = inst
+	badMgr.mu.Unlock()
+
+	var fallbackCalls atomic.Int64
+	fallback := newCountingChatUpstream(t, &fallbackCalls, "m")
+	fallbackEP := OpenAIEndpoint{Name: "fallback", BaseURL: fallback.URL + "/v1"}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{fallbackEP}})
+	seedEndpointStatus(registry, fallbackEP, true, UpstreamModel{ID: "m"})
+
+	router := NewRelayRouter(":0", []*ServerManager{badMgr}, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vBadURL", Targets: []VirtualLLMTarget{
+			{Alias: "bad-alias"},
+			{Endpoint: "fallback", Model: "m"},
+		},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vBadURL"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 via the fallback candidate (not a panic), got %d body=%s", resp.StatusCode, body)
+	}
+	if got := fallbackCalls.Load(); got != 1 {
+		t.Errorf("fallback calls = %d, want 1", got)
+	}
+}
+
+// Code review item 4 (MEDIUM): StartRelayRouter's trailing *RouterConfig
+// parameter must be fully applied before it returns — main no longer makes a
+// separate post-construction setter call, which used to race the router's
+// first accepted connection under real traffic (unsynchronized read/write on
+// reasoningEffortMap, flagged by -race). Reading the field directly here
+// (rather than over HTTP) proves the ordering structurally: the write
+// happens inside StartRelayRouter itself, before the "go func(){...}()"
+// statement that starts serving.
+func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "a"}},
+	}, "")
+	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, &RouterConfig{
+		ReasoningEffortMap: map[string]string{"minimal": "none"},
+	})
+	if router == nil {
+		t.Fatal("expected a non-nil router")
+	}
+	t.Cleanup(func() { router.Close() })
+
+	if got := router.reasoningEffortMap["minimal"]; got != "none" {
+		t.Errorf("reasoningEffortMap[minimal] = %q, want %q to be applied by the time StartRelayRouter returned", got, "none")
+	}
+}
+
+// A nil *RouterConfig must remain a valid, no-op input.
+func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "a"}},
+	}, "")
+	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, nil)
+	if router == nil {
+		t.Fatal("expected a non-nil router")
+	}
+	t.Cleanup(func() { router.Close() })
+
+	if router.reasoningEffortMap != nil {
+		t.Errorf("reasoningEffortMap = %v, want nil (zero value) when RouterConfig is nil", router.reasoningEffortMap)
+	}
+}
+
 // A Snapshot triggered by an already-canceled caller context must still
 // record a real probe result — the caller hanging up says nothing about
 // whether the upstream is reachable.
