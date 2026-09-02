@@ -109,6 +109,18 @@ Oh My Pi has no wire value meaning "off" at all: its `--thinking off` clamps to 
 
 `router.reasoningEffortMap` closes that gap by rewriting the value in flight: `{"minimal": "none"}` turns the lowest value a stuck client can be made to send into the value the backend actually treats as off. It's a router-level, opt-in body rewrite — absent or empty (the default) means zero behavior change, not even a JSON round-trip on the managed-alias path (see `rewriteProxyBody`'s short-circuit). Keys and values are free-form strings on purpose, not a fixed vocabulary: the table above is this backend's answer, not a general truth, and hardcoding one would just move the problem to the next backend that disagrees. Only a top-level string `reasoning_effort` field with an exact, case-sensitive key match is rewritten; a mapped value of `""` removes the key entirely rather than sending an empty string, since some backends reject that too. Applies uniformly to every proxied path — managed-alias, endpoint, and virtual-model routes all funnel through the same rewrite so a client hitting a bare managed alias gets the same fix as one hitting an endpoint.
 
+That value swap fixes llama.cpp, which interprets `reasoning_effort` server-side. It does not fix oMLX. Measured directly against oMLX's source (`omlx/server.py:3594`): oMLX merges `request.reasoning_effort` verbatim into `chat_template_kwargs` and hands it to the model's Jinja chat template — there is no server-side meaning to rewrite. The MLX build of the measured model (`CodeFast`) uses the older Qwen convention, `enable_thinking`, not `reasoning_effort`, so the template never reads the field a value swap targets at all — no VALUE of `reasoning_effort` can turn its reasoning off; only a different field entirely can. Measured reasoning-output length against oMLX `CodeFast`:
+
+| request | reasoning returned |
+|---|---|
+| baseline | 101 chars |
+| `reasoning_effort: "none"` | 94 chars — no effect |
+| `chat_template_kwargs: {"enable_thinking": false}` | **0 chars — off** |
+
+And against llama.cpp (`europa`), that same `chat_template_kwargs: {"enable_thinking": false}` also yields 0 chars — so each backend tolerates the other's mechanism harmlessly (llama.cpp ignores an unrecognized `chat_template_kwargs` key; oMLX ignores `reasoning_effort` once its template doesn't reference it). `router.reasoningEffortTemplateKwargs` is the sibling knob this requires: `{"minimal": {"enable_thinking": false}}` merges that object into the body's top-level `chat_template_kwargs` (creating it if absent) whenever `reasoning_effort` matches a configured key, filling in only keys the client's own body doesn't already set — mirroring oMLX's own `merged.setdefault(...)` server-side, so an explicit client choice always wins over ours. Values are arbitrary JSON (bool, string, number, …), not just bools, since oMLX forwards whatever it's given straight to the template untyped. Configuring both knobs together is what makes "turn reasoning off" portable across both backends from one client-side value.
+
+Both knobs match against the request's **ORIGINAL** `reasoning_effort` value, captured before `reasoningEffortMap`'s swap runs — not after. This is load-bearing, not incidental: the two knobs describe *one* inbound client value triggering *two* independent rewrites. `{"minimal": "none"}` (the value map) and `{"minimal": {"enable_thinking": false}}` (the template-kwargs map) are both keyed on the client's actual `"minimal"`; matching post-swap would require the template-kwargs map's keys to track whatever the value map happens to rewrite `"minimal"` *into* (`"none"`) rather than what the client sent, coupling the two maps together for no reason and breaking silently the moment either is reconfigured on its own. `rewriteProxyBody` reads the field once via `reasoningEffortValue` before either rewrite mutates it, and both `applyReasoningEffortMap` and `applyReasoningEffortTemplateKwargs` share that single decode/encode pass — see `TestReasoningEffortTemplateKwargs_BothKnobsFireTogether`'s comment for the regression this ordering guards against.
+
 ## Built-in Tools
 
 `BuiltinToolRegistry` (`builtin_tools.go`) is the generic mechanism for in-process tools that run alongside MCP tools in the `BaseChatProvider` loop (`provider_chat_base.go`) and need an `emit` progress callback MCP tools can't provide. Dispatch order in `runToolLoop()`: built-ins first (`builtinTools.Has()`), then MCP.
@@ -184,7 +196,8 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
       ]
     },
     "router": {
-      "reasoningEffortMap": {"minimal": "none"}
+      "reasoningEffortMap": {"minimal": "none"},
+      "reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}}
     },
     "llama-server": {
       "binaryPath": "/usr/local/bin/llama-server",
@@ -226,7 +239,7 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
     }
   }
   ```
-  **`router`** (optional; empty/absent means no rewriting, byte-identical to a settings.json with no `router` section at all): `reasoningEffortMap` rewrites a top-level string `reasoning_effort` field on every proxied request body — see the Relay-router section above for why. Free-form string keys/values, not a fixed vocabulary: map a value to `""` to remove the field entirely instead of sending it as an empty string.
+  **`router`** (optional; empty/absent means no rewriting, byte-identical to a settings.json with no `router` section at all): `reasoningEffortMap` rewrites a top-level string `reasoning_effort` field on every proxied request body — see the Relay-router section above for why. Free-form string keys/values, not a fixed vocabulary: map a value to `""` to remove the field entirely instead of sending it as an empty string. `reasoningEffortTemplateKwargs` is its sibling knob for backends (oMLX) that forward `reasoning_effort` straight into the chat template instead of interpreting it server-side: it merges an object into the body's top-level `chat_template_kwargs` when the request's *original* `reasoning_effort` value (matched before `reasoningEffortMap` rewrites it) matches a configured key, without overwriting any key the client's own body already sets there. Also empty/absent by default; see the Relay-router section above for the measured table and why both knobs match against the original value.
 
   **Memory budget** (optional, per managed-server section; all default to off so behavior is unchanged until set — see `docs/decisions/009-managed-server-memory-budget.md`): `maxLoaded` caps concurrent instances, `maxMemoryGB` caps the sum of estimated resident memory, `idleTimeoutMinutes` reclaims instances nobody is using. Either cap evicts the least-recently-used *idle* instance; a leased instance (mid-turn) is never evicted — when everything is busy, admission waits up to `admissionTimeoutSeconds` (default 120) and then errors naming the busy aliases. Model sizes are computed, not declared: weights from the file size, KV cache from the GGUF header (`gguf.go`) honoring sliding-window attention and per-layer GQA, plus `memoryHeadroomPercent` (default 10) for compute buffers. Per-model `memoryGB` overrides the estimate; a model whose size can't be determined counts against `maxLoaded` but not `maxMemoryGB`. Current usage is reported in `/api/status` under `budgets`, and per-instance `leases` / `estimatedGB` / `idleSeconds` in `instances`.
 
