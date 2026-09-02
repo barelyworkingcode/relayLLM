@@ -223,6 +223,11 @@ func TestRouter_Proxy_LlamaAlias_RoutesToManagedBranch(t *testing.T) {
 func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 	// Upstream records the body it received so we can assert the model field
 	// was rewritten from "fakeep/Qwen" to bare "Qwen".
+	//
+	// No catalog request (/v1/models, which would Snapshot the registry)
+	// precedes the POST below — this is also the production cold-start
+	// regression proof: LookupModel must probe on its own on a first-ever
+	// call, or a freshly started router 400s an online endpoint's model.
 	var seenBody []byte
 	var seenAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,8 +253,6 @@ func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 		},
 	}
 	registry := NewProxyRegistry(cfg)
-	// Force probe so LookupModel finds the endpoint Online.
-	registry.Snapshot(context.Background())
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
