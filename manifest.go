@@ -171,6 +171,12 @@ func settingsSchema() []FieldDecl {
 			Fields: []FieldDecl{
 				{ID: "reasoningEffortMap", Label: "Reasoning effort map", Type: "stringMap",
 					Help: `Rewrites a top-level "reasoning_effort" string field before it reaches the backend, e.g. minimal -> none. Map a value to an empty string to remove the field instead of sending it empty (some backends reject ""). Absent or empty disables rewriting entirely.`},
+				// No schema vocabulary here represents a map of maps
+				// (map[string]map[string]any), so this is declared as free
+				// text documenting the JSON shape rather than inventing a
+				// new field type for one setting.
+				{ID: "reasoningEffortTemplateKwargs", Label: "Reasoning effort template kwargs", Type: "text",
+					Help: `JSON object mapping a "reasoning_effort" value to an object merged into the request's top-level "chat_template_kwargs" (creating it if absent), matched against the ORIGINAL reasoning_effort value before the map above rewrites it. Fixes backends (e.g. oMLX) that forward reasoning_effort straight to the model's Jinja chat template instead of interpreting it themselves. Example: {"minimal": {"enable_thinking": false}}. A key the client's own body already sets under chat_template_kwargs is left alone. Absent or empty disables this entirely.`},
 			},
 		},
 		{
