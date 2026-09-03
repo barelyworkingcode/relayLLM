@@ -97,7 +97,7 @@ A virtual name always appears in `/v1/models`, unlike an endpoint model that sim
 
 Startup validation (`warnVirtualModelConfig` in `main.go`, sibling to `warnAliasShadowing`) warns about virtual-model dead config: a virtual name shadowed by a managed alias (dispatch checks managers first), a name containing `/` (would intercept `endpoint/id` routing), a target with only one of `endpoint`/`model` set, a target naming an endpoint or alias that doesn't exist, a virtual with zero usable targets, and two virtuals sharing a name.
 
-**Reasoning-effort rewrite** (`router.reasoningEffortMap` config, `RouterConfig` / `rewriteProxyBody` / `applyReasoningEffortMap`). Clients and backends do not agree on what "reasoning off" looks like on the wire. Measured against a real llama.cpp server (`/v1/chat/completions`, Qwen3.8-27B):
+**Reasoning-effort rewrite** (`router.reasoningEffortMap` config, `RouterConfig` / `rewriteProxyBody` / `applyReasoningEffortMap`). Clients and backends do not agree on what "reasoning off" looks like on the wire. Measured against a real llama.cpp server (`/v1/chat/completions`, Qwen3.8-27B). This was `europa` before it was rebuilt on ExLlamaV3 (see the exl3 table below); it still describes the managed `llama-server` profile and any other llama.cpp backend:
 
 | `reasoning_effort` sent | result |
 |---|---|
@@ -117,7 +117,25 @@ That value swap fixes llama.cpp, which interprets `reasoning_effort` server-side
 | `reasoning_effort: "none"` | 94 chars — no effect |
 | `chat_template_kwargs: {"enable_thinking": false}` | **0 chars — off** |
 
-And against llama.cpp (`europa`), that same `chat_template_kwargs: {"enable_thinking": false}` also yields 0 chars — so each backend tolerates the other's mechanism harmlessly (llama.cpp ignores an unrecognized `chat_template_kwargs` key; oMLX ignores `reasoning_effort` once its template doesn't reference it). `router.reasoningEffortTemplateKwargs` is the sibling knob this requires: `{"minimal": {"enable_thinking": false}}` merges that object into the body's top-level `chat_template_kwargs` (creating it if absent) whenever `reasoning_effort` matches a configured key, filling in only keys the client's own body doesn't already set — mirroring oMLX's own `merged.setdefault(...)` server-side, so an explicit client choice always wins over ours. Values are arbitrary JSON (bool, string, number, …), not just bools, since oMLX forwards whatever it's given straight to the template untyped. Configuring both knobs together is what makes "turn reasoning off" portable across both backends from one client-side value.
+And against llama.cpp (`europa`, when it still ran llama.cpp), that same `chat_template_kwargs: {"enable_thinking": false}` also yields 0 chars — so each backend tolerates the other's mechanism harmlessly (llama.cpp ignores an unrecognized `chat_template_kwargs` key; oMLX ignores `reasoning_effort` once its template doesn't reference it). `router.reasoningEffortTemplateKwargs` is the sibling knob this requires: `{"minimal": {"enable_thinking": false}}` merges that object into the body's top-level `chat_template_kwargs` (creating it if absent) whenever `reasoning_effort` matches a configured key, filling in only keys the client's own body doesn't already set — mirroring oMLX's own `merged.setdefault(...)` server-side, so an explicit client choice always wins over ours. Values are arbitrary JSON (bool, string, number, …), not just bools, since oMLX forwards whatever it's given straight to the template untyped. Configuring both knobs together is what makes "turn reasoning off" portable across both backends from one client-side value.
+
+**Neither knob reaches ExLlamaV3.** `europa` was rebuilt on an exl3 server (`owned_by: "exl3"`, model id `qwen3.8-27b-exl3-3.5bpw-wm`) and no longer speaks llama.cpp's dialect. It is not TabbyAPI either — no `/docs`, no `/openapi.json`, no `/v1/model`. Measured at `temperature: 0` on one prompt, so every row is directly comparable:
+
+| request | reasoning returned |
+|---|---|
+| baseline | 157 chars |
+| `reasoning_effort: "none"` | 157 chars |
+| `reasoning_effort: "minimal"` | 157 chars |
+| `reasoning_effort: "low"` | 157 chars |
+| `chat_template_kwargs: {"enable_thinking": false}` | 157 chars |
+| `template_vars: {"enable_thinking": false}` (TabbyAPI's spelling) | 157 chars |
+| top-level `enable_thinking: false` / `thinking: false` | 157 chars |
+
+Byte-identical across every variant: the server drops all of these fields before the chat template, so there is no wire mechanism to turn reasoning off. It always reasons, at whatever the model's own default is. Both knobs are therefore **inert against europa** — not broken, just ignored. One thing did improve: `minimal` returns 200 rather than the 500 above, so the tight retry loop that motivated `reasoningEffortMap` cannot happen on this backend anymore.
+
+Keep both knobs configured regardless. `reasoningEffortTemplateKwargs` is still load-bearing for oMLX (re-measured after the rebuild: `enable_thinking: false` still gives 0 chars there), and `reasoningEffortMap` still matters for the managed `llama-server` profile. A rewrite a backend ignores costs one JSON round-trip and changes nothing.
+
+Consequence for `vCode`: europa is its first-preference target, so a conversation pinned there by affinity gets reasoning that cannot be suppressed. That is a deliberate trade — exl3 is faster. Flip the target order if reasoning-off ever matters more than latency for that virtual.
 
 Both knobs match against the request's **ORIGINAL** `reasoning_effort` value, captured before `reasoningEffortMap`'s swap runs — not after. This is load-bearing, not incidental: the two knobs describe *one* inbound client value triggering *two* independent rewrites. `{"minimal": "none"}` (the value map) and `{"minimal": {"enable_thinking": false}}` (the template-kwargs map) are both keyed on the client's actual `"minimal"`; matching post-swap would require the template-kwargs map's keys to track whatever the value map happens to rewrite `"minimal"` *into* (`"none"`) rather than what the client sent, coupling the two maps together for no reason and breaking silently the moment either is reconfigured on its own. `rewriteProxyBody` reads the field once via `reasoningEffortValue` before either rewrite mutates it, and both `applyReasoningEffortMap` and `applyReasoningEffortTemplateKwargs` share that single decode/encode pass — see `TestReasoningEffortTemplateKwargs_BothKnobsFireTogether`'s comment for the regression this ordering guards against.
 
