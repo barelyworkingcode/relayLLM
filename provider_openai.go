@@ -609,12 +609,21 @@ type UpstreamModel struct {
 	SupportsImages bool
 }
 
+// modelsFetchTimeout must stay comfortably above the worst-case /models
+// latency of an upstream that is itself a relayLLM router. Such an upstream
+// answers /models only after probing its own endpoints, so a cold cache costs
+// it a full probe timeout before it replies. Setting this to that same probe
+// timeout makes a router-in-front-of-a-router flap permanently: every probe
+// loses the race by milliseconds, the endpoint is recorded offline, and its
+// models never appear. Shrink this and chained routers stop seeing each other.
+const modelsFetchTimeout = 10 * time.Second
+
 // FetchOpenAIModels queries /v1/models on the endpoint and returns the raw
 // upstream models (IDs carry no endpoint prefix). The error return distinguishes
 // "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
 // ProxyRegistry can record online/offline state accurately.
 func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) ([]UpstreamModel, error) {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: modelsFetchTimeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)

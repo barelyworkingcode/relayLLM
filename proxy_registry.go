@@ -189,8 +189,8 @@ func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
 	// reasons that say nothing about the upstream (client gave up, browser
 	// tab closed). Cancelling on that basis would record the endpoint
 	// offline with a fresh LastChecked, poisoning the 15s cache for what may
-	// be a perfectly healthy endpoint. FetchOpenAIModels has its own 3s
-	// client timeout, so this can't hang indefinitely even detached.
+	// be a perfectly healthy endpoint. FetchOpenAIModels has its own client
+	// timeout, so this can't hang indefinitely even detached.
 	models, err := FetchOpenAIModels(context.WithoutCancel(ctx), ep)
 	status := &EndpointStatus{
 		Endpoint:    ep,
