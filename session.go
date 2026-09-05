@@ -810,14 +810,29 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 			continue
 		}
 		provider := s.getProvider()
+
+		// Messages is mutated concurrently by the provider's tool loop
+		// (see copyHistory in provider_chat_base.go), so it must only be
+		// read under the session lock.
+		s.mu.Lock()
+		createdAt := s.CreatedAt
+		messageCount := len(s.Messages)
+		lastMsgAt := lastMessageAt(s.Messages)
+		preview := sessionPreview(s.Messages)
+		s.mu.Unlock()
+
 		list = append(list, map[string]interface{}{
-			"id":        s.ID,
-			"projectId": s.ProjectID,
-			"name":      s.Name,
-			"folder":    s.Folder,
-			"directory": s.Directory,
-			"model":     s.Model,
-			"active":    provider != nil && provider.Alive(),
+			"id":            s.ID,
+			"projectId":     s.ProjectID,
+			"name":          s.Name,
+			"folder":        s.Folder,
+			"directory":     s.Directory,
+			"model":         s.Model,
+			"active":        provider != nil && provider.Alive(),
+			"createdAt":     createdAt,
+			"messageCount":  messageCount,
+			"lastMessageAt": lastMsgAt,
+			"preview":       preview,
 		})
 	}
 	m.mu.RUnlock()
@@ -829,18 +844,63 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 			if seen[s.ID] || s.Headless {
 				continue
 			}
+			// s was just deserialized by LoadAll and isn't reachable from
+			// m.sessions yet, so no other goroutine can touch it — no lock
+			// needed here.
 			list = append(list, map[string]interface{}{
-				"id":        s.ID,
-				"projectId": s.ProjectID,
-				"name":      s.Name,
-				"directory": s.Directory,
-				"model":     s.Model,
-				"active":    false,
+				"id":            s.ID,
+				"projectId":     s.ProjectID,
+				"name":          s.Name,
+				"folder":        s.Folder,
+				"directory":     s.Directory,
+				"model":         s.Model,
+				"active":        false,
+				"createdAt":     s.CreatedAt,
+				"messageCount":  len(s.Messages),
+				"lastMessageAt": lastMessageAt(s.Messages),
+				"preview":       sessionPreview(s.Messages),
 			})
 		}
 	}
 
 	return list
+}
+
+// sessionPreview returns a short preview of the first substantive user turn
+// in msgs: plain text, whitespace collapsed, capped at 120 runes (with "…"
+// appended if truncated). Slash-command turns (e.g. "/compact") aren't
+// conversation content, so they're skipped in favor of the first real user
+// message. Returns "" if there is no such message.
+func sessionPreview(msgs []Message) string {
+	for _, msg := range msgs {
+		if msg.Role != "user" {
+			continue
+		}
+		text := strings.TrimSpace(extractTextContent(msg))
+		if text == "" || strings.HasPrefix(text, "/") {
+			continue
+		}
+		return truncatePreview(strings.Join(strings.Fields(text), " "), 120)
+	}
+	return ""
+}
+
+// truncatePreview caps s at max runes, appending "…" when it cuts content.
+func truncatePreview(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
+}
+
+// lastMessageAt returns the Timestamp of the last message in msgs, or "" if
+// msgs is empty.
+func lastMessageAt(msgs []Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	return msgs[len(msgs)-1].Timestamp
 }
 
 func (m *SessionManager) EndSession(id string) {
