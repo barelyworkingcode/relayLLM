@@ -94,6 +94,16 @@ type HostSpec struct {
 	OS         string   `json:"os,omitempty"`
 }
 
+// Chip returns the {id, name} summary a terminal event carries — never the
+// full spec (ssh_argv, tool paths) to a surface that only needs a label.
+// nil-safe: a console (non-host) terminal's nil Host chips to nil.
+func (h *HostSpec) Chip() map[string]string {
+	if h == nil {
+		return nil
+	}
+	return map[string]string{"id": h.ID, "name": h.Name}
+}
+
 // RelayProjectTemplateRequest mirrors relay/bridge.ShellTemplateRequest. Kept
 // inline to avoid a cross-repo Go module dependency. Resolves a project-scoped
 // shell (terminal) launch template definition by (ProjectID, TemplateID).

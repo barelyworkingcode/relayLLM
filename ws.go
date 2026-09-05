@@ -498,6 +498,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 		"templateId": session.TemplateID,
 		"name":       session.Name,
 		"directory":  session.Directory,
+		"host":       session.Host.Chip(),
 	})
 }
 
@@ -690,6 +691,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 		"cols":       cols,
 		"rows":       rows,
 		"scrollback": base64.StdEncoding.EncodeToString(scrollback),
+		"host":       session.Host.Chip(),
 	})
 
 	if state == "stopped" {

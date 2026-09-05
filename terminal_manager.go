@@ -88,7 +88,12 @@ func (m *TerminalManager) Create(templateID, name, directory, projectID string, 
 		tmpl = pt
 	}
 
-	if directory == "" {
+	// Resolve the host (if any) before defaulting directory — a host
+	// terminal's default directory is the host's own home (ssh's own login
+	// behavior when no `cd` is emitted), not the console's.
+	host := resolveTerminalHost(projectID, directory)
+
+	if directory == "" && host == nil {
 		directory = defaultHomeDir()
 	}
 
@@ -108,6 +113,7 @@ func (m *TerminalManager) Create(templateID, name, directory, projectID string, 
 		Name:            name,
 		Directory:       directory,
 		projectID:       projectID,
+		Host:            host,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		cols:            cols,
 		rows:            rows,
@@ -191,6 +197,7 @@ func (m *TerminalManager) List() []map[string]interface{} {
 			"state":      state,
 			"createdAt":  s.CreatedAt,
 			"exitCode":   exitCode,
+			"host":       s.Host.Chip(),
 		})
 	}
 	return list
@@ -269,6 +276,23 @@ func (m *TerminalManager) StopAll() {
 	for _, s := range sessions {
 		s.Close()
 	}
+}
+
+// resolveTerminalHost resolves the host (if any) relay reports for
+// projectID/directory. Best-effort like CreateSession's equivalent: an
+// ad-hoc terminal (no projectID) never contacts the bridge, and any bridge
+// failure degrades to "not a host" rather than blocking terminal creation on
+// relay's availability.
+func resolveTerminalHost(projectID, directory string) *HostSpec {
+	if projectID == "" || serviceToken() == "" {
+		return nil
+	}
+	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: projectID, Directory: directory})
+	if err != nil {
+		slog.Warn("resolve host for terminal create failed", "project", projectID, "error", err)
+		return nil
+	}
+	return resp.Host
 }
 
 func defaultHomeDir() string {
