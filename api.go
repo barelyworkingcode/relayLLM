@@ -74,6 +74,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			"directory": session.Directory,
 			"model":     session.Model,
 			"name":      session.Name,
+			"host":      session.getHost(),
 		})
 	})
 
