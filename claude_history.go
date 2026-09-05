@@ -2,19 +2,61 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
-// readClaudeHistory reads conversation history from Claude CLI's JSONL session file.
-// Claude persists complete conversations at ~/.claude/projects/<encoded-dir>/<sessionID>.jsonl
-func readClaudeHistory(directory, claudeSessionID string) ([]Message, error) {
+// encodeClaudeProjectDir applies Claude CLI's project-directory encoding
+// (replace "/" with "-", e.g. "-Users-jonathan-source-project"). Shared by
+// the local and over-ssh history/delete paths so both agree with Claude's own
+// convention.
+func encodeClaudeProjectDir(dir string) string {
+	return strings.ReplaceAll(dir, "/", "-")
+}
+
+// remoteClaudeHistoryTimeout caps the ssh round trip for a host session's
+// history fetch or delete — a WS join or DeleteSession call must never hang
+// on a slow or dead host.
+const remoteClaudeHistoryTimeout = 10 * time.Second
+
+// runSSHCommand execs argv (argv[0] is relay's ssh_argv[0], the rest is the
+// remaining ssh_argv plus flags and the remote command) with a timeout and
+// returns stdout. A func var so hermetic tests can stub the actual ssh
+// invocation without a real remote host.
+var runSSHCommand = func(argv []string, timeout time.Duration) ([]byte, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("empty ssh argv")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	return cmd.Output()
+}
+
+// readClaudeHistory reads conversation history from Claude CLI's JSONL
+// session file. Claude persists complete conversations at
+// ~/.claude/projects/<encoded-dir>/<sessionID>.jsonl. When host is non-nil,
+// directory lives on that SSH host instead of the console: the file is
+// fetched with `cat` over ssh rather than opened locally, directory is never
+// EvalSymlinks'd (a host path can't be resolved from here — see
+// ../relay/docs/ssh-hosts.md's containment rule), and any failure yields
+// empty history rather than a failed join.
+func readClaudeHistory(directory string, host *HostSpec, claudeSessionID string) ([]Message, error) {
 	if claudeSessionID == "" {
 		return nil, fmt.Errorf("no claude session ID")
+	}
+
+	if host != nil {
+		return readClaudeHistoryOverSSH(host, directory, claudeSessionID)
 	}
 
 	// Resolve symlinks to match Claude CLI's path encoding.
@@ -23,8 +65,7 @@ func readClaudeHistory(directory, claudeSessionID string) ([]Message, error) {
 		return nil, fmt.Errorf("eval symlinks: %w", err)
 	}
 
-	// Encode path: replace "/" with "-", producing e.g. "-Users-jonathan-source-project"
-	encoded := strings.ReplaceAll(resolved, "/", "-")
+	encoded := encodeClaudeProjectDir(resolved)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -41,8 +82,50 @@ func readClaudeHistory(directory, claudeSessionID string) ([]Message, error) {
 	defer f.Close()
 
 	sidechainQueue := loadSidechainQueue(filepath.Join(projectDir, claudeSessionID))
+	return parseClaudeHistoryJSONL(f, claudeSessionID, sidechainQueue)
+}
 
-	// Parse JSONL entries, grouping assistant messages by message ID.
+// readClaudeHistoryOverSSH fetches a host session's JSONL transcript with
+// `cat` over ssh instead of a local file read. Sub-agent transcripts are not
+// fetched this way (v1 scope, ../relay/docs/ssh-hosts.md) — the sidechain
+// queue is always empty for a host session.
+func readClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string) ([]Message, error) {
+	if len(host.SSHArgv) == 0 {
+		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
+	}
+	path := "~/.claude/projects/" + encodeClaudeProjectDir(directory) + "/" + claudeSessionID + ".jsonl"
+	remote := RemoteCommand("", []string{"cat", path}, nil)
+	argv := append([]string{host.SSHArgv[0]}, host.SSHArgv[1:]...)
+	argv = append(argv, "-T", "--", remote)
+
+	out, err := runSSHCommand(argv, remoteClaudeHistoryTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("ssh cat history: %w", err)
+	}
+	return parseClaudeHistoryJSONL(bytes.NewReader(out), claudeSessionID, nil)
+}
+
+// deleteClaudeHistoryOverSSH removes a host session's JSONL transcript with
+// `rm -f` over ssh. Best-effort: the caller (ClaudeProvider.DeleteSession via
+// SessionManager.DeleteSession) already deletes relayLLM's own local session
+// record regardless of whether this succeeds.
+func deleteClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string) error {
+	if len(host.SSHArgv) == 0 {
+		return fmt.Errorf("host %q has no ssh_argv", host.Name)
+	}
+	path := "~/.claude/projects/" + encodeClaudeProjectDir(directory) + "/" + claudeSessionID + ".jsonl"
+	remote := RemoteCommand("", []string{"rm", "-f", path}, nil)
+	argv := append([]string{host.SSHArgv[0]}, host.SSHArgv[1:]...)
+	argv = append(argv, "-T", "--", remote)
+
+	_, err := runSSHCommand(argv, remoteClaudeHistoryTimeout)
+	return err
+}
+
+// parseClaudeHistoryJSONL parses a Claude CLI JSONL transcript from r,
+// grouping assistant messages by message ID. sidechainQueue may be nil (a
+// host session fetches no sub-agent transcripts).
+func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue *claudeSidechainQueue) ([]Message, error) {
 	type jsonlEntry struct {
 		Type      string `json:"type"`
 		SessionID string `json:"sessionId"`
@@ -113,7 +196,7 @@ func readClaudeHistory(directory, claudeSessionID string) ([]Message, error) {
 		delete(assistantGroups, msgID)
 	}
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	for scanner.Scan() {

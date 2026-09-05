@@ -46,6 +46,13 @@ type ClaudeProvider struct {
 	hookSocket      string // Unix socket path the hook subprocess dials for /api/permission
 	hookToken       string // bearer token the hook will send when calling /api/permission
 
+	// perms services a host session's control_request permission prompts
+	// (../relay/docs/ssh-hosts.md decision 5). nil-safe: a provider built
+	// without one (existing tests, non-host sessions with no policy match)
+	// simply can't register/deny requests — control_request handling checks
+	// before use.
+	perms *PermissionManager
+
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
 	stopIdleOnce sync.Once     // prevents double-close of stopIdle
@@ -65,7 +72,7 @@ type ClaudeProvider struct {
 	snapNextIdx   int    // next global block index to assign
 }
 
-func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string) *ClaudeProvider {
+func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string, perms *PermissionManager) *ClaudeProvider {
 	return &ClaudeProvider{
 		session:    session,
 		handler:    handler,
@@ -74,6 +81,7 @@ func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookT
 		directory:  session.Directory,
 		hookSocket: hookSocket,
 		hookToken:  hookToken,
+		perms:      perms,
 	}
 }
 
@@ -108,6 +116,25 @@ func (p *ClaudeProvider) relayMCPConfigJSON(projectToken string) string {
 // degrade (they never fall back to the full-access service token).
 func (p *ClaudeProvider) resolveMCPToken() string {
 	return resolveProjectToken(p.session)
+}
+
+// refreshHostSpec re-resolves the session's Host via relay's bridge before
+// each spawn, so a probe update (new claude_path, host record edit) takes
+// effect on the next turn. On any failure — including a standalone run with
+// no service token — it leaves the already-stored Host untouched: a Host is
+// a routing fact, not a credential, so falling back to the stored value (not
+// clearing it) is what lets a persisted host session resume after a
+// relayLLM restart while relay is briefly unreachable.
+func (p *ClaudeProvider) refreshHostSpec() {
+	if serviceToken() == "" {
+		return
+	}
+	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: p.session.ProjectID, Directory: p.directory})
+	if err != nil {
+		slog.Warn("resolve host at spawn failed, using stored value", "session", p.session.ID, "error", err)
+		return
+	}
+	p.session.setHost(resp.Host)
 }
 
 func (p *ClaudeProvider) touchActivity() {
@@ -185,7 +212,14 @@ func (p *ClaudeProvider) buildClaudeArgs(mcpCfg string) []string {
 		}
 	}
 
-	if mcpCfg != "" {
+	// A host session has no PreToolUse hook binary or bridge socket to dial
+	// (neither exists on the host), so permissions ride the stream instead:
+	// --permission-prompt-tool stdio turns each tool call into a
+	// control_request on Claude's own stdout (see processLine). --mcp-config
+	// is never passed on a host — v1 carries no relay MCPs there (decision 6).
+	if p.session.Host != nil {
+		args = append(args, "--permission-prompt-tool", "stdio")
+	} else if mcpCfg != "" {
 		args = append(args, "--mcp-config", mcpCfg)
 	}
 
@@ -222,19 +256,50 @@ func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string
 	return env
 }
 
+// buildHostExec assembles argv to run Claude on a host: relay's ssh_argv
+// prefix, `-T` (no local tty — this is the headless chat process, not a
+// terminal), `--`, and RemoteCommand's base64 launcher wrapping
+// `claude_path <args>` under dir with env. Pure over its inputs (ADR-008): no
+// bridge call, no exec, hermetically testable. env is caller-built so the
+// security invariant — RELAY_LLM_SESSION_ID only, never the hook socket/token
+// or any relay token (decision 6) — is visible at the call site too.
+func buildHostExec(spec *HostSpec, dir string, args []string, env map[string]string) (name string, argv []string) {
+	remote := RemoteCommand(dir, append([]string{spec.ClaudePath}, args...), env)
+	name = spec.SSHArgv[0]
+	argv = append(append([]string{}, spec.SSHArgv[1:]...), "-T", "--", remote)
+	return name, argv
+}
+
 func (p *ClaudeProvider) Start() error {
-	// Resolve the relay project token once and reuse it for both the
-	// --mcp-config child and Claude's own env. Resilient to a relayLLM
-	// restart, which drops the non-persisted session.McpToken.
-	mcpToken := p.resolveMCPToken()
-	mcpCfg := p.relayMCPConfigJSON(mcpToken)
+	p.refreshHostSpec()
 
-	args := p.buildClaudeArgs(mcpCfg)
+	var cmd *exec.Cmd
+	if host := p.session.getHost(); host != nil {
+		if host.ClaudePath == "" {
+			return fmt.Errorf("host %q has no claude: run a probe", host.Name)
+		}
+		args := p.buildClaudeArgs("")
+		env := map[string]string{"RELAY_LLM_SESSION_ID": p.session.ID}
+		name, argv := buildHostExec(host, p.directory, args, env)
+		cmd = exec.Command(name, argv...)
+		// cmd.Dir stays the console's cwd — irrelevant, since the working
+		// directory that matters (dir) is applied by RemoteCommand's `cd` on
+		// the host side.
+		cmd.Env = childBaseEnv()
+	} else {
+		// Resolve the relay project token once and reuse it for both the
+		// --mcp-config child and Claude's own env. Resilient to a relayLLM
+		// restart, which drops the non-persisted session.McpToken.
+		mcpToken := p.resolveMCPToken()
+		mcpCfg := p.relayMCPConfigJSON(mcpToken)
 
-	claudePath := resolveClaudePath()
-	cmd := exec.Command(claudePath, args...)
-	cmd.Dir = p.directory
-	cmd.Env = p.buildClaudeEnv(ensurePath(childBaseEnv()), mcpToken)
+		args := p.buildClaudeArgs(mcpCfg)
+
+		claudePath := resolveClaudePath()
+		cmd = exec.Command(claudePath, args...)
+		cmd.Dir = p.directory
+		cmd.Env = p.buildClaudeEnv(ensurePath(childBaseEnv()), mcpToken)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -343,6 +408,8 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 		p.translateUser(raw)
 	case EvtResult:
 		p.translateResult(raw)
+	case "control_request":
+		p.handleControlRequest(raw)
 	default:
 		// Claude-CLI-specific events outside the canonical trio
 		// (permission-mode, ai-title, custom-title). Forward with v stamped.
@@ -724,6 +791,177 @@ func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
 	p.handler(HandlerMessageComplete, nil)
 }
 
+// ---------------------------------------------------------------------------
+// control_request — host session permissions (../relay/docs/ssh-hosts.md
+// decision 5). A host has no PreToolUse hook binary or bridge socket, so
+// --permission-prompt-tool stdio moves the same question onto Claude's own
+// stdout as a control_request and takes the answer on stdin as a
+// control_response. Console sessions never emit control_request (they keep
+// the hook), so this is a no-op branch for them.
+// ---------------------------------------------------------------------------
+
+// claudeControlRequest mirrors the subset of Claude Agent SDK's
+// control_request envelope this provider understands. RequestID is kept as
+// raw JSON (not decoded to a Go number) so it can be echoed back byte-for-byte
+// in the response regardless of whether Claude sent it as a string or number.
+type claudeControlRequest struct {
+	RequestID json.RawMessage `json:"request_id"`
+	Request   struct {
+		Subtype   string          `json:"subtype"`
+		ToolName  string          `json:"tool_name"`
+		Input     json.RawMessage `json:"input"`
+		ToolUseID string          `json:"tool_use_id"`
+	} `json:"request"`
+}
+
+// controlResponseResult is the inner decision object of a successful
+// control_response — the shape --permission-prompt-tool stdio expects back.
+type controlResponseResult struct {
+	Behavior     string          `json:"behavior"`
+	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"`
+	Message      string          `json:"message,omitempty"`
+}
+
+type controlResponseBody struct {
+	RequestID json.RawMessage         `json:"request_id"`
+	Subtype   string                  `json:"subtype"`
+	Response  *controlResponseResult  `json:"response,omitempty"`
+	Error     string                  `json:"error,omitempty"`
+}
+
+type controlResponseEnvelope struct {
+	Type     string               `json:"type"`
+	Response controlResponseBody  `json:"response"`
+}
+
+// buildControlResponseAllow builds the exact allow control_response bytes
+// pinned in ../relay/docs/ssh-hosts.md. An empty input is normalized to "{}"
+// so updatedInput is always a JSON object, never absent or null.
+func buildControlResponseAllow(requestID, input json.RawMessage) []byte {
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	data, _ := json.Marshal(controlResponseEnvelope{
+		Type: "control_response",
+		Response: controlResponseBody{
+			RequestID: requestID,
+			Subtype:   "success",
+			Response:  &controlResponseResult{Behavior: "allow", UpdatedInput: input},
+		},
+	})
+	return data
+}
+
+// buildControlResponseDeny builds the exact deny control_response bytes
+// pinned in ../relay/docs/ssh-hosts.md.
+func buildControlResponseDeny(requestID json.RawMessage, message string) []byte {
+	data, _ := json.Marshal(controlResponseEnvelope{
+		Type: "control_response",
+		Response: controlResponseBody{
+			RequestID: requestID,
+			Subtype:   "success",
+			Response:  &controlResponseResult{Behavior: "deny", Message: message},
+		},
+	})
+	return data
+}
+
+// buildControlResponseUnsupported answers a control_request subtype this
+// provider doesn't implement, so the CLI never blocks waiting on us.
+func buildControlResponseUnsupported(requestID json.RawMessage) []byte {
+	data, _ := json.Marshal(controlResponseEnvelope{
+		Type: "control_response",
+		Response: controlResponseBody{
+			RequestID: requestID,
+			Subtype:   "error",
+			Error:     "unsupported",
+		},
+	})
+	return data
+}
+
+// handleControlRequest dispatches an incoming control_request line. Only
+// subtype "can_use_tool" is implemented; anything else gets the "unsupported"
+// error response so Claude's stdio permission channel never blocks
+// indefinitely on a request type this provider doesn't know about.
+func (p *ClaudeProvider) handleControlRequest(raw json.RawMessage) {
+	var req claudeControlRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		slog.Warn("claude: malformed control_request", "session", p.session.ID, "error", err)
+		return
+	}
+
+	if req.Request.Subtype != "can_use_tool" {
+		p.writeControlResponse(buildControlResponseUnsupported(req.RequestID))
+		return
+	}
+
+	toolInput := string(req.Request.Input)
+	if toolInput == "" {
+		toolInput = "{}"
+	}
+
+	// Evaluate the session's policy exactly as /api/permission does: deny,
+	// then allow, before ever bothering a viewer.
+	if policy := p.session.Policy; policy != nil {
+		if MatchToolRule(req.Request.ToolName, toolInput, policy.DeniedTools) {
+			p.writeControlResponse(buildControlResponseDeny(req.RequestID, "denied by project policy"))
+			return
+		}
+		if MatchToolRule(req.Request.ToolName, toolInput, policy.AllowedTools) {
+			p.writeControlResponse(buildControlResponseAllow(req.RequestID, req.Request.Input))
+			return
+		}
+	}
+
+	if p.perms == nil {
+		p.writeControlResponse(buildControlResponseDeny(req.RequestID, "no permission manager configured"))
+		return
+	}
+
+	pending, ch := p.perms.CreateRequest(p.session.ID, req.Request.ToolName, toolInput, req.Request.ToolUseID)
+	if p.perms.sink != nil {
+		p.perms.sink.SendToSession(p.session.ID, map[string]interface{}{
+			"type":         WSMsgPermissionRequest,
+			"sessionId":    p.session.ID,
+			"permissionId": pending.ID,
+			"toolName":     req.Request.ToolName,
+			"toolInput":    toolInput,
+			"toolUseId":    req.Request.ToolUseID,
+		})
+	}
+
+	// Resolution (a permission_response from Eve, a timeout, or a
+	// stop/kill's DenyAllForSession) arrives on ch from another goroutine;
+	// wait for it off the stdout-reading goroutine so a slow decision never
+	// stalls reading the rest of Claude's output.
+	go func() {
+		decision := p.perms.WaitForDecision(pending.ID, ch)
+		if decision.Decision == "allow" {
+			p.writeControlResponse(buildControlResponseAllow(req.RequestID, req.Request.Input))
+			return
+		}
+		reason := decision.Reason
+		if reason == "" {
+			reason = "Denied by user"
+		}
+		p.writeControlResponse(buildControlResponseDeny(req.RequestID, reason))
+	}()
+}
+
+// writeControlResponse writes one control_response line to Claude's stdin.
+// Shares p.mu with SendMessage since both write to the same pipe.
+func (p *ClaudeProvider) writeControlResponse(data []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stdin == nil {
+		return
+	}
+	if _, err := p.stdin.Write(append(data, '\n')); err != nil {
+		slog.Warn("claude: write control_response failed", "session", p.session.ID, "error", err)
+	}
+}
+
 func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -782,6 +1020,13 @@ func (p *ClaudeProvider) StopGeneration() {
 }
 
 func (p *ClaudeProvider) Kill() {
+	// The process that would read a control_response is going away — deny
+	// every request that's still waiting on one rather than let it burn its
+	// full 60s timeout. No-op if p.perms is nil or nothing is pending.
+	if p.perms != nil {
+		p.perms.DenyAllForSession(p.session.ID, "session stopped")
+	}
+
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
@@ -856,6 +1101,10 @@ func (p *ClaudeProvider) DeleteSession() error {
 	p.mu.Unlock()
 	if sid == "" {
 		return nil
+	}
+
+	if host := p.session.getHost(); host != nil {
+		return deleteClaudeHistoryOverSSH(host, p.directory, sid)
 	}
 
 	home, err := os.UserHomeDir()
