@@ -20,7 +20,22 @@ import (
 type PiOverlayInputs struct {
 	ServerModels []ServerModelConfig // consumed by pi_models.go to synthesize Eve picker entries
 	RouterPort   string              // empty disables the relay-router provider entry
+	RouterHost   string              // --router-bind value; see routerOverlayHost
 	RouterModels []PiRouterModel
+}
+
+// routerOverlayHost returns the host pi (a subprocess on this same machine)
+// should dial to reach the relay-router. A wildcard or unset bind still
+// accepts loopback connections, so "localhost" is correct there; a bind
+// pinned to one specific non-loopback address is not reachable via
+// "localhost" at all, so that address must be used verbatim instead.
+func routerOverlayHost(bind string) string {
+	switch bind {
+	case "", "0.0.0.0", "::", "[::]":
+		return "localhost"
+	default:
+		return bind
+	}
 }
 
 // PiRouterModel is one row of the router snapshot written into pi's
@@ -187,7 +202,7 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 			models = append(models, map[string]any{"id": rm.ID, "input": input})
 		}
 		providers[piRelayRouterProvider] = map[string]any{
-			"baseUrl": fmt.Sprintf("http://localhost:%s/v1", inputs.RouterPort),
+			"baseUrl": fmt.Sprintf("http://%s:%s/v1", routerOverlayHost(inputs.RouterHost), inputs.RouterPort),
 			"api":     "openai-completions",
 			"apiKey":  "none",
 			"models":  models,

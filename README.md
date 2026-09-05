@@ -51,6 +51,7 @@ and registers a manifest (see [Service manifest](#service-manifest)).
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | llama-server binary |
 | `--mlx-serve-path` | `MLX_SERVE_PATH` | `mlx-serve` (PATH) | mlx-serve binary |
 | `--router-port` | `RELAY_ROUTER_PORT` | *(disabled)* | Port for the unified OpenAI-compatible router |
+| `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Bind address for the relay-router TCP listener; set to `0.0.0.0` to accept connections from other hosts |
 
 Provider configuration lives in `{data-dir}/settings.json`. See
 [Providers](#providers) and the inline schema in `config.go`.
@@ -75,9 +76,10 @@ first use, poll `/health` until ready, and are shared across sessions.
 ### Relay-router (optional)
 
 `--router-port N` exposes a single OpenAI-compatible endpoint
-(`http://localhost:N/v1`) that fronts every managed-server alias and every
-reachable OpenAI endpoint, so any OpenAI client can reach all local models
-through one URL. Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+(`http://127.0.0.1:N/v1` by default — see `--router-bind` above) that fronts
+every managed-server alias and every reachable OpenAI endpoint, so any OpenAI
+client can reach all local models through one URL. Details in
+[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
 Configure `virtual-llms` in `settings.json` to expose a stable model name backed
 by an ordered list of fallback targets. An endpoint target reuses a name from

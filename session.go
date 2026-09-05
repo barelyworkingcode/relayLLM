@@ -118,6 +118,7 @@ type SessionManager struct {
 	piConfig     *PiConfig
 
 	routerPort    string
+	routerHost    string
 	proxyRegistry *ProxyRegistry
 
 	// providerFactory, when non-nil, fully replaces the built-in provider
@@ -206,6 +207,13 @@ func (m *SessionManager) SetRouterPort(port string) {
 	m.routerPort = port
 }
 
+// SetRouterHost records the relay-router's configured bind address
+// (--router-bind). Used to build a URL the pi overlay can actually reach —
+// see piOverlayInputs.
+func (m *SessionManager) SetRouterHost(host string) {
+	m.routerHost = host
+}
+
 func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
 	m.proxyRegistry = r
 }
@@ -216,6 +224,7 @@ func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
 func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	inputs := PiOverlayInputs{
 		RouterPort: m.routerPort,
+		RouterHost: m.routerHost,
 	}
 	// Copy managed models into a fresh slice — never append onto a manager's
 	// config-owned slice (its spare capacity is shared; appending there races

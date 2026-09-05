@@ -219,3 +219,26 @@ func TestPiOverlay_ModelsCarryInputModalities(t *testing.T) {
 		t.Errorf("text-model input = %v, want %v", got["text-model"], want)
 	}
 }
+
+// TestRouterOverlayHost pins the pi-overlay base-URL host selection: a
+// wildcard or unset --router-bind still accepts loopback connections, so pi
+// (a local subprocess) reaches it via "localhost"; a bind pinned to one
+// specific non-loopback address is not reachable via "localhost" at all, so
+// that address must be used verbatim.
+func TestRouterOverlayHost(t *testing.T) {
+	cases := []struct {
+		bind string
+		want string
+	}{
+		{"", "localhost"},
+		{"0.0.0.0", "localhost"},
+		{"::", "localhost"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"192.168.1.5", "192.168.1.5"},
+	}
+	for _, tc := range cases {
+		if got := routerOverlayHost(tc.bind); got != tc.want {
+			t.Errorf("routerOverlayHost(%q) = %q, want %q", tc.bind, got, tc.want)
+		}
+	}
+}
