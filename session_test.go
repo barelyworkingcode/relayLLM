@@ -463,3 +463,91 @@ func TestSession_CreateSession_GeneratesUniqueIDs(t *testing.T) {
 		seen[s.ID] = true
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SSH hosts (../relay/docs/ssh-hosts.md)
+// ---------------------------------------------------------------------------
+
+func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	fb := NewFakeBridge(t)
+	host := &HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	fb.SetHostPtyEnv("/home/admin/proj", host)
+	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+
+	sess, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "fake/m1", "", false, "fake", nil)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Host == nil {
+		t.Fatal("session.Host = nil, want the scripted host")
+	}
+	if sess.Host.Name != "devbox" || sess.Host.ClaudePath != "/opt/homebrew/bin/claude" {
+		t.Errorf("session.Host = %+v, want devbox/claude", sess.Host)
+	}
+}
+
+func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	fb := NewFakeBridge(t)
+	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
+	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+
+	sess, err := mgr.CreateSession("", t.TempDir(), "s", "fake/m1", "", false, "fake", nil)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Host != nil {
+		t.Errorf("session.Host = %+v, want nil for a projectless (ad-hoc) session", sess.Host)
+	}
+	if len(fb.Requests()) != 0 {
+		t.Error("an ad-hoc session must never contact relay's bridge")
+	}
+}
+
+// pi's overlay writes files into the project directory and symlinks into the
+// console's home — neither exists on a host.
+func TestSession_CreateSession_RefusesPiOnHost(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	fb := NewFakeBridge(t)
+	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
+	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+
+	_, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "pi/anthropic/claude-sonnet-4", "", false, "pi", nil)
+	if err == nil {
+		t.Fatal("expected an error creating a pi session on a host project")
+	}
+	if got, want := err.Error(), `provider "pi" is not available on a host project`; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
+// pi on a console (non-host) project is unaffected.
+func TestSession_CreateSession_PiAllowedOnConsole(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	if _, err := mgr.CreateSession("proj-1", t.TempDir(), "s", "pi/anthropic/claude-sonnet-4", "", false, "pi", nil); err != nil {
+		t.Errorf("CreateSession on console project: %v", err)
+	}
+}
+
+// <dir>/CLAUDE.md is on the host, not the console — appendClaudeMd must be a
+// no-op for a host session even when a same-named local file happens to exist.
+func TestSession_CreateSession_SkipsClaudeMdReadOnHost(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	fb := NewFakeBridge(t)
+	fb.SetHostPtyEnv("", &HostSpec{ID: "h1", Name: "devbox"})
+	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("local secrets"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := mgr.CreateSession("proj-1", dir, "s", "fake/m1", "existing prompt", true, "fake", nil)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.SystemPrompt != "existing prompt" {
+		t.Errorf("SystemPrompt = %q, want unchanged (\"existing prompt\") — CLAUDE.md must not be read for a host session", sess.SystemPrompt)
+	}
+}
