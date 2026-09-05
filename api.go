@@ -74,6 +74,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			"directory": session.Directory,
 			"model":     session.Model,
 			"name":      session.Name,
+			"host":      session.getHost(),
 		})
 	})
 
@@ -294,6 +295,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			"name":       session.Name,
 			"directory":  session.Directory,
 			"state":      state,
+			"host":       session.Host.Chip(),
 		})
 	})
 

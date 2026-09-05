@@ -39,6 +39,14 @@ type TerminalSession struct {
 	// terminal, which gets no token.
 	projectID string
 
+	// Host is non-nil when this terminal's project resolves to an SSH host
+	// (../relay/docs/ssh-hosts.md) instead of the console. Set once at
+	// TerminalManager.Create time; unlike a chat session's Host it is never
+	// refreshed mid-life (a terminal's process is short-lived relative to a
+	// probe update, and re-execing an interactive shell mid-session makes no
+	// sense the way respawning a headless CLI does).
+	Host *HostSpec `json:"host,omitempty"`
+
 	// Additional argv tokens appended after the template's resolved Args.
 	// Same ${PROJECT_PATH}/${RELAY_TOKEN} substitution applies. Used by
 	// scheduled PTY tasks to pass per-task commands into a shared template
@@ -73,54 +81,18 @@ type TerminalSession struct {
 	onIdle   func(terminalID string) // called when idle timer fires
 }
 
-// Start spawns the PTY process for this terminal session.
+// Start spawns the PTY process for this terminal session, locally or (when
+// Host is set) over ssh on an SSH host (../relay/docs/ssh-hosts.md).
 func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
-	command := tmpl.ResolveCommand()
-
-	// Resolve relay-managed substitutions before building argv. If the
-	// template isn't relay-managed this is a no-op; if relay is unreachable
-	// or the project can't be resolved, fail closed (don't spawn with
-	// unresolved placeholders).
-	subs, err := resolveTemplateSubs(tmpl, s.Directory, s.projectID)
+	var cmd *exec.Cmd
+	var err error
+	if s.Host != nil {
+		cmd, err = s.buildHostCmd(tmpl)
+	} else {
+		cmd, err = s.buildLocalCmd(tmpl)
+	}
 	if err != nil {
 		return err
-	}
-
-	args := make([]string, 0, len(tmpl.Args)+len(s.extraArgs))
-	for _, a := range tmpl.Args {
-		args = append(args, subs.Expand(a))
-	}
-	for _, a := range s.extraArgs {
-		args = append(args, subs.Expand(a))
-	}
-
-	cmd := exec.Command(command, args...)
-	cmd.Dir = s.Directory
-	cmd.Env = ensurePath(childBaseEnv())
-	// Set TERM and COLORTERM for full 24-bit true color support.
-	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
-	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
-
-	for k, v := range tmpl.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.Expand(v)))
-	}
-
-	// Project-scoped token (empty for ad-hoc terminals); dual-written under the
-	// legacy RELAY_TOKEN name for skills that still reference it.
-	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
-	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
-
-	// Pi project-overlay: when the template runs `pi` in a relay-managed
-	// project and the overlay is enabled in PiConfig, materialize
-	// <projectDir>/.pi/{models,settings,auth}.json and inject
-	// PI_CODING_AGENT_DIR. Same hook the LLM provider uses, so PTY and RPC
-	// pi sessions see the same models/skills inside the project.
-	if isPiCommand(command) && s.piConfig != nil && s.overlayInputsFn != nil {
-		var err error
-		cmd.Env, err = applyPiOverlayEnv(cmd.Env, s.Directory, s.piConfig, s.overlayInputsFn())
-		if err != nil {
-			return fmt.Errorf("terminal pi overlay: %w", err)
-		}
 	}
 
 	cols := s.cols
@@ -161,8 +133,121 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 	go s.readLoop()
 	go s.waitForExit()
 
-	slog.Info("terminal started", "id", s.ID, "template", s.TemplateID, "command", command, "pid", cmd.Process.Pid)
+	slog.Info("terminal started", "id", s.ID, "template", s.TemplateID, "command", cmd.Path, "pid", cmd.Process.Pid)
 	return nil
+}
+
+// buildLocalCmd assembles the local exec.Cmd for a console (non-host)
+// terminal — the same construction Start always did before ssh hosts existed.
+func (s *TerminalSession) buildLocalCmd(tmpl TerminalTemplate) (*exec.Cmd, error) {
+	command := tmpl.ResolveCommand()
+
+	// Resolve relay-managed substitutions before building argv. If the
+	// template isn't relay-managed this is a no-op; if relay is unreachable
+	// or the project can't be resolved, fail closed (don't spawn with
+	// unresolved placeholders).
+	subs, err := resolveTemplateSubs(tmpl, s.Directory, s.projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	args := make([]string, 0, len(tmpl.Args)+len(s.extraArgs))
+	for _, a := range tmpl.Args {
+		args = append(args, subs.Expand(a))
+	}
+	for _, a := range s.extraArgs {
+		args = append(args, subs.Expand(a))
+	}
+
+	cmd := exec.Command(command, args...)
+	cmd.Dir = s.Directory
+	cmd.Env = ensurePath(childBaseEnv())
+	// Set TERM and COLORTERM for full 24-bit true color support.
+	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
+	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
+
+	for k, v := range tmpl.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.Expand(v)))
+	}
+
+	// Project-scoped token (empty for ad-hoc terminals); dual-written under the
+	// legacy RELAY_TOKEN name for skills that still reference it.
+	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
+	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
+
+	// Pi project-overlay: when the template runs `pi` in a relay-managed
+	// project and the overlay is enabled in PiConfig, materialize
+	// <projectDir>/.pi/{models,settings,auth}.json and inject
+	// PI_CODING_AGENT_DIR. Same hook the LLM provider uses, so PTY and RPC
+	// pi sessions see the same models/skills inside the project.
+	if isPiCommand(command) && s.piConfig != nil && s.overlayInputsFn != nil {
+		var err error
+		cmd.Env, err = applyPiOverlayEnv(cmd.Env, s.Directory, s.piConfig, s.overlayInputsFn())
+		if err != nil {
+			return nil, fmt.Errorf("terminal pi overlay: %w", err)
+		}
+	}
+	return cmd, nil
+}
+
+// buildHostCmd assembles the local exec.Cmd that runs ssh + a remote command
+// on a host terminal's SSH host under a local pty (../relay/docs/ssh-hosts.md).
+// No relay-managed substitution, project token, or pi overlay applies here —
+// v1 carries none of that onto a host (decision 6).
+func (s *TerminalSession) buildHostCmd(tmpl TerminalTemplate) (*exec.Cmd, error) {
+	host := s.Host
+	if len(host.SSHArgv) == 0 {
+		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
+	}
+	if tmpl.ID == "claude" && host.ClaudePath == "" {
+		return nil, fmt.Errorf("host %q has no claude: run a probe", host.Name)
+	}
+
+	args := make([]string, 0, len(tmpl.Args)+len(s.extraArgs))
+	args = append(args, tmpl.Args...)
+	args = append(args, s.extraArgs...)
+
+	name, argv := buildHostTerminalExec(host, tmpl.ID, s.Directory, tmpl.Command, args)
+	cmd := exec.Command(name, argv...)
+	cmd.Env = childBaseEnv()
+	return cmd, nil
+}
+
+// buildHostTerminalExec assembles argv to open a terminal on a host under a
+// local pty: ssh_argv + `-tt` (allocate a remote tty — `-T` would leave the
+// interactive shell with none) + `--` + <remote>. tmplID selects the remote
+// command shape (../relay/docs/ssh-hosts.md):
+//   - "" or "shell": the host's own login shell, `exec "$SHELL" -l`
+//   - "claude": claude_path + args, via RemoteCommand's quoted argv form
+//   - anything else: command + args through the host's interactive login
+//     shell (`-lic`) so its PATH resolves the command, mirroring what a
+//     locally-resolved template assumes about the console's PATH
+//
+// TERM=xterm-256color is injected via `exec env 'TERM'='xterm-256color' …`
+// rather than RemoteCommand's argv-env mechanism, because `"$SHELL"` must
+// reach the host unquoted (decision 8) for the host's own shell to expand it,
+// and RemoteCommand always single-quotes every argv token.
+func buildHostTerminalExec(spec *HostSpec, tmplID, dir, command string, args []string) (name string, argv []string) {
+	var remote string
+	switch tmplID {
+	case "", "shell":
+		remote = RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -l`)
+	case "claude":
+		full := append([]string{spec.ClaudePath}, args...)
+		remote = RemoteCommand(dir, full, map[string]string{"TERM": "xterm-256color"})
+	default:
+		line := shellQuoteJoin(append([]string{command}, args...))
+		remote = RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -lic `+singleQuote(line))
+	}
+	name = spec.SSHArgv[0]
+	argv = append(append([]string{}, spec.SSHArgv[1:]...), "-tt", "--", remote)
+	return name, argv
+}
+
+// termEnvPrefix renders the `exec env 'TERM'='xterm-256color' ` prefix shared
+// by both non-RemoteCommand branches of buildHostTerminalExec.
+func termEnvPrefix() string {
+	return "exec env " + singleQuote("TERM") + "=" + singleQuote("xterm-256color") + " "
 }
 
 func (s *TerminalSession) readLoop() {
