@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -155,6 +156,77 @@ func TestSec_ClaudeEnv_EmptyProjectTokenInjectsNoToken(t *testing.T) {
 	for _, key := range []string{envProjectToken, envProjectTokenLegacy, envServiceToken, envServiceTokenLegacy} {
 		if v, ok := envValue(env, key); ok {
 			t.Errorf("empty project token still set %s=%q; must be absent (fail closed)", key, v)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Host session isolation (provider_claude.go, ../relay/docs/ssh-hosts.md)
+// ---------------------------------------------------------------------------
+//
+// A host has no PreToolUse hook binary or bridge socket, and v1 carries no
+// relay MCPs or project tokens there (decision 6). A host exec must never
+// carry the hook socket, hook token, or any relay token in its argv or env —
+// leaking any of those would hand the remote host credentials that assume a
+// trusted, same-machine child.
+
+func TestSec_HostExec_ArgvNeverContainsHookOrRelaySecrets(t *testing.T) {
+	spec := &HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	session := &Session{ID: "sess-1", Model: "sonnet", Host: spec}
+	p := claudeArgsProvider(session)
+	args := p.buildClaudeArgs("")
+
+	env := map[string]string{"RELAY_LLM_SESSION_ID": session.ID}
+	_, argv := buildHostExec(spec, "/proj", args, env)
+	// The remote command is base64-encoded inside argv, so decode it before
+	// grepping for secrets — a plaintext substring check on argv itself would
+	// only ever see the encoded form and always pass, vacuously.
+	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	joined := strings.Join(argv[:len(argv)-1], " ") + " " + decoded
+
+	for _, secret := range []string{"hook.sock", "RELAY_LLM_HOOK_SOCKET", "RELAY_LLM_HOOK_TOKEN", "RELAY_PROJECT_TOKEN", "RELAY_TOKEN", "RELAY_SERVICE_TOKEN"} {
+		if strings.Contains(joined, secret) {
+			t.Errorf("host exec argv leaked %q: %s", secret, joined)
+		}
+	}
+	if !strings.Contains(joined, "RELAY_LLM_SESSION_ID") {
+		t.Error("host exec must still carry RELAY_LLM_SESSION_ID")
+	}
+}
+
+func TestSec_HostExec_EnvIsSessionIDOnly(t *testing.T) {
+	spec := &HostSpec{SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	env := map[string]string{"RELAY_LLM_SESSION_ID": "sess-1"}
+	_, argv := buildHostExec(spec, "/proj", []string{"--print"}, env)
+
+	// The env is baked into the remote command's `exec env 'K'='v' …` clause;
+	// assert the decoded script carries exactly one env assignment.
+	remote := argv[len(argv)-1]
+	decoded := RemoteShellCommandDecodedForTest(remote)
+	count := strings.Count(decoded, "'='")
+	// buildRemoteScript never quotes '=' itself; each K=V pair renders as
+	// 'KEY'='VALUE', so a single assignment produces exactly one such pair.
+	if count != 1 {
+		t.Errorf("decoded remote script has %d env assignments, want 1: %s", count, decoded)
+	}
+	if !strings.Contains(decoded, "'RELAY_LLM_SESSION_ID'='sess-1'") {
+		t.Errorf("decoded remote script missing RELAY_LLM_SESSION_ID: %s", decoded)
+	}
+}
+
+// Claude's own child env for a host spawn (childBaseEnv, no ensurePath/token
+// injection) must not carry any relay secret either — belt and suspenders
+// alongside the argv guard above, since the env is what a leaked debug log
+// would actually dump.
+func TestSec_HostSpawn_ChildBaseEnvHasNoRelaySecrets(t *testing.T) {
+	t.Setenv(envServiceToken, "svc-secret")
+	t.Setenv(envProjectToken, "proj-secret")
+	t.Setenv(envProjectTokenLegacy, "proj-secret-legacy")
+
+	env := childBaseEnv()
+	for _, k := range []string{envServiceToken, envServiceTokenLegacy, envFrontendToken, envProjectToken, envProjectTokenLegacy} {
+		if envHasKey(env, k) {
+			t.Errorf("host spawn child env leaked %s", k)
 		}
 	}
 }

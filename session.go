@@ -43,9 +43,32 @@ type Session struct {
 	PermissionMode string            `json:"permissionMode,omitempty"`
 	Policy         *PermissionPolicy `json:"policy,omitempty"`
 
+	// Host is non-nil when this session's project lives on an SSH host
+	// (../relay/docs/ssh-hosts.md) rather than the console. Resolved via
+	// relay's bridge at create time and re-resolved at each provider spawn;
+	// the stored value is the fallback when the bridge is unavailable, so a
+	// persisted host session survives a relayLLM restart.
+	Host *HostSpec `json:"host,omitempty"`
+
 	provider   Provider
 	processing bool
 	mu         sync.Mutex
+}
+
+// getHost returns Host, safe for concurrent use (Host is refreshed from a
+// provider's spawn goroutine while other goroutines — WS join, ListSessions —
+// may read it concurrently).
+func (s *Session) getHost() *HostSpec {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Host
+}
+
+// setHost sets Host, safe for concurrent use.
+func (s *Session) setHost(h *HostSpec) {
+	s.mu.Lock()
+	s.Host = h
+	s.mu.Unlock()
 }
 
 // getProvider returns the current provider, safe for concurrent use.
@@ -274,8 +297,32 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		providerType = deriveProviderType(model, m.openaiConfig, m.llamaConfig(), m.mlxConfig())
 	}
 
-	// For non-Claude providers, prepend CLAUDE.md content to system prompt if requested.
-	if appendClaudeMd && providerType != "claude" && dir != "" {
+	// Resolve the host (if any) up front, before any local directory access —
+	// a host project's path lives on another machine and must never be
+	// stat'd, realpath'd or created here (../relay/docs/ssh-hosts.md). Best
+	// effort: a bridge failure degrades to "not a host" rather than blocking
+	// every session create on relay's availability; a genuinely host-scoped
+	// session that can't actually resolve fails later, at provider Start.
+	var host *HostSpec
+	if projectID != "" && serviceToken() != "" {
+		if resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: projectID, Directory: dir}); err == nil {
+			host = resp.Host
+		} else {
+			slog.Warn("resolve host for session create failed", "project", projectID, "error", err)
+		}
+	}
+
+	// pi's overlay writes files into the project directory and symlinks into
+	// the console's home — neither exists on a host (decision "pi provider on
+	// a host" in ../relay/docs/ssh-hosts.md).
+	if host != nil && providerType == "pi" {
+		return nil, fmt.Errorf("provider \"pi\" is not available on a host project")
+	}
+
+	// For non-Claude providers, prepend CLAUDE.md content to system prompt if
+	// requested. Skipped for a host project: <dir>/CLAUDE.md lives on the
+	// host, not the console.
+	if appendClaudeMd && providerType != "claude" && dir != "" && host == nil {
 		if content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md")); err == nil {
 			if systemPrompt != "" {
 				systemPrompt = string(content) + "\n---\n" + systemPrompt
@@ -320,6 +367,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		Headless:       parsedSettings.Headless,
 		PermissionMode: mode,
 		Policy:         parsedSettings.PermissionPolicy,
+		Host:           host,
 	}
 
 	m.mu.Lock()
@@ -460,10 +508,16 @@ func (m *SessionManager) initProvider(session *Session) error {
 		provider = p
 
 	default: // "claude" or unset (backward compat)
-		if err := m.ensureHookConfig(session.Directory); err != nil {
-			slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
+		// A host session has no PreToolUse hook (permissions ride the
+		// control_request stream instead — see provider_claude.go) and its
+		// directory lives on another machine, so writing .claude/settings.local.json
+		// here would both be pointless and create a bogus local directory tree.
+		if session.getHost() == nil {
+			if err := m.ensureHookConfig(session.Directory); err != nil {
+				slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
+			}
 		}
-		p := NewClaudeProvider(session, handler, m.hookSocket, m.hookToken)
+		p := NewClaudeProvider(session, handler, m.hookSocket, m.hookToken, m.perms)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
@@ -819,6 +873,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 		messageCount := len(s.Messages)
 		lastMsgAt := lastMessageAt(s.Messages)
 		preview := sessionPreview(s.Messages)
+		host := s.Host
 		s.mu.Unlock()
 
 		list = append(list, map[string]interface{}{
@@ -833,6 +888,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 			"messageCount":  messageCount,
 			"lastMessageAt": lastMsgAt,
 			"preview":       preview,
+			"host":          host,
 		})
 	}
 	m.mu.RUnlock()
@@ -859,6 +915,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 				"messageCount":  len(s.Messages),
 				"lastMessageAt": lastMessageAt(s.Messages),
 				"preview":       sessionPreview(s.Messages),
+				"host":          s.Host,
 			})
 		}
 	}
