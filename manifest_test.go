@@ -75,6 +75,16 @@ func (b *FakeBridge) SetResponse(resp relayBridgeResponse) {
 	b.respondWith = resp
 }
 
+// SetHostPtyEnv scripts a ResolvePtyEnv response carrying a host, letting a
+// test simulate a project that lives on an SSH host instead of the console.
+func (b *FakeBridge) SetHostPtyEnv(workingDir string, host *HostSpec) {
+	data, err := json.Marshal(RelayPtyEnvResponse{WorkingDir: workingDir, Host: host})
+	if err != nil {
+		panic(err) // test-only helper; a marshal failure here is a test bug
+	}
+	b.SetResponse(relayBridgeResponse{Type: respPtyEnv, Data: data})
+}
+
 // Requests returns a snapshot of every request the bridge has received.
 func (b *FakeBridge) Requests() []relayBridgeRequest {
 	b.mu.Lock()
