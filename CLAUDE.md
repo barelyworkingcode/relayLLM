@@ -67,7 +67,7 @@ cmd/hook/                 Compiled PreToolUse hook binary
 
 ## Relay-router (`relay_router.go`)
 
-Optional unified OpenAI-compatible router (`--router-port` / `RELAY_ROUTER_PORT`). Single TCP listener that aggregates every locally-routable model behind one endpoint:
+Optional unified OpenAI-compatible router (`--router-port` / `RELAY_ROUTER_PORT`, bound to `--router-bind` / `RELAY_ROUTER_BIND`, default `127.0.0.1`). Single TCP listener that aggregates every locally-routable model behind one endpoint:
 
 - `GET /v1/models` and `GET /models` — lists managed-server aliases (bare, e.g. `qwen3-8b` — llama-server and mlx-serve alike), configured virtual names, and every reachable OpenAI-endpoint model prefixed with the endpoint name (e.g. `omlx/Qwen3.5-27B`). Rows are built in that same order — managed, then virtual, then endpoint — deduplicated against one shared `seen` set, because it's also `handleProxy`'s dispatch priority: a name colliding across two categories (e.g. a virtual literally named `<endpoint>/<id>`) must list as whichever one dispatch will actually invoke, or the catalog lies about what a request for that id will do.
 - `POST /models/load` / `POST /models/unload` — `{"model": "<alias>"}`, managed aliases only (endpoint-prefixed models 400). Load is **asynchronous**: it starts the launch and returns immediately, because llama.cpp-compatible clients put a short timeout on the request itself (pi uses 15s) and a cold 40GB model would otherwise abort it. Poll `/models` for `status.value` to reach `loaded`. Unload is idempotent.

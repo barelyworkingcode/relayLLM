@@ -26,6 +26,7 @@ func main() {
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
 	mlxServePath := flag.String("mlx-serve-path", envOrDefault("MLX_SERVE_PATH", ""), "Path to mlx-serve binary (default: mlx-serve on PATH)")
 	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve) + OpenAI endpoints (empty to disable)")
+	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Bind address for the relay-router TCP listener. Set to 0.0.0.0 to accept connections from other hosts.")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -202,16 +203,14 @@ func main() {
 	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
 
-	var routerAddr string
-	if *routerPort != "" {
-		routerAddr = ":" + *routerPort
-	}
+	routerAddr := routerListenAddr(*routerBind, *routerPort)
 	// cfg.Router is passed straight into StartRelayRouter rather than set on
 	// the router afterward — see StartRelayRouter's doc comment for why a
 	// separate post-construction setter call raced the router's first
 	// accepted connection.
 	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual, cfg.Router)
 	sessions.SetRouterPort(*routerPort)
+	sessions.SetRouterHost(*routerBind)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
 
 	mux := http.NewServeMux()
@@ -414,4 +413,15 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// routerListenAddr composes the relay-router's listen address from
+// --router-bind and --router-port. An empty port means the router is
+// disabled (StartRelayRouter treats "" as "don't listen"), so bind is
+// irrelevant and deliberately not defaulted in that case.
+func routerListenAddr(bind, port string) string {
+	if port == "" {
+		return ""
+	}
+	return net.JoinHostPort(bind, port)
 }
