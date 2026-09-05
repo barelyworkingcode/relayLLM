@@ -294,6 +294,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			"name":       session.Name,
 			"directory":  session.Directory,
 			"state":      state,
+			"host":       session.Host.Chip(),
 		})
 	})
 
