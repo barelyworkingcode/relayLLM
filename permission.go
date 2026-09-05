@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -64,17 +65,28 @@ type PermissionRequest struct {
 	ToolUseID string `json:"toolUseId"`
 }
 
-// PermissionManager tracks pending permission requests.
+// pendingPermission pairs a decision channel with the session it belongs to,
+// so a session-wide event (stop, kill) can resolve every request that
+// session owns without the caller having to track ids itself.
+type pendingPermission struct {
+	sessionID string
+	ch        chan PermissionDecision
+}
+
+// PermissionManager tracks pending permission requests. Both the hook binary
+// (HTTP POST /api/permission) and a host session's control_request stream
+// (provider_claude.go) register through the same CreateRequest/Resolve pair,
+// so a permission_response from Eve resolves either path transparently.
 type PermissionManager struct {
 	mu      sync.Mutex
-	pending map[string]chan PermissionDecision
+	pending map[string]pendingPermission
 	sink    EventSink
 	clock   Clock
 }
 
 func NewPermissionManager() *PermissionManager {
 	return &PermissionManager{
-		pending: make(map[string]chan PermissionDecision),
+		pending: make(map[string]pendingPermission),
 		clock:   DefaultClock,
 	}
 }
@@ -98,7 +110,7 @@ func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput, toolUs
 
 	id := uuid.New().String()
 	ch := make(chan PermissionDecision, 1)
-	m.pending[id] = ch
+	m.pending[id] = pendingPermission{sessionID: sessionID, ch: ch}
 
 	return PermissionRequest{
 		ID:        id,
@@ -112,7 +124,7 @@ func (m *PermissionManager) CreateRequest(sessionID, toolName, toolInput, toolUs
 // Resolve resolves a pending permission request with the given decision.
 func (m *PermissionManager) Resolve(permissionID string, decision PermissionDecision) bool {
 	m.mu.Lock()
-	ch, ok := m.pending[permissionID]
+	p, ok := m.pending[permissionID]
 	if ok {
 		delete(m.pending, permissionID)
 	}
@@ -122,7 +134,7 @@ func (m *PermissionManager) Resolve(permissionID string, decision PermissionDeci
 		return false
 	}
 
-	ch <- decision
+	p.ch <- decision
 	return true
 }
 
@@ -131,4 +143,40 @@ func (m *PermissionManager) Cleanup(permissionID string) {
 	m.mu.Lock()
 	delete(m.pending, permissionID)
 	m.mu.Unlock()
+}
+
+// WaitForDecision blocks until the pending request identified by id resolves
+// or 60s elapses, in which case it is cleaned up and denied with reason
+// "No response" — the control_request path's timeout (../relay/docs/ssh-hosts.md).
+// Shared timeout plumbing for any caller that isn't the HTTP hook handler
+// (which has its own inline select because it also needs to write the HTTP
+// response, not just a decision value).
+func (m *PermissionManager) WaitForDecision(id string, ch chan PermissionDecision) PermissionDecision {
+	select {
+	case d := <-ch:
+		return d
+	case <-m.clock.After(60 * time.Second):
+		m.Cleanup(id)
+		return PermissionDecision{Decision: "deny", Reason: "No response"}
+	}
+}
+
+// DenyAllForSession resolves every pending request belonging to sessionID
+// with a deny decision. Used when a session's provider stops or is killed:
+// the process that would have read the control_response is gone, so there is
+// no reason to wait out the remaining timeout.
+func (m *PermissionManager) DenyAllForSession(sessionID, reason string) {
+	m.mu.Lock()
+	var chans []chan PermissionDecision
+	for id, p := range m.pending {
+		if p.sessionID == sessionID {
+			chans = append(chans, p.ch)
+			delete(m.pending, id)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, ch := range chans {
+		ch <- PermissionDecision{Decision: "deny", Reason: reason}
+	}
 }

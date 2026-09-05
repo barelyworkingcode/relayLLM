@@ -76,7 +76,7 @@ func TestReadClaudeHistory_PreservesThinkingBlocks(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, sessionID)
+	msgs, err := readClaudeHistory(dir, nil, sessionID)
 	if err != nil {
 		t.Fatalf("readClaudeHistory: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestReadClaudeHistory_SurfacesToolResultsAsRoleTool(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, sessionID)
+	msgs, err := readClaudeHistory(dir, nil, sessionID)
 	if err != nil {
 		t.Fatalf("readClaudeHistory: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestReadClaudeHistory_EmbedsSidechainTranscriptOnAgentToolUse(t *testing.T)
 	now := time.Now()
 	_ = os.Chtimes(subPath, now, now)
 
-	msgs, err := readClaudeHistory(dir, sessionID)
+	msgs, err := readClaudeHistory(dir, nil, sessionID)
 	if err != nil {
 		t.Fatalf("readClaudeHistory: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestReadClaudeHistory_NoSidechainsLeavesAssistantUntouched(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, sessionID)
+	msgs, err := readClaudeHistory(dir, nil, sessionID)
 	if err != nil {
 		t.Fatalf("readClaudeHistory: %v", err)
 	}

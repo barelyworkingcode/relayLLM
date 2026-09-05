@@ -214,3 +214,105 @@ func TestBuildClaudeEnv_HeadlessFlagTracksMode(t *testing.T) {
 		t.Error("non-headless session must NOT set RELAY_LLM_HEADLESS")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// buildClaudeArgs — host branch (../relay/docs/ssh-hosts.md decision 5/6)
+// ---------------------------------------------------------------------------
+
+func TestBuildClaudeArgs_Host_AddsStdioPromptToolOmitsMCPConfig(t *testing.T) {
+	p := claudeArgsProvider(&Session{ID: "s1", Model: "sonnet", Host: &HostSpec{ID: "h1", Name: "devbox"}})
+	args := p.buildClaudeArgs(`{"mcpServers":{}}`)
+
+	if v, ok := spawnFlagValue(args, "--permission-prompt-tool"); !ok || v != "stdio" {
+		t.Errorf("--permission-prompt-tool = %q (present=%v); want stdio", v, ok)
+	}
+	if spawnHasFlag(args, "--mcp-config") {
+		t.Error("a host session must never pass --mcp-config, even when mcpCfg is non-empty")
+	}
+}
+
+func TestBuildClaudeArgs_Console_NeverAddsStdioPromptTool(t *testing.T) {
+	p := claudeArgsProvider(&Session{ID: "s1", Model: "sonnet"})
+	if spawnHasFlag(p.buildClaudeArgs(""), "--permission-prompt-tool") {
+		t.Error("a console session must not pass --permission-prompt-tool")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildHostExec
+// ---------------------------------------------------------------------------
+
+func TestBuildHostExec_NameIsSSHArgv0(t *testing.T) {
+	spec := &HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	name, _ := buildHostExec(spec, "/home/a b", []string{"--print"}, map[string]string{"RELAY_LLM_SESSION_ID": "sid-1"})
+	if name != "ssh" {
+		t.Errorf("name = %q, want ssh", name)
+	}
+}
+
+func TestBuildHostExec_ArgvShapeAndTrailingRemoteCommand(t *testing.T) {
+	spec := &HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	args := []string{"--print", "--model", "sonnet"}
+	env := map[string]string{"RELAY_LLM_SESSION_ID": "sid-1"}
+
+	_, argv := buildHostExec(spec, "/home/a b", args, env)
+
+	wantPrefix := []string{"-o", "BatchMode=yes", "admin@localhost", "-T", "--"}
+	if len(argv) != len(wantPrefix)+1 {
+		t.Fatalf("argv len = %d, want %d (prefix + one remote-command token)", len(argv), len(wantPrefix)+1)
+	}
+	for i, want := range wantPrefix {
+		if argv[i] != want {
+			t.Errorf("argv[%d] = %q, want %q", i, argv[i], want)
+		}
+	}
+
+	wantRemote := RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env)
+	if argv[len(argv)-1] != wantRemote {
+		t.Errorf("trailing remote command = %q, want %q", argv[len(argv)-1], wantRemote)
+	}
+}
+
+// TestBuildHostExec_ExactArgvFixture pins the exact argv for a session in
+// "/home/a b" on a host whose ssh_argv is
+// ["ssh","-o","BatchMode=yes","admin@localhost"] and claude_path
+// "/opt/homebrew/bin/claude", model sonnet, default permission mode — the
+// scenario named in this feature's task report.
+func TestBuildHostExec_ExactArgvFixture(t *testing.T) {
+	spec := &HostSpec{
+		SSHArgv:    []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"},
+		ClaudePath: "/opt/homebrew/bin/claude",
+	}
+	session := &Session{ID: "sess-123", Model: "sonnet", Host: spec}
+	p := claudeArgsProvider(session)
+	args := p.buildClaudeArgs("") // host branch: mcpCfg is always ignored
+
+	env := map[string]string{"RELAY_LLM_SESSION_ID": session.ID}
+	name, argv := buildHostExec(spec, "/home/a b", args, env)
+
+	if name != "ssh" {
+		t.Fatalf("name = %q, want ssh", name)
+	}
+
+	wantScript := `cd '/home/a b' && exec env 'RELAY_LLM_SESSION_ID'='sess-123' ` +
+		`'/opt/homebrew/bin/claude' '--print' '--output-format' 'stream-json' ` +
+		`'--input-format' 'stream-json' '--verbose' '--model' 'sonnet' ` +
+		`'--permission-prompt-tool' 'stdio'`
+	wantRemote := RemoteShellCommandDecodedForTest(RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env))
+	if wantRemote != wantScript {
+		t.Fatalf("test fixture drifted from buildRemoteScript output:\n got %q\nwant %q", wantRemote, wantScript)
+	}
+
+	wantArgv := []string{
+		"-o", "BatchMode=yes", "admin@localhost", "-T", "--",
+		RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env),
+	}
+	if len(argv) != len(wantArgv) {
+		t.Fatalf("argv = %v, want %v", argv, wantArgv)
+	}
+	for i := range wantArgv {
+		if argv[i] != wantArgv[i] {
+			t.Errorf("argv[%d] = %q, want %q", i, argv[i], wantArgv[i])
+		}
+	}
+}

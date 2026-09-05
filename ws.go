@@ -232,7 +232,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		claudeSessionID = ps.ClaudeSessionID
 	}
 	if claudeSessionID != "" {
-		if h, err := readClaudeHistory(session.Directory, claudeSessionID); err == nil && len(h) > 0 {
+		if h, err := readClaudeHistory(session.Directory, session.getHost(), claudeSessionID); err == nil && len(h) > 0 {
 			history = h
 		} else if err != nil {
 			slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
@@ -261,6 +261,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		"stats":           stats,
 		"headless":        session.Headless,
 		"protocolVersion": ProtocolVersion,
+		"host":            session.getHost(),
 	})
 }
 
