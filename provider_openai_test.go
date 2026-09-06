@@ -248,7 +248,7 @@ func TestOpenAIAppendToolResult(t *testing.T) {
 func TestOpenAIConfigLoad_File(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "endpoints.json")
-	body := `{"endpoints":[{"name":"lm","baseURL":"http://localhost:1234/v1","apiKey":"k","group":"LM"},{"name":"oai","baseURL":"http://x/","apiKey":""}]}`
+	body := `{"endpoints":[{"name":"lm","baseURL":"http://localhost:1234/v1","apiKey":"k","group":"LM"},{"name":"oai","baseURL":"http://127.0.0.1/","apiKey":""}]}`
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestOpenAIConfigLoad_File(t *testing.T) {
 		t.Errorf("lm = %+v", got)
 	}
 	// Trailing slash stripped; Group defaults to Name when empty.
-	if got := cfg.Find("oai"); got == nil || got.BaseURL != "http://x" || got.Group != "oai" {
+	if got := cfg.Find("oai"); got == nil || got.BaseURL != "http://127.0.0.1" || got.Group != "oai" {
 		t.Errorf("oai = %+v", got)
 	}
 	// Unknown lookup returns nil.
@@ -282,7 +282,7 @@ func TestOpenAIConfigLoad_EnvFallback(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "missing.json")
 
-	t.Setenv("OPENAI_BASE_URL", "http://env-server/v1")
+	t.Setenv("OPENAI_BASE_URL", "http://127.0.0.1/v1")
 	t.Setenv("OPENAI_API_KEY", "env-key")
 	t.Setenv("OPENAI_ENDPOINT_NAME", "env-endpoint")
 
@@ -294,7 +294,7 @@ func TestOpenAIConfigLoad_EnvFallback(t *testing.T) {
 		t.Fatalf("endpoints = %d", len(cfg.Endpoints))
 	}
 	e := cfg.Endpoints[0]
-	if e.Name != "env-endpoint" || e.BaseURL != "http://env-server/v1" || e.APIKey != "env-key" {
+	if e.Name != "env-endpoint" || e.BaseURL != "http://127.0.0.1/v1" || e.APIKey != "env-key" {
 		t.Errorf("env endpoint = %+v", e)
 	}
 }
