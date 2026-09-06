@@ -1,5 +1,7 @@
 package main
 
+import "net/http"
+
 // OpenAIEndpoint describes a single OpenAI-compatible chat completions server.
 // Multiple endpoints can be configured side-by-side (Ollama's /v1, LM Studio,
 // OMLX, OpenAI proper, etc.). The Name field is used as a routing prefix on
@@ -17,6 +19,44 @@ type OpenAIEndpoint struct {
 	APIKey  string `json:"apiKey"`           // optional; sent as "Authorization: Bearer ..."
 	Group   string `json:"group"`            // display group in model picker; defaults to Name
 	Strict  bool   `json:"strict,omitempty"` // gate non-standard request fields
+
+	// CAFile and PinSHA256 pin the TLS trust anchor for this endpoint's https
+	// hop. Both are validated and turned into a cached transport at config
+	// load — see endpoint_tls.go. Neither has any effect on an http baseURL;
+	// setting either alongside one is a config error, not a silent no-op.
+	CAFile    string   `json:"caFile,omitempty"`    // PEM bundle; when set it is the ONLY trust anchor (system roots not consulted)
+	PinSHA256 []string `json:"pinSHA256,omitempty"` // SHA-256 hex fingerprints of the DER leaf certificate; colons optional, case-insensitive
+
+	// transport and virtualTransport are built once at config load by
+	// prepareEndpointTransports and cached here. Unexported so JSON
+	// (un)marshalling never touches them. Nil for an endpoint that never went
+	// through config load (hand-built in tests, or the zero value used by
+	// NewManagedChatTransport) — Transport()/VirtualTransport() fall back to
+	// the stdlib defaults in that case, so those call sites keep working.
+	transport        *http.Transport
+	virtualTransport *http.Transport
+}
+
+// Transport returns this endpoint's cached, TLS-pinned transport (or an
+// unmodified clone of http.DefaultTransport for an http endpoint), built once
+// at config load. Falls back to http.DefaultTransport when the endpoint was
+// never prepared by config load.
+func (ep OpenAIEndpoint) Transport() http.RoundTripper {
+	if ep.transport != nil {
+		return ep.transport
+	}
+	return http.DefaultTransport
+}
+
+// VirtualTransport is Transport's counterpart for the virtual-model retry
+// path (see virtualDialTransport): same TLS pinning, but built from a
+// transport with a short dial timeout so a black-holed candidate still fails
+// over promptly even when pinned.
+func (ep OpenAIEndpoint) VirtualTransport() http.RoundTripper {
+	if ep.virtualTransport != nil {
+		return ep.virtualTransport
+	}
+	return virtualDialTransport
 }
 
 // OpenAIConfig is the top-level config file structure.

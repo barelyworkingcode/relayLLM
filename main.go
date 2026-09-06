@@ -27,7 +27,18 @@ func main() {
 	mlxServePath := flag.String("mlx-serve-path", envOrDefault("MLX_SERVE_PATH", ""), "Path to mlx-serve binary (default: mlx-serve on PATH)")
 	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve) + OpenAI endpoints (empty to disable)")
 	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Bind address for the relay-router TCP listener. Set to 0.0.0.0 to accept connections from other hosts.")
+	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
+	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
 	flag.Parse()
+
+	if (*routerTLSCert == "") != (*routerTLSKey == "") {
+		missing := "--router-tls-cert/RELAY_LLM_ROUTER_TLS_CERT"
+		if *routerTLSCert != "" {
+			missing = "--router-tls-key/RELAY_LLM_ROUTER_TLS_KEY"
+		}
+		slog.Error("relay router TLS requires both cert and key", "missing", missing)
+		os.Exit(1)
+	}
 
 	if *dataDir == "" {
 		dir, err := os.UserConfigDir()
@@ -208,7 +219,7 @@ func main() {
 	// the router afterward — see StartRelayRouter's doc comment for why a
 	// separate post-construction setter call raced the router's first
 	// accepted connection.
-	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual, cfg.Router)
+	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
 	sessions.SetRouterPort(*routerPort)
 	sessions.SetRouterHost(*routerBind)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)

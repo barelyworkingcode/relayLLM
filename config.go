@@ -23,6 +23,13 @@ type LoadedConfig struct {
 	Mlx     *ServerConfig
 	Pi      *PiConfig
 	PTY     map[string]TerminalTemplate
+
+	// AllowPlaintextEndpoints mirrors settings.json's top-level
+	// "allowPlaintextEndpoints" (see endpoint_tls.go's validateEndpointTransport).
+	// Kept on LoadedConfig, not just consumed inline, so LoadConfig's
+	// --openai-config override path can re-validate the override file
+	// against the same plaintext policy the rest of settings.json declared.
+	AllowPlaintextEndpoints bool
 }
 
 // PiConfig configures the pi.dev coding-agent provider. All fields optional.
@@ -111,8 +118,12 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, err
 		}
 
 		// --openai-config flag overrides the unified config's openai section.
+		// Re-validated against the same allowPlaintextEndpoints policy the
+		// rest of settings.json declared, not a hardcoded default — an
+		// operator who opted into plaintext for the main config shouldn't
+		// have that silently narrowed by switching to the override flag.
 		if openaiConfigOverride != "" {
-			if override, err := loadOpenAIConfigFile(openaiConfigOverride); err == nil {
+			if override, err := loadOpenAIConfigFile(openaiConfigOverride, cfg.AllowPlaintextEndpoints); err == nil {
 				cfg.OpenAI = override
 			} else if !os.IsNotExist(err) {
 				return nil, err
@@ -126,7 +137,12 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, err
 		return nil, fmt.Errorf("read %s: %w", configPath, err)
 	}
 
-	// settings.json not found — fall back to separate files + env vars.
+	// settings.json not found — fall back to separate files + env vars. There
+	// is no top-level "allowPlaintextEndpoints" to read on this path, so it
+	// stays at the zero value (false): a non-loopback http endpoint dropped
+	// in via openai_endpoints.json or OPENAI_BASE_URL is rejected unless the
+	// endpoint itself is loopback. Operators who need the escape hatch have
+	// settings.json available for it.
 	openaiPath := openaiConfigOverride
 	if openaiPath == "" {
 		openaiPath = filepath.Join(dataDir, "openai_endpoints.json")
@@ -158,13 +174,14 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	// Use a raw intermediate so llama-server's and mlx-serve's model entries
 	// stay as map[string]any for the generic CLI flag translation.
 	var raw struct {
-		OpenAI      *OpenAIConfig               `json:"openai"`
-		VirtualLLMs *VirtualLLMConfig           `json:"virtual-llms"`
-		Router      *RouterConfig               `json:"router"`
-		LlamaServer *json.RawMessage            `json:"llama-server"`
-		MlxServer   *json.RawMessage            `json:"mlx-serve"`
-		Pi          *PiConfig                   `json:"pi"`
-		PTY         map[string]TerminalTemplate `json:"pty"`
+		OpenAI                  *OpenAIConfig               `json:"openai"`
+		VirtualLLMs             *VirtualLLMConfig           `json:"virtual-llms"`
+		Router                  *RouterConfig               `json:"router"`
+		LlamaServer             *json.RawMessage            `json:"llama-server"`
+		MlxServer               *json.RawMessage            `json:"mlx-serve"`
+		Pi                      *PiConfig                   `json:"pi"`
+		PTY                     map[string]TerminalTemplate `json:"pty"`
+		AllowPlaintextEndpoints bool                        `json:"allowPlaintextEndpoints,omitempty"`
 	}
 	if err := json.Unmarshal(jsonc.ToJSON(data), &raw); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", source, err)
@@ -173,7 +190,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	openaiCfg := &OpenAIConfig{}
 	if raw.OpenAI != nil {
 		openaiCfg = raw.OpenAI
-		normalizeOpenAI(openaiCfg)
+		if err := normalizeOpenAI(openaiCfg, raw.AllowPlaintextEndpoints); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", source, err)
+		}
 	}
 	virtualCfg := &VirtualLLMConfig{}
 	if raw.VirtualLLMs != nil {
@@ -211,13 +230,14 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	}
 
 	return &LoadedConfig{
-		OpenAI:  openaiCfg,
-		Virtual: virtualCfg,
-		Router:  routerCfg,
-		Llama:   llamaCfg,
-		Mlx:     mlxCfg,
-		Pi:      piCfg,
-		PTY:     raw.PTY,
+		OpenAI:                  openaiCfg,
+		Virtual:                 virtualCfg,
+		Router:                  routerCfg,
+		Llama:                   llamaCfg,
+		Mlx:                     mlxCfg,
+		Pi:                      piCfg,
+		PTY:                     raw.PTY,
+		AllowPlaintextEndpoints: raw.AllowPlaintextEndpoints,
 	}, nil
 }
 
@@ -238,12 +258,14 @@ func readJSONCFile(path string, out any) error {
 
 // loadOpenAIConfigFile reads an OpenAI config from a specific file path.
 // Does not fall back to env vars.
-func loadOpenAIConfigFile(path string) (*OpenAIConfig, error) {
+func loadOpenAIConfigFile(path string, allowPlaintext bool) (*OpenAIConfig, error) {
 	var cfg OpenAIConfig
 	if err := readJSONCFile(path, &cfg); err != nil {
 		return nil, err
 	}
-	normalizeOpenAI(&cfg)
+	if err := normalizeOpenAI(&cfg, allowPlaintext); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -263,14 +285,17 @@ func loadLlamaConfigFile(path string) (*ServerConfig, error) {
 }
 
 // LoadOpenAIConfig reads OpenAI config from a file path, falling back to
-// OPENAI_BASE_URL / OPENAI_API_KEY env vars if the file is absent.
-// Used by the fallback path when settings.json doesn't exist.
+// OPENAI_BASE_URL / OPENAI_API_KEY env vars if the file is absent. Used by
+// the fallback path when settings.json doesn't exist, so there is no
+// top-level "allowPlaintextEndpoints" to honor — always validated as false.
 func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
 	if path != "" {
 		var cfg OpenAIConfig
 		err := readJSONCFile(path, &cfg)
 		if err == nil {
-			normalizeOpenAI(&cfg)
+			if err := normalizeOpenAI(&cfg, false); err != nil {
+				return nil, err
+			}
 			return &cfg, nil
 		}
 		if !os.IsNotExist(err) {
@@ -294,21 +319,33 @@ func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
 				},
 			},
 		}
-		normalizeOpenAI(cfg)
+		if err := normalizeOpenAI(cfg, false); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 
 	return &OpenAIConfig{}, nil
 }
 
-// normalizeOpenAI trims trailing slashes from base URLs and defaults Group to Name.
-func normalizeOpenAI(cfg *OpenAIConfig) {
+// normalizeOpenAI trims trailing slashes from base URLs, defaults Group to
+// Name, and validates + prepares each endpoint's TLS transport (see
+// endpoint_tls.go). allowPlaintext mirrors settings.json's top-level
+// "allowPlaintextEndpoints" — false on every path that has no such section to
+// read (the legacy standalone-file and env-var fallbacks). A bad endpoint
+// here fails config load, and therefore relayLLM startup, rather than the
+// first request routed to it.
+func normalizeOpenAI(cfg *OpenAIConfig, allowPlaintext bool) error {
 	for i := range cfg.Endpoints {
 		cfg.Endpoints[i].BaseURL = strings.TrimRight(cfg.Endpoints[i].BaseURL, "/")
 		if cfg.Endpoints[i].Group == "" {
 			cfg.Endpoints[i].Group = cfg.Endpoints[i].Name
 		}
+		if err := prepareEndpointTransports(&cfg.Endpoints[i], allowPlaintext); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // WriteConfigPTY persists the pty section of settings.json atomically. Other
