@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -456,7 +457,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if endpoint == nil {
 			return fmt.Errorf("openai: unknown endpoint %q (model %q)", prefix, session.Model)
 		}
-		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, nil)
+		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, &http.Client{Transport: endpoint.Transport()})
 		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "llama", "mlx":

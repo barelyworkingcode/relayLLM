@@ -623,7 +623,7 @@ const modelsFetchTimeout = 10 * time.Second
 // "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
 // ProxyRegistry can record online/offline state accurately.
 func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) ([]UpstreamModel, error) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	client := &http.Client{Timeout: modelsFetchTimeout, Transport: endpoint.Transport()}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)

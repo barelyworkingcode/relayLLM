@@ -16,5 +16,6 @@ Format: Context → Decision → Consequences. Aim for brevity; if an ADR balloo
 | [008](008-spawn-argv-pure-builders.md) | Provider spawn argv/env as pure builders (hermetic flag-matrix seam) | Accepted |
 | [009](009-managed-server-memory-budget.md) | Managed-server memory budget with leases and idle reclaim | Accepted |
 | [010](010-virtual-model-conversation-affinity.md) | Conversation affinity for virtual-model failover | Accepted |
+| [012](012-endpoint-tls-pinning.md) | TLS pinning for the relayLLM-to-upstream endpoint hop | Accepted |
 
 When to write a new ADR: a decision was made that future readers might second-guess (e.g. "why did we add this seam? why this interface boundary? why this build tag instead of CI gate?"). Don't ADR routine refactors or library upgrades.

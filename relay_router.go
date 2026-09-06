@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,14 @@ type RelayRouter struct {
 	// (setReasoningEffortTemplateKwargs, called before serving starts), as
 	// reasoningEffortMap above.
 	reasoningEffortTemplateKwargs map[string]map[string]any
+
+	// tlsCert/tlsKey, when both set, make ListenAndServe serve this listener
+	// over TLS instead of plain http — this is the router's own listener
+	// (the relayLLM-to-upstream hop is Part A, above; this is a client
+	// dialing INTO the router). Wired in the same before-the-serving-goroutine
+	// way as the reasoningEffort* fields above, via setTLS.
+	tlsCert string
+	tlsKey  string
 }
 
 // RouterConfig holds relay-router behavior that doesn't belong to any one
@@ -166,6 +175,16 @@ func (p *RelayRouter) setReasoningEffortTemplateKwargs(m map[string]map[string]a
 	p.reasoningEffortTemplateKwargs = m
 }
 
+// setTLS installs the router listener's TLS cert/key pair (settings.json has
+// no section for this — it comes from --router-tls-cert/--router-tls-key,
+// validated as a matched pair in main). Subject to the same pre-serve
+// ordering constraint as setReasoningEffortMap above: StartRelayRouter calls
+// this before spawning the ListenAndServe goroutine.
+func (p *RelayRouter) setTLS(cert, key string) {
+	p.tlsCert = cert
+	p.tlsKey = key
+}
+
 // NewRelayRouter creates a router on addr. Nil entries in managers are
 // dropped; registry may be nil to disable the endpoint branch; virtual may be
 // nil to disable the virtual-model branch. A router with no live backends
@@ -196,7 +215,15 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 }
 
 func (p *RelayRouter) ListenAndServe() error {
-	slog.Info("relay router listening", "addr", p.server.Addr)
+	if p.tlsCert != "" {
+		slog.Info("relay router listening", "addr", p.server.Addr, "scheme", "https")
+		// MinVersion is set here rather than left at the stdlib default so a
+		// future Go toolchain lowering that default can't silently loosen
+		// this listener.
+		p.server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		return p.server.ListenAndServeTLS(p.tlsCert, p.tlsKey)
+	}
+	slog.Info("relay router listening", "addr", p.server.Addr, "scheme", "http")
 	return p.server.ListenAndServe()
 }
 
@@ -884,7 +911,9 @@ func (p *RelayRouter) handleAudioTranscription(w http.ResponseWriter, r *http.Re
 		writeRouterError(w, http.StatusInternalServerError, "invalid endpoint configuration")
 		return
 	}
-	newUpstreamProxy(target, rewritten, ep.APIKey, "audio", ep.Name, nil).ServeHTTP(w, r)
+	proxy := newUpstreamProxy(target, rewritten, ep.APIKey, "audio", ep.Name, nil)
+	proxy.Transport = ep.Transport()
+	proxy.ServeHTTP(w, r)
 }
 
 // multipartPart is one buffered form part. Audio uploads are small enough to
@@ -1082,7 +1111,9 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep Ope
 		http.Error(w, `{"error":"invalid endpoint configuration"}`, http.StatusInternalServerError)
 		return
 	}
-	newUpstreamProxy(target, rewritten, ep.APIKey, "openai", ep.Name, nil).ServeHTTP(w, r)
+	proxy := newUpstreamProxy(target, rewritten, ep.APIKey, "openai", ep.Name, nil)
+	proxy.Transport = ep.Transport()
+	proxy.ServeHTTP(w, r)
 }
 
 // routeVirtual attempts each candidate in declared attempt order, moving to
@@ -1223,7 +1254,7 @@ func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []b
 		return nil, nil, fmt.Errorf("invalid endpoint configuration: %w", err)
 	}
 	proxy = newUpstreamProxy(targetURL, rewritten, target.endpoint.APIKey, "openai", target.endpoint.Name, onError)
-	proxy.Transport = virtualDialTransport
+	proxy.Transport = target.endpoint.VirtualTransport()
 	return proxy, func() {}, nil
 }
 
@@ -1505,7 +1536,13 @@ func applyReasoningEffortTemplateKwargs(raw map[string]json.RawMessage, kwargsMa
 // item 4). StartRelayRouter is the one production call site for this,
 // chosen over adding the parameters to NewRelayRouter because it has far
 // fewer call sites to touch.
-func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig) *RelayRouter {
+//
+// tlsCert/tlsKey are the router listener's own cert/key pair (empty strings
+// mean plain http); main validates they're either both set or both empty
+// before calling in, so this never has to fail startup on a mismatched pair
+// itself. Applied via setTLS under the same pre-serve ordering rule as the
+// reasoningEffort* fields.
+func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig, tlsCert, tlsKey string) *RelayRouter {
 	if addr == "" {
 		return nil
 	}
@@ -1517,6 +1554,7 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
 		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
 	}
+	p.setTLS(tlsCert, tlsKey)
 	go func() {
 		if err := p.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("relay router error", "error", err)
