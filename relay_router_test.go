@@ -1508,7 +1508,7 @@ func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T)
 	}, "")
 	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, &RouterConfig{
 		ReasoningEffortMap: map[string]string{"minimal": "none"},
-	})
+	}, "", "")
 	if router == nil {
 		t.Fatal("expected a non-nil router")
 	}
@@ -1524,7 +1524,7 @@ func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, nil)
+	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, nil, "", "")
 	if router == nil {
 		t.Fatal("expected a non-nil router")
 	}
