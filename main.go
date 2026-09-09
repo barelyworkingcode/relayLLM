@@ -85,6 +85,19 @@ func main() {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	// router.anthropic's passthrough forwards whatever credential the client
+	// sent (Claude Code's OAuth bearer, or an API key) straight to
+	// api.anthropic.com on every request. That's fine on loopback; exposed
+	// on a non-loopback bind with no TLS on the router's own listener, it's
+	// a credential leaving the box in plaintext to anyone who can reach the
+	// port. Same fail-closed shape as the router-TLS-pair guard above.
+	if cfg.Router != nil && cfg.Router.Anthropic != nil && !isLoopbackHost(*routerBind) && *routerTLSCert == "" {
+		slog.Error("relay router: router.anthropic is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real Anthropic credential on every request)",
+			"router-bind", *routerBind)
+		os.Exit(1)
+	}
+
 	sessions.SetPiConfig(cfg.Pi)
 	if cfg.Pi.BinaryPath != "" {
 		slog.Info("pi binary configured", "path", cfg.Pi.BinaryPath)
@@ -213,6 +226,7 @@ func main() {
 	}
 	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
+	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
 	routerAddr := routerListenAddr(*routerBind, *routerPort)
 	// cfg.Router is passed straight into StartRelayRouter rather than set on
@@ -415,6 +429,60 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 		if usable == 0 {
 			slog.Warn("router: virtual model has no usable target; every request for it will fail",
 				"name", v.Name)
+		}
+	}
+}
+
+// warnAnthropicModelMap logs startup warnings for router.anthropic.modelMap
+// dead config, mirroring warnAliasShadowing/warnVirtualModelConfig above.
+// relay_router.go's handleProxy resolves an anthropic modelMap key BEFORE
+// every other dispatch check, so a key equal to an existing managed alias or
+// endpoint-prefixed id silently shadows it on every route — not just
+// /v1/messages — which is worth flagging here rather than as a confusing
+// runtime surprise.
+func warnAnthropicModelMap(anthropic *AnthropicRouterConfig, managers []*ServerManager, endpoints []OpenAIEndpoint, virtual *VirtualLLMConfig) {
+	if anthropic == nil || len(anthropic.ModelMap) == 0 {
+		return
+	}
+	for key, target := range anthropic.ModelMap {
+		for _, mgr := range managers {
+			if mgr.HasAlias(key) {
+				slog.Warn("router: anthropic.modelMap key matches an existing managed alias; it will shadow that alias on every route, not just /v1/messages",
+					"key", key, "kind", mgr.profile.Kind)
+			}
+		}
+		if prefix, _, ok := strings.Cut(key, "/"); ok {
+			for _, ep := range endpoints {
+				if ep.Name == prefix {
+					slog.Warn("router: anthropic.modelMap key looks like an endpoint-prefixed model id; it will shadow that route",
+						"key", key, "endpoint", ep.Name)
+				}
+			}
+		}
+
+		found := false
+		for _, mgr := range managers {
+			if mgr.HasAlias(target) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if prefix, _, ok := strings.Cut(target, "/"); ok {
+				for _, ep := range endpoints {
+					if ep.Name == prefix {
+						found = true
+						break
+					}
+				}
+			}
+		}
+		if !found && virtual != nil && virtual.Find(target) != nil {
+			found = true
+		}
+		if !found {
+			slog.Warn("router: anthropic.modelMap target does not match a configured managed alias, virtual model, or openai endpoint",
+				"key", key, "target", target)
 		}
 	}
 }

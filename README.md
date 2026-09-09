@@ -138,6 +138,35 @@ already sets. Configure both knobs together for a value that reliably turns
 reasoning off across both backend families. Also absent/empty by default.
 Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
 
+Configure `router.anthropic` to let Claude Code (the `claude` CLI) point at
+the router via `ANTHROPIC_BASE_URL` — real Claude models proxy through to
+`api.anthropic.com` byte-for-byte (headers, body, streaming), and
+`modelMap` optionally redirects specific model ids to a local
+managed/virtual/endpoint model, translated through a full Anthropic↔OpenAI
+compatibility layer. Absent by default (zero behavior change). Example:
+
+```json
+"router": {
+  "anthropic": {
+    "modelMap": {"vCode": "host/vCode"}
+  }
+}
+```
+
+```bash
+# real Claude, unmodified
+ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude -p "hi"
+# redirected to the local "vCode" target above
+ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude --model vCode -p "hi"
+```
+
+See [ADR-013](docs/decisions/013-anthropic-messages-compat.md) for what's
+translated, what's deliberately out of scope, and
+[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo) for the full config
+reference including the `ANTHROPIC_CUSTOM_MODEL_OPTION` client-side setting
+needed to make a redirected model selectable in Claude Code's own `/model`
+picker.
+
 ## API
 
 The API is a Unix-socket HTTP + WebSocket surface. Treat it as a public API for

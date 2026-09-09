@@ -16,6 +16,7 @@ import (
 	"net/http/httputil"
 	"net/textproto"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -64,6 +65,13 @@ type RelayRouter struct {
 	// way as the reasoningEffort* fields above, via setTLS.
 	tlsCert string
 	tlsKey  string
+
+	// anthropic holds the Anthropic Messages API compatibility state
+	// (settings.json's router.anthropic) — see relay_router_anthropic.go.
+	// nil means the feature is off: /v1/messages and friends 404. Wired in
+	// the same pre-serve-setter way as the reasoningEffort* fields above, via
+	// setAnthropic.
+	anthropic *anthropicRouterState
 }
 
 // RouterConfig holds relay-router behavior that doesn't belong to any one
@@ -142,6 +150,13 @@ type RouterConfig struct {
 	// merged.setdefault(...) server-side, so the client's explicit choice
 	// always wins over ours. See applyReasoningEffortTemplateKwargs.
 	ReasoningEffortTemplateKwargs map[string]map[string]any `json:"reasoningEffortTemplateKwargs,omitempty"`
+
+	// Anthropic enables Anthropic Messages API compatibility (/v1/messages,
+	// /v1/messages/count_tokens, and an /api/ passthrough) on this same
+	// listener — see relay_router_anthropic.go and
+	// docs/decisions/013-anthropic-messages-compat.md. Absent (nil, the
+	// default) means those routes 404; behavior is otherwise unchanged.
+	Anthropic *AnthropicRouterConfig `json:"anthropic,omitempty"`
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -205,6 +220,13 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 	mux.HandleFunc("POST /models/unload", p.handleModelUnload)
 	mux.HandleFunc("GET /health", p.handleHealth)
 	mux.HandleFunc("POST /v1/audio/transcriptions", p.handleAudioTranscription)
+	// Anthropic Messages API compatibility (relay_router_anthropic.go).
+	// Handlers 404 at request time when p.anthropic is nil (feature off) —
+	// registered unconditionally here since setAnthropic runs after
+	// construction, same ordering as the reasoningEffort* setters.
+	mux.HandleFunc("POST /v1/messages", p.handleAnthropicMessages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleAnthropicCountTokens)
+	mux.HandleFunc("/api/", p.handleAnthropicPassthrough)
 	mux.HandleFunc("/", p.handleProxy)
 
 	p.server = &http.Server{
@@ -384,6 +406,35 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			data = append(data, row)
 		}
 	}
+
+	// Anthropic-compat modelMap keys (see relay_router_anthropic.go) are
+	// also dispatchable via the plain OpenAI path (handleProxy resolves the
+	// map before any other check), so they belong in the catalog too — a
+	// client would otherwise see a 400 "unknown model" for an id the router
+	// actually serves. Sorted for deterministic output; iterating a map
+	// directly here would make this handler's response order flap.
+	if p.anthropic != nil && len(p.anthropic.modelMap) > 0 {
+		keys := make([]string, 0, len(p.anthropic.modelMap))
+		for key := range p.anthropic.modelMap {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			data = append(data, map[string]any{
+				"id":           key,
+				"object":       "model",
+				"created":      0,
+				"owned_by":     "anthropic-map",
+				"status":       map[string]any{"value": ModelStatusLoaded},
+				"architecture": map[string]any{"input_modalities": []string{"text"}},
+			})
+		}
+	}
+
 	if data == nil {
 		data = []map[string]any{}
 	}
@@ -1009,6 +1060,24 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An Anthropic-compat modelMap key (see relay_router_anthropic.go) is
+	// resolved before every other dispatch check below, so a redirect
+	// configured under router.anthropic.modelMap doubles as a router-wide
+	// alias reachable from a plain OpenAI client too — not just
+	// /v1/messages. Rewritten in place so managed/virtual/endpoint dispatch
+	// below sees the target exactly as if the client had asked for it
+	// directly. warnAnthropicModelMap (main.go) flags a key that collides
+	// with an existing managed alias or virtual name at startup, since this
+	// ordering means such a key would silently shadow it.
+	if p.anthropic != nil {
+		if target, ok := p.anthropic.modelMap[envelope.Model]; ok && target != "" {
+			if rewritten, err := rewriteProxyBody(body, target, nil, nil); err == nil {
+				body = rewritten
+				envelope.Model = target
+			}
+		}
+	}
+
 	// Managed servers checked in priority order (llama first, then mlx).
 	// First HasAlias match wins — llama wins on collision.
 	for _, mgr := range p.managers {
@@ -1553,6 +1622,7 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 	if router != nil {
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
 		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
+		p.setAnthropic(router.Anthropic)
 	}
 	p.setTLS(tlsCert, tlsKey)
 	go func() {
