@@ -1,6 +1,6 @@
 package main
 
-// Coverage for endpoint_tls.go: the fail-closed validation and pinned
+// Coverage for relay_router_endpoint_tls.go: the fail-closed validation and pinned
 // transport construction for the relayLLM-to-upstream OpenAI-endpoint hop.
 // Certificates are generated in-process (tls_test_helpers_test.go) — no
 // openssl, no network beyond loopback httptest servers.

@@ -1,7 +1,7 @@
 package main
 
 // Coverage for the two router-side TLS surfaces added alongside
-// endpoint_tls.go:
+// relay_router_endpoint_tls.go:
 //
 //   - the endpoint-backed proxy path (routeOpenAI) actually dials upstream
 //     through the endpoint's pinned transport, not a bare http.DefaultTransport

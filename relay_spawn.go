@@ -8,7 +8,7 @@ import (
 )
 
 // AutoRegen* are the "always | skipIfExists | never" mode values used by
-// PiProjectOverlay.Mode (config.go / pi_overlay.go). relayLLM does not
+// PiProjectOverlay.Mode (config.go / provider_pi_overlay.go). relayLLM does not
 // regenerate skills — relay owns skill generation (relay ADR-004), and the
 // ResolvePtyEnv bridge call no longer carries a regen field. Empty == never.
 const (
