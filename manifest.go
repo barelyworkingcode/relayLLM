@@ -29,6 +29,20 @@ type ActionDecl struct {
 	// ForEach names a top-level array key in the status payload. When set,
 	// the UI renders one button per row in that array and substitutes the
 	// row's keys into PathTemplate's {placeholders}. Empty = global action.
+	// The status payload becomes load-bearing once referenced this way:
+	// renaming the array or a row field is a coordinated change across this
+	// declaration and relay's UI, not a local rename.
+	//
+	// Deliberately not built: confirmation prompts on destructive actions
+	// (stopping an instance is reversible — relaunch on demand — so this
+	// waits until a non-reversible action ships), row-payload validation
+	// against a schema (row values pass through opaquely; a JSONSchema
+	// declaration is heavier than warranted), and multiple ForEach arrays
+	// per action (one action, one array; no cross-array use case yet). Row
+	// *values* come from the UI, but the *paths* stay service-declared —
+	// relay's dispatcher URL-escapes each substituted value and refuses
+	// anything not declared here, so the manifest remains the action
+	// whitelist even if the UI were compromised.
 	ForEach string `json:"forEach,omitempty"`
 }
 

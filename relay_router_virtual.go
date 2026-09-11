@@ -44,8 +44,8 @@ func (t resolvedVirtualTarget) label() string {
 // applyAffinity matches whichever of them happens to come first in
 // candidates and can permanently re-pin a conversation that was actually
 // served by qwen-7b onto qwen-70b next turn — exactly the silent
-// mid-conversation switch ADR-010 exists to prevent, and here it would
-// never even self-correct. Each part is escaped so endpoint "a" model
+// mid-conversation switch virtualAffinityStore exists to prevent, and here
+// it would never even self-correct. Each part is escaped so endpoint "a" model
 // "b/c" and endpoint "a/b" model "c" can't collide on the "/" join.
 func (t resolvedVirtualTarget) identity() string {
 	if t.manager != nil {
@@ -177,8 +177,8 @@ func classifyVirtualTarget(target VirtualLLMTarget) virtualTargetShape {
 }
 
 // affinityKeyFromBody picks the conversation identifier that pins a virtual
-// model's target — see ADR-010. Only these two standard OpenAI fields are
-// read, in this precedence, because Oh My Pi already sends a stable
+// model's target — see virtualAffinityStore. Only these two standard OpenAI
+// fields are read, in this precedence, because Oh My Pi already sends a stable
 // per-conversation UUID as prompt_cache_key on every request. Deliberately
 // not derived from anything else (headers, client IP): a wrong key pins
 // unrelated conversations together, which is worse than no affinity at all.
@@ -195,7 +195,7 @@ func affinityKeyFromBody(promptCacheKey, user string) string {
 // already computed. That ordering optimizes for "believed usable right
 // now"; a pin overrides it on purpose, because a 15s reachability-cache
 // wobble must not be allowed to hop an established conversation to a
-// different backend (ADR-010). pinned == "" is a no-op. A pin naming a
+// different backend (see virtualAffinityStore). pinned == "" is a no-op. A pin naming a
 // target no longer present in candidates (e.g. removed from config) is
 // silently ignored and the normal order stands — never invent a target that
 // isn't there.
@@ -261,22 +261,22 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 		wrote, status, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
 			// Pin only a response the backend actually stands behind. A 5xx
-			// is exactly the ADR-010 incident this guards against: llama.cpp
-			// 500s on reasoning_effort:"minimal", and pinning that response
-			// would lock every later turn onto the backend that just failed
-			// instead of leaving the door open to fail over next time. The
-			// response itself is NOT retried either way — "upstream
-			// answered, whatever it answered stands"
-			// — only whether it's worth remembering changes. A 4xx still
-			// pins: the backend answered fine, the client sent something it
-			// didn't like, and refusing to pin that would reintroduce the
-			// backend-hopping ADR-010 exists to prevent.
+			// is exactly the kind of incident virtualAffinityStore guards
+			// against: llama.cpp 500s on reasoning_effort:"minimal", and
+			// pinning that response would lock every later turn onto the
+			// backend that just failed instead of leaving the door open to
+			// fail over next time. The response itself is NOT retried either
+			// way — "upstream answered, whatever it answered stands" — only
+			// whether it's worth remembering changes. A 4xx still pins: the
+			// backend answered fine, the client sent something it didn't
+			// like, and refusing to pin that would reintroduce the
+			// backend-hopping virtualAffinityStore exists to prevent.
 			if status < http.StatusInternalServerError {
 				// Record (or refresh) the pin on whichever target actually
 				// served — including a target other than the one that was
 				// pinned before, if that one just failed. The conversation is
 				// already contaminated by the switch at that point, so pin
-				// forward rather than flap back on the next turn (ADR-010).
+				// forward rather than flap back on the next turn.
 				p.affinity.record(name, affinityKey, target.identity())
 			}
 			return // upstream answered — whatever it answered stands.

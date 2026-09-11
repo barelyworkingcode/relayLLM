@@ -6,8 +6,12 @@ import (
 )
 
 // virtualAffinityTTL and virtualAffinityCap bound virtualAffinityStore's
-// growth. See ADR-010 for why a deliberately stateless router now carries
-// this bit of state at all.
+// growth. Every other piece of the router — reachability, catalog rows,
+// dispatch — is derived fresh from config and the 15s probe cache on every
+// request; the router itself holds nothing about any individual
+// conversation. This is the one deliberate exception, and it stays narrow:
+// an in-memory, per-process map of opaque target identities, no
+// persistence, no cross-process sharing, bounded and self-pruning.
 const (
 	virtualAffinityTTL = time.Hour
 	virtualAffinityCap = 1024
@@ -29,10 +33,44 @@ type virtualAffinityEntry struct {
 }
 
 // virtualAffinityStore pins a virtual model's chosen target per conversation
-// once some target has actually served it. Two backends cannot safely share
-// a reasoning transcript — see ADR-010 — so once a conversation has been
-// answered, every later turn must return to the same target regardless of
-// what the reachability cache currently prefers.
+// once some target has actually served it, because two backends cannot
+// safely share a reasoning transcript. A production incident is why this
+// exists: a single conversation had 97 turns served by a llama.cpp endpoint
+// and 8 by an oMLX endpoint, interleaved, after a spurious "endpoint
+// offline" reading caused a mid-conversation failover and then a failback.
+// llama.cpp emits reasoning as a `content` array plus `encrypted_content`;
+// oMLX emits `summary` only with `content: null`. The client (Oh My Pi)
+// replays the full reasoning history on every turn, so once that history
+// contained an oMLX-shaped item, routing back to llama.cpp 400'd on every
+// subsequent retry with `item['content'] is not an array` — permanently, not
+// just once, since every retry replayed the same poisoned history.
+//
+// The incompatibility is one-directional, measured against both backends:
+//
+//	reasoning item shape          llama.cpp                          oMLX
+//	summary only (oMLX's shape)   reject: content is not an array    accept
+//	content array (llama.cpp's)   accept                             accept
+//	both summary and content      accept                             accept
+//	content: []                   reject: content is empty           —
+//
+// llama.cpp's transcript replays into oMLX fine; only the reverse breaks.
+// And there is nothing to translate: the raw reasoning was never sent, and
+// `encrypted_content` is an opaque token valid only for the model that
+// produced it, so a `content` array can't be reconstructed from an oMLX
+// `summary` after the fact. A conversation that has taken even one oMLX turn
+// can never be replayed to llama.cpp — the only fix is to stop mixing.
+//
+// An alternative was considered and rejected: instead of pinning, the router
+// could inspect each request's reasoning items and rewrite or drop the ones
+// that don't match the selected target's expected shape before forwarding.
+// Rejected for two reasons. First, it requires the router to know the
+// reasoning-item shape of every backend it might ever proxy to —
+// format-specific knowledge with no other reason to live in a generic
+// OpenAI-compatible proxy. Second, and worse, it silently discards reasoning
+// the model already paid for: reshaping a reasoning item changes what the
+// model "remembers" about its own prior turn without telling the caller,
+// which is a stranger failure mode than a request simply going to the same
+// backend it always has.
 //
 // Bounded the same way ProxyRegistry bounds its probe cache: no background
 // goroutine. Expiry and the LRU cap are both enforced lazily, only on the
