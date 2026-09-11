@@ -551,3 +551,32 @@ func TestSession_CreateSession_SkipsClaudeMdReadOnHost(t *testing.T) {
 		t.Errorf("SystemPrompt = %q, want unchanged (\"existing prompt\") — CLAUDE.md must not be read for a host session", sess.SystemPrompt)
 	}
 }
+
+// TestSendMessageSync_TimeoutStopsGeneration pins the fix for a headless
+// caller that gives up: without calling StopGeneration on a collector
+// timeout, the provider (and any managed-server lease it holds) would keep
+// running with nothing left waiting on it.
+func TestSendMessageSync_TimeoutStopsGeneration(t *testing.T) {
+	mgr := newTestSessionManager(t)
+	sess := mustCreateSession(t, mgr, "sync-timeout")
+
+	orig := sendMessageSyncTimeout
+	sendMessageSyncTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { sendMessageSyncTimeout = orig })
+
+	// Deliberately don't script a result: the fake provider's SendMessage
+	// returns without ever emitting message_complete, simulating a provider
+	// still generating when the caller's patience (the timeout) runs out.
+	_, _, err := mgr.SendMessageSync(sess.ID, "hello", nil)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+
+	fake, ok := sess.getProvider().(*FakeProvider)
+	if !ok {
+		t.Fatalf("provider = %T, want *FakeProvider", sess.getProvider())
+	}
+	if !fake.Stopped() {
+		t.Error("SendMessageSync timeout must call StopGeneration so the lease and session.processing don't leak forever")
+	}
+}

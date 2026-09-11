@@ -37,6 +37,15 @@ func isLoopbackHost(host string) bool {
 // normalizePin lowercases a pin and strips optional colon separators (the
 // format `openssl x509 -fingerprint -sha256` prints), then checks the result
 // is exactly a SHA-256 hex digest.
+//
+// Fingerprint-of-leaf was chosen over SPKI pinning for two reasons: it needs
+// nothing beyond the stdlib (sha256.Sum256(cert.Raw)), and it matches the
+// output of `openssl x509 -fingerprint -sha256` directly — the tool an
+// operator reaches for already — with no separate SPKI-extraction step to
+// get wrong. The motivating deployment pins a VM's relayLLM router to a Mac
+// host's relayLLM router over what would otherwise be a plaintext LAN hop;
+// sibling relayTTS/relaySTT daemons already pin that same host, so this
+// closes the one unpinned link in the chain.
 func normalizePin(pin string) (string, error) {
 	norm := strings.ToLower(strings.ReplaceAll(pin, ":", ""))
 	if len(norm) != 64 {

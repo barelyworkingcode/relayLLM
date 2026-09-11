@@ -125,6 +125,13 @@ func (p *ClaudeProvider) resolveMCPToken() string {
 // a routing fact, not a credential, so falling back to the stored value (not
 // clearing it) is what lets a persisted host session resume after a
 // relayLLM restart while relay is briefly unreachable.
+//
+// A terminal's Host, by contrast, is resolved once at TerminalManager.Create
+// and never refreshed (see terminal_manager.go). The two have different
+// lifetimes: an interactive shell's whole life is usually shorter than the
+// gap between two host probes, and there is no "respawn" concept for a
+// terminal the way there is for a headless CLI restart — re-resolving on
+// every keystroke would buy nothing a session actually needs.
 func (p *ClaudeProvider) refreshHostSpec() {
 	if serviceToken() == "" {
 		return
@@ -173,11 +180,14 @@ func (p *ClaudeProvider) effectivePermissionMode() string {
 }
 
 // buildClaudeArgs assembles the claude CLI argv. mcpCfg is the rendered
-// --mcp-config JSON ("" to omit). Pure over provider fields + the one argument,
-// so the security-sensitive flag matrix (resume, permission mode, the
-// --dangerously-skip-permissions escape hatch, policy tools) is hermetically
-// testable without spawning a process. See provider_claude_spawn_test.go and
-// the headless-isolation guard in security_regression_test.go.
+// --mcp-config JSON ("" to omit). Pure over provider fields + the one argument
+// — deliberately a plain function rather than an exec.Command fake or an
+// injected interface — so the security-sensitive flag matrix (resume,
+// permission mode, the --dangerously-skip-permissions escape hatch, policy
+// tools) is hermetically testable by calling it directly, without spawning a
+// process or exposing any production test seam beyond the function call
+// itself. See provider_claude_spawn_test.go and the headless-isolation guard
+// in security_regression_test.go.
 func (p *ClaudeProvider) buildClaudeArgs(mcpCfg string) []string {
 	args := []string{
 		"--print",
@@ -259,7 +269,7 @@ func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string
 // buildHostExec assembles argv to run Claude on a host: relay's ssh_argv
 // prefix, `-T` (no local tty — this is the headless chat process, not a
 // terminal), `--`, and RemoteCommand's base64 launcher wrapping
-// `claude_path <args>` under dir with env. Pure over its inputs (ADR-008): no
+// `claude_path <args>` under dir with env. Pure over its inputs: no
 // bridge call, no exec, hermetically testable. env is caller-built so the
 // security invariant — RELAY_LLM_SESSION_ID only, never the hook socket/token
 // or any relay token (decision 6) — is visible at the call site too.

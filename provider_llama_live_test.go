@@ -18,6 +18,7 @@ package main
 // modelDir path. Skips gracefully if absent.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -98,7 +99,7 @@ func requireLive(t *testing.T) {
 func TestLlamaLive_GetOrLaunch_BindsHealthyPort(t *testing.T) {
 	requireLive(t)
 
-	endpoint, err := liveLlama.GetOrLaunch(liveTestAlias)
+	endpoint, err := liveLlama.GetOrLaunch(context.Background(), liveTestAlias)
 	if err != nil {
 		t.Fatalf("GetOrLaunch: %v", err)
 	}
@@ -124,11 +125,11 @@ func TestLlamaLive_GetOrLaunch_BindsHealthyPort(t *testing.T) {
 func TestLlamaLive_GetOrLaunch_Idempotent(t *testing.T) {
 	requireLive(t)
 
-	e1, err := liveLlama.GetOrLaunch(liveTestAlias)
+	e1, err := liveLlama.GetOrLaunch(context.Background(), liveTestAlias)
 	if err != nil {
 		t.Fatalf("first launch: %v", err)
 	}
-	e2, err := liveLlama.GetOrLaunch(liveTestAlias)
+	e2, err := liveLlama.GetOrLaunch(context.Background(), liveTestAlias)
 	if err != nil {
 		t.Fatalf("second launch: %v", err)
 	}

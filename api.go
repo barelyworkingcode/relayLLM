@@ -247,10 +247,8 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 // --- Terminal Routes ---
 
 func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, terminals *TerminalManager) {
-	// Template reads. Mutation moved to relay's config editor, which edits
-	// settings.json directly (the `pty` section) and restarts relayLLM — see
-	// ../relay/plans/yes-i-think-we-proud-lightning.md. relayLLM is no longer a
-	// writer of its own templates at runtime.
+	// Template reads only. Mutation happens in relay's config editor, which
+	// edits settings.json's `pty` section directly and restarts relayLLM.
 	mux.HandleFunc("GET /api/terminal/templates", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, templates.List())
 	})
@@ -394,6 +392,10 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 
 // RegisterGeneratedImageRoutes serves generated images (from ComfyUI) out of
 // {dataDir}/generated/. Filenames are validated to prevent path traversal.
+// RegisterGeneratedImageRoutes serves images the relay-comfyui MCP tool
+// (reached via `relay mcp call`, see relay's own ADR-006) writes into
+// {dataDir}/generated/. Image generation itself is not an HTTP endpoint here
+// — this route only serves the resulting files for Eve to render.
 func RegisterGeneratedImageRoutes(mux *http.ServeMux, dataDir string) {
 	generatedDir := filepath.Join(dataDir, "generated")
 	mux.HandleFunc("GET /api/generated/{filename}", func(w http.ResponseWriter, r *http.Request) {
@@ -406,11 +408,6 @@ func RegisterGeneratedImageRoutes(mux *http.ServeMux, dataDir string) {
 		http.ServeFile(w, r, filepath.Join(generatedDir, filename))
 	})
 }
-
-// Image generation is no longer an HTTP endpoint here — it is the
-// relay-comfyui MCP tool, reached via `relay mcp call` (see ADR-006). Only the
-// static serving route above remains; relayComfy writes images into
-// {dataDir}/generated/ and Eve renders them from /api/generated/.
 
 func isValidGeneratedFilename(name string) bool {
 	if len(name) == 0 || len(name) > 255 {

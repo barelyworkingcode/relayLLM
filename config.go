@@ -25,7 +25,7 @@ type LoadedConfig struct {
 	PTY     map[string]TerminalTemplate
 
 	// AllowPlaintextEndpoints mirrors settings.json's top-level
-	// "allowPlaintextEndpoints" (see endpoint_tls.go's validateEndpointTransport).
+	// "allowPlaintextEndpoints" (see relay_router_endpoint_tls.go's validateEndpointTransport).
 	// Kept on LoadedConfig, not just consumed inline, so LoadConfig's
 	// --openai-config override path can re-validate the override file
 	// against the same plaintext policy the rest of settings.json declared.
@@ -54,7 +54,7 @@ type PiConfig struct {
 	// models.json + settings.json reflecting our curated providers and
 	// symlinks auth.json back to the user's global ~/.pi/agent/auth.json,
 	// then spawns pi with PI_CODING_AGENT_DIR pointing at the overlay.
-	// Pi's global ~/.pi/agent/ is never written to. See pi_overlay.go.
+	// Pi's global ~/.pi/agent/ is never written to. See provider_pi_overlay.go.
 	ProjectOverlay PiProjectOverlay `json:"projectOverlay,omitempty"`
 }
 
@@ -330,7 +330,7 @@ func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
 
 // normalizeOpenAI trims trailing slashes from base URLs, defaults Group to
 // Name, and validates + prepares each endpoint's TLS transport (see
-// endpoint_tls.go). allowPlaintext mirrors settings.json's top-level
+// relay_router_endpoint_tls.go). allowPlaintext mirrors settings.json's top-level
 // "allowPlaintextEndpoints" — false on every path that has no such section to
 // read (the legacy standalone-file and env-var fallbacks). A bad endpoint
 // here fails config load, and therefore relayLLM startup, rather than the

@@ -173,7 +173,7 @@ func (s *TemplateStore) Get(id string) (TerminalTemplate, bool) {
 	return hydrate(id, t), true
 }
 
-// Template mutation (create/update/delete) is no longer served by relayLLM:
-// relay's config editor edits the `pty` section of settings.json directly and
-// restarts the service. TemplateStore is now read-mostly — it loads templates
-// at startup (seeding defaults on first run) and serves List/Get.
+// Template mutation (create/update/delete) is not served here: relay's
+// config editor edits the `pty` section of settings.json directly and
+// restarts the service. TemplateStore is read-mostly — it loads templates at
+// startup (seeding defaults on first run) and serves List/Get.

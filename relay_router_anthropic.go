@@ -5,9 +5,8 @@ package main
 // a provider list) point at relayLLM via ANTHROPIC_BASE_URL and get real
 // Claude models transparently proxied through to api.anthropic.com, plus an
 // optional config-driven redirect of specific model ids to a local
-// managed/virtual/endpoint model. See
-// docs/decisions/013-anthropic-messages-compat.md for the design and what's
-// explicitly out of scope.
+// managed/virtual/endpoint model. See relay_router_anthropic_translate.go's
+// header for what's explicitly out of scope.
 
 import (
 	"bytes"
