@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -605,5 +606,128 @@ func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
 	}
 	if !pinged {
 		t.Errorf("no ping event seen while backend was slow; events: %v", eventTypes(events))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Proxy-metrics instrumentation
+// ---------------------------------------------------------------------------
+
+// TestAnthropic_Passthrough_MessagesRouteRecordsMetrics covers the
+// /v1/messages passthrough branch (anthropicPassthroughBody), where the
+// body is already decoded — the connection should be labeled with the real
+// model and stream flag, not the "" placeholder the raw catch-all uses.
+func TestAnthropic_Passthrough_MessagesRouteRecordsMetrics(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer fake.Close()
+
+	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, fake.URL, nil), nil, nil, nil)
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/messages",
+		[]byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`))
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	io.ReadAll(resp.Body)
+
+	active, _, recent := r.Metrics().Snapshot()
+	if len(active) != 0 {
+		t.Errorf("active connections after request completed = %+v, want empty", active)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("recentRequests = %+v, want exactly 1 entry", recent)
+	}
+	if recent[0].TargetKind != "anthropic-passthrough" {
+		t.Errorf("recent[0].TargetKind = %q, want %q", recent[0].TargetKind, "anthropic-passthrough")
+	}
+	fakeURL, _ := url.Parse(fake.URL)
+	if recent[0].Target != fakeURL.Host {
+		t.Errorf("recent[0].Target = %q, want upstream host %q", recent[0].Target, fakeURL.Host)
+	}
+	if recent[0].Status != http.StatusOK {
+		t.Errorf("recent[0].Status = %d, want 200", recent[0].Status)
+	}
+}
+
+// TestAnthropic_Passthrough_APIPrefixRecordsMetrics covers the raw
+// catch-all branch (handleAnthropicPassthrough), used for e.g. Claude
+// Code's /api/hello bootstrap probe — body is never read on this path, so
+// the connection is labeled with an empty model rather than sniffing it.
+func TestAnthropic_Passthrough_APIPrefixRecordsMetrics(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fake.Close()
+
+	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, fake.URL, nil), nil, nil, nil)
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	resp, err := http.Head(srv.URL + "/api/hello")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	io.ReadAll(resp.Body)
+
+	active, _, recent := r.Metrics().Snapshot()
+	if len(active) != 0 {
+		t.Errorf("active connections after request completed = %+v, want empty", active)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("recentRequests = %+v, want exactly 1 entry", recent)
+	}
+	if recent[0].TargetKind != "anthropic-passthrough" {
+		t.Errorf("recent[0].TargetKind = %q, want %q", recent[0].TargetKind, "anthropic-passthrough")
+	}
+	if recent[0].Model != "" {
+		t.Errorf("recent[0].Model = %q, want empty (body unread on the raw catch-all path)", recent[0].Model)
+	}
+}
+
+// TestAnthropic_Redirect_StillLabeledViaAnthropicNotPassthrough guards the
+// boundary between the two instrumented paths: a modelMap hit must record
+// as the existing viaAnthropic-tagged managed/virtual/endpoint route, never
+// as anthropic-passthrough, since no request to the real upstream happens.
+func TestAnthropic_Redirect_StillLabeledViaAnthropicNotPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"cmpl","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "local-model"}},
+	}, "")
+	injectHealthyManagedInstance(t, mgr, "local-model", upstream)
+
+	cfg := anthropicUpstreamCfg(t, "http://unused.invalid", map[string]string{"claude-sonnet-4-5": "local-model"})
+	r := newAnthropicRouter(t, cfg, []*ServerManager{mgr}, nil, nil)
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/messages",
+		[]byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`))
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	io.ReadAll(resp.Body)
+
+	_, _, recent := r.Metrics().Snapshot()
+	if len(recent) != 1 {
+		t.Fatalf("recentRequests = %+v, want exactly 1 entry", recent)
+	}
+	if recent[0].TargetKind != "managed" {
+		t.Errorf("recent[0].TargetKind = %q, want %q (redirect dispatch, not passthrough)", recent[0].TargetKind, "managed")
 	}
 }

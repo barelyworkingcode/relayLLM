@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>relayLLM status</title>
+<link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23898781'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/status/status.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-left">
+    <span class="app-title">relayLLM status</span>
+    <span class="header-meta" id="header-meta"></span>
+  </div>
+  <div class="header-right">
+    <span class="live-indicator">
+      <span class="live-dot" id="live-dot" data-status="neutral"></span>
+      <span id="live-text">connecting</span>
+    </span>
+    <button class="btn" id="pause-btn" type="button">⏸ pause</button>
+    <button class="btn btn-icon" id="theme-btn" type="button" aria-label="Toggle theme">☾</button>
+  </div>
+</header>
+
+<div class="banner" id="poll-banner" hidden></div>
+
+<main class="page">
+
+  <section class="overview-strip" id="overview-strip" aria-label="Overview"></section>
+
+  <section class="attention-block" id="attention-block" role="status" aria-live="polite" hidden>
+    <ul id="attention-list"></ul>
+  </section>
+
+  <section class="card" id="card-connections">
+    <div class="card-header">
+      <h2>Connections</h2>
+      <span class="card-count" id="connections-count">Loading…</span>
+    </div>
+    <div class="card-body">
+      <p class="empty-line" id="connections-empty">Loading…</p>
+      <table class="data-table" id="connections-table" hidden>
+        <colgroup>
+          <col style="width:128px"><col style="width:72px"><col><col style="width:160px">
+          <col style="width:88px"><col style="width:120px"><col style="width:140px">
+          <col style="width:80px"><col style="width:24px">
+        </colgroup>
+        <thead><tr>
+          <th scope="col">State</th><th scope="col">Kind</th><th scope="col">Target</th>
+          <th scope="col">Client</th><th scope="col">Open</th><th scope="col">Bytes</th>
+          <th scope="col">Rate</th><th scope="col">Last byte</th><th scope="col" aria-hidden="true"></th>
+        </tr></thead>
+        <tbody id="connections-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="row-grid">
+    <section class="card col-8" id="card-models">
+      <div class="card-header">
+        <h2>Models</h2>
+        <span class="card-count" id="models-count">Loading…</span>
+      </div>
+      <div class="card-body">
+        <p class="empty-line" id="models-empty">Loading…</p>
+        <table class="data-table" id="models-table" hidden>
+          <colgroup>
+            <col><col style="width:80px"><col style="width:110px"><col style="width:110px">
+            <col style="width:88px"><col style="width:64px"><col style="width:80px">
+          </colgroup>
+          <thead><tr>
+            <th scope="col">Alias</th><th scope="col">Backend</th><th scope="col">Status</th>
+            <th scope="col">Pid : port</th><th scope="col">Memory</th><th scope="col">Leases</th><th scope="col">Idle</th>
+          </tr></thead>
+          <tbody id="models-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card col-4" id="card-budgets">
+      <div class="card-header">
+        <h2>Budgets</h2>
+        <span class="card-count" id="budgets-count">Loading…</span>
+      </div>
+      <div class="card-body" id="budgets-body">
+        <p class="empty-line" id="budgets-empty">Loading…</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="row-grid">
+    <section class="card col-6" id="card-virtual">
+      <div class="card-header">
+        <h2>Virtual models</h2>
+        <span class="card-count" id="virtual-count">Loading…</span>
+      </div>
+      <div class="card-body" id="virtual-body">
+        <p class="empty-line" id="virtual-empty">Loading…</p>
+      </div>
+    </section>
+
+    <section class="card col-6" id="card-endpoints">
+      <div class="card-header">
+        <h2>Endpoints</h2>
+        <span class="card-count" id="endpoints-count">Loading…</span>
+      </div>
+      <div class="card-body">
+        <p class="empty-line" id="endpoints-empty">Loading…</p>
+        <table class="data-table" id="endpoints-table" hidden>
+          <colgroup>
+            <col style="width:120px"><col style="width:100px"><col><col style="width:64px">
+            <col style="width:88px"><col style="width:200px">
+          </colgroup>
+          <thead><tr>
+            <th scope="col">Name</th><th scope="col">Status</th><th scope="col">Base URL</th>
+            <th scope="col">Models</th><th scope="col">Checked</th><th scope="col">Last error</th>
+          </tr></thead>
+          <tbody id="endpoints-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" id="card-terminals">
+    <div class="card-header">
+      <h2>Terminals</h2>
+      <span class="card-count" id="terminals-count">Loading…</span>
+    </div>
+    <div class="card-body">
+      <p class="empty-line" id="terminals-empty">Loading…</p>
+      <table class="data-table" id="terminals-table" hidden>
+        <colgroup>
+          <col style="width:100px"><col><col style="width:120px"><col style="width:110px"><col style="width:120px">
+        </colgroup>
+        <thead><tr>
+          <th scope="col">Id</th><th scope="col">Name</th><th scope="col">Template</th>
+          <th scope="col">State</th><th scope="col">Started</th>
+        </tr></thead>
+        <tbody id="terminals-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="/status/status.js"></script>
+</body>
+</html>

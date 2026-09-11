@@ -307,6 +307,101 @@ func TestWS_TerminalCreate_AndInput_AndClose(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// SnapshotConnections (status_metrics.go / GET /api/status/detailed feed)
+// ---------------------------------------------------------------------------
+
+func TestWSConn_CountersAndIdle(t *testing.T) {
+	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	srv := NewTestServer(t, &TestServerOptions{Clock: clock})
+	srv.SetFakeProvider()
+	sessionID := srv.CreateSession(nil)
+
+	conn := srv.DialWS()
+	WSSend(t, conn, map[string]interface{}{"type": "join_session", "sessionId": sessionID})
+	ReadUntilType(t, conn, "session_joined", 2*time.Second)
+
+	// join_session's read plus session_joined's write must both be counted —
+	// give the server goroutine a moment to process the read before polling.
+	waitFor(t, time.Second, func() bool {
+		snap := srv.WSHub.SnapshotConnections()
+		return len(snap) == 1 && snap[0].BytesIn > 0 && snap[0].BytesOut > 0
+	})
+
+	snap := srv.WSHub.SnapshotConnections()
+	if len(snap) != 1 {
+		t.Fatalf("SnapshotConnections = %+v, want exactly 1 row", snap)
+	}
+	if snap[0].State != "active" {
+		t.Errorf("state right after activity = %q, want active", snap[0].State)
+	}
+
+	// Advance well past wsIdleAfter (60s) with no further traffic.
+	clock.Advance(90 * time.Second)
+	snap = srv.WSHub.SnapshotConnections()
+	if len(snap) != 1 {
+		t.Fatalf("SnapshotConnections after advance = %+v, want exactly 1 row", snap)
+	}
+	if snap[0].State != "idle" {
+		t.Errorf("state after 90s idle = %q, want idle (never stalled — see wsIdleAfter's comment)", snap[0].State)
+	}
+	if snap[0].IdleSeconds < 90 {
+		t.Errorf("IdleSeconds = %d, want >= 90", snap[0].IdleSeconds)
+	}
+}
+
+func TestWSHub_SnapshotBindings(t *testing.T) {
+	srv := NewTestServer(t, nil)
+	srv.SetFakeProvider()
+	sessionID := srv.CreateSession(nil)
+
+	conn := srv.DialWS()
+	WSSend(t, conn, map[string]interface{}{"type": "join_session", "sessionId": sessionID})
+	ReadUntilType(t, conn, "session_joined", 2*time.Second)
+
+	WSSend(t, conn, map[string]interface{}{
+		"type": "terminal_create", "templateId": "shell",
+		"name": "bindings-test", "directory": srv.DataDir,
+		"cols": 80, "rows": 24,
+	})
+	joined := ReadUntilType(t, conn, "terminal_joined", 2*time.Second)
+	terminalID := strOf(joined["terminalId"])
+	ReadUntilType(t, conn, "terminal_created", 2*time.Second)
+
+	waitFor(t, time.Second, func() bool {
+		snap := srv.WSHub.SnapshotConnections()
+		return len(snap) == 1 && len(snap[0].Sessions) == 1 && len(snap[0].Terminals) == 1
+	})
+
+	snap := srv.WSHub.SnapshotConnections()
+	if len(snap) != 1 {
+		t.Fatalf("SnapshotConnections = %+v, want exactly 1 row", snap)
+	}
+	if len(snap[0].Sessions) != 1 || snap[0].Sessions[0] != sessionID {
+		t.Errorf("Sessions = %v, want [%s]", snap[0].Sessions, sessionID)
+	}
+	if len(snap[0].Terminals) != 1 || snap[0].Terminals[0] != terminalID {
+		t.Errorf("Terminals = %v, want [%s]", snap[0].Terminals, terminalID)
+	}
+
+	// Leave the session; the terminal binding must survive independently.
+	WSSend(t, conn, map[string]interface{}{"type": "leave_session", "sessionId": sessionID})
+	waitFor(t, time.Second, func() bool {
+		snap := srv.WSHub.SnapshotConnections()
+		return len(snap) == 1 && len(snap[0].Sessions) == 0
+	})
+	snap = srv.WSHub.SnapshotConnections()
+	if len(snap[0].Terminals) != 1 || snap[0].Terminals[0] != terminalID {
+		t.Errorf("Terminals after leaving the session = %v, want [%s] (unaffected)", snap[0].Terminals, terminalID)
+	}
+
+	// Disconnecting entirely must drop the connection (and so its bindings).
+	conn.Close()
+	waitFor(t, time.Second, func() bool {
+		return len(srv.WSHub.SnapshotConnections()) == 0
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Helpers specific to ws_test
 // ---------------------------------------------------------------------------
 

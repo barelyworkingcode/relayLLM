@@ -31,6 +31,12 @@ type RelayRouter struct {
 	affinity *virtualAffinityStore
 	server   *http.Server
 
+	// metrics instruments the proxy path for GET /api/status/detailed
+	// (status_metrics.go). Always non-nil after NewRelayRouter; the
+	// ProxyConn methods it hands out are all nil-safe anyway so a hand-built
+	// router in a test needs no wiring.
+	metrics *ProxyMetrics
+
 	// reasoningEffortMap rewrites a top-level "reasoning_effort" string field
 	// on every proxied body before it reaches a backend — see RouterConfig
 	// and rewriteProxyBody. nil/empty (the zero value, and what every
@@ -203,7 +209,7 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 			live = append(live, m)
 		}
 	}
-	p := &RelayRouter{managers: live, registry: registry, virtual: virtual, affinity: newVirtualAffinityStore(nil)}
+	p := &RelayRouter{managers: live, registry: registry, virtual: virtual, affinity: newVirtualAffinityStore(nil), metrics: NewProxyMetrics(nil)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", p.handleModels)
@@ -253,6 +259,46 @@ func (p *RelayRouter) ListenAndServe() error {
 
 func (p *RelayRouter) Close() error {
 	return p.server.Close()
+}
+
+// Metrics exposes the router's proxy instrumentation to the main mux's
+// GET /api/status/detailed handler. Both listeners live in the same
+// process, so this is a direct in-process read of mutex/atomic-guarded
+// state — the status handler never dials the router's own TCP port (which
+// may be disabled, bound elsewhere, or TLS-only). Nil receiver matters:
+// main.go's `relayRouter := StartRelayRouter(...)` is nil when
+// --router-port is unset.
+func (p *RelayRouter) Metrics() *ProxyMetrics {
+	if p == nil {
+		return nil
+	}
+	return p.metrics
+}
+
+// Addr returns the router listener's configured address (e.g.
+// "127.0.0.1:8180"), or "" for a nil router.
+func (p *RelayRouter) Addr() string {
+	if p == nil {
+		return ""
+	}
+	return p.server.Addr
+}
+
+// TLSEnabled reports whether the router listener serves TLS.
+func (p *RelayRouter) TLSEnabled() bool {
+	if p == nil {
+		return false
+	}
+	return p.tlsCert != ""
+}
+
+// AffinityPinCounts exposes virtualAffinityStore.pinCounts for the status
+// dashboard — see that method for the shape.
+func (p *RelayRouter) AffinityPinCounts() map[string]map[string]int {
+	if p == nil {
+		return nil
+	}
+	return p.affinity.pinCounts()
 }
 
 func (p *RelayRouter) handleModelLoad(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +399,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Model          string `json:"model"`
 		PromptCacheKey string `json:"prompt_cache_key"`
 		User           string `json:"user"`
+		Stream         bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model == "" {
 		http.Error(w, `{"error":"missing or invalid model field"}`, http.StatusBadRequest)
@@ -377,11 +424,31 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Register this request with the proxy-metrics registry (status_metrics.go)
+	// now that envelope.Model reflects any anthropic modelMap rewrite above —
+	// the dashboard's `model` field should read what dispatch actually used.
+	// begin's returned writer SHADOWS the outer `w` deliberately: every branch
+	// below (routeManaged, routeVirtual, routeOpenAI, the unknown-model 400)
+	// must write through the metered writer, and shadowing makes that
+	// unmissable rather than relying on each call site remembering to use a
+	// differently-named variable. Registering after the body has already been
+	// read (above) means a slow/oversized upload never shows up as a tracked
+	// connection — maxProxyBodyBytes already bounds it, and the diagnostic
+	// question this dashboard answers is about upstream behavior, not client
+	// uploads.
+	conn, w := p.metrics.begin(w, r, envelope.Model, envelope.Stream, int64(len(body)))
+	// defer, not a call at the end of the function: a mid-stream backend
+	// failure panics with http.ErrAbortHandler (recovered by net/http one
+	// frame up), and a bare end-of-function call would never run on that
+	// path, leaking the connection into `active` forever — exactly the
+	// "ghost entry" the ring-buffered recentRequests exists to never produce.
+	defer p.metrics.end(conn)
+
 	// Managed servers checked in priority order (llama first, then mlx).
 	// First HasAlias match wins — llama wins on collision.
 	for _, mgr := range p.managers {
 		if mgr.HasAlias(envelope.Model) {
-			p.routeManaged(w, r, mgr, envelope.Model, body)
+			p.routeManaged(w, r, mgr, envelope.Model, body, conn)
 			return
 		}
 	}
@@ -407,25 +474,26 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// normal order.
 			affinityKey := affinityKeyFromBody(envelope.PromptCacheKey, envelope.User)
 			candidates = applyAffinity(candidates, p.affinity.lookup(envelope.Model, affinityKey))
-			p.routeVirtual(w, r, envelope.Model, candidates, body, affinityKey)
+			p.routeVirtual(w, r, envelope.Model, candidates, body, affinityKey, conn)
 			return
 		}
 	}
 
 	if p.registry != nil {
 		if ep, upstreamID, ok := p.registry.LookupModel(r.Context(), envelope.Model); ok {
-			p.routeOpenAI(w, r, ep, upstreamID, body)
+			p.routeOpenAI(w, r, ep, upstreamID, body, conn)
 			return
 		}
 	}
 
+	conn.setTarget("unknown", "")
 	slog.Warn("relay router: unknown model", "model", envelope.Model)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("unknown model %q", envelope.Model)})
 }
 
-func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte) {
+func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte, conn *ProxyConn) {
 	// The lease is held for the whole proxied exchange, including the SSE
 	// stream, so the budget cannot evict this instance mid-response.
 	endpoint, release, err := mgr.Acquire(r.Context(), alias)
@@ -437,6 +505,10 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		return
 	}
 	defer release()
+	// Set after Acquire returns, not before: a request queued on admission
+	// has not chosen an instance yet, and the dashboard's target should mean
+	// "is being served by", not "wants".
+	conn.setTarget("managed", mgr.profile.Kind+":"+alias)
 
 	// No model swap needed here — the client already sent the bare alias the
 	// managed server expects — but the reasoning_effort rewrite still applies
@@ -466,7 +538,8 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
-func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep OpenAIEndpoint, upstreamID string, body []byte) {
+func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
+	conn.setTarget("endpoint", ep.Name+"/"+upstreamID)
 	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
@@ -552,7 +625,15 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		return nil
 	}
 	p := NewRelayRouter(addr, managers, registry, virtual)
-	if len(p.managers) == 0 && p.registry == nil {
+	// A router with no managed servers and no OpenAI endpoints would
+	// otherwise dispatch nothing — except router.anthropic's passthrough is
+	// a real destination in its own right (api.anthropic.com), needing
+	// neither. Without this check, a deployment using relayLLM purely as a
+	// Claude Code proxy (router.anthropic configured, nothing else) got no
+	// router at all: /v1/messages, the /api/* bootstrap passthrough,
+	// everything 404'd with no indication why.
+	hasAnthropic := router != nil && router.Anthropic != nil
+	if len(p.managers) == 0 && p.registry == nil && !hasAnthropic {
 		return nil
 	}
 	if router != nil {

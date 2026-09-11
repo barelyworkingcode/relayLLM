@@ -161,7 +161,15 @@ func (p *RelayRouter) handleAnthropicPassthrough(w http.ResponseWriter, r *http.
 		http.NotFound(w, r)
 		return
 	}
-	p.newAnthropicPassthroughProxy().ServeHTTP(w, r)
+	// Body is unread on this path (true byte-for-byte passthrough — reading
+	// it here to sniff "model"/"stream" would mean buffering and
+	// re-installing it, defeating the point), so the connection is labeled
+	// with what's known for free: no model, and r.ContentLength as the
+	// upfront byte count.
+	conn, mw := p.metrics.begin(w, r, "", false, r.ContentLength)
+	conn.setTarget("anthropic-passthrough", p.anthropic.upstream.Host)
+	defer p.metrics.end(conn)
+	p.newAnthropicPassthroughProxy().ServeHTTP(mw, r)
 }
 
 func readAnthropicBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
@@ -188,12 +196,27 @@ func anthropicRequestModel(body []byte) string {
 	return envelope.Model
 }
 
+func anthropicRequestStream(body []byte) bool {
+	var envelope struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &envelope)
+	return envelope.Stream
+}
+
 // anthropicPassthroughBody re-installs body onto r (it was already drained by
-// readAnthropicBody to inspect "model") and forwards byte-for-byte to Upstream.
+// readAnthropicBody to inspect "model") and forwards byte-for-byte to
+// Upstream. Unlike handleAnthropicPassthrough, body is already decoded here
+// (the caller read it to check the modelMap), so the connection is labeled
+// with the real model/stream instead of the "" placeholder the raw
+// catch-all path uses.
 func (p *RelayRouter) anthropicPassthroughBody(w http.ResponseWriter, r *http.Request, body []byte) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
-	p.newAnthropicPassthroughProxy().ServeHTTP(w, r)
+	conn, mw := p.metrics.begin(w, r, anthropicRequestModel(body), anthropicRequestStream(body), int64(len(body)))
+	conn.setTarget("anthropic-passthrough", p.anthropic.upstream.Host)
+	defer p.metrics.end(conn)
+	p.newAnthropicPassthroughProxy().ServeHTTP(mw, r)
 }
 
 // newAnthropicPassthroughProxy builds a byte-for-byte reverse proxy to
@@ -252,6 +275,14 @@ func (p *RelayRouter) handleAnthropicRedirect(w http.ResponseWriter, r *http.Req
 		return
 	}
 	innerReq.Header.Set("Content-Type", "application/json")
+	// Tag the re-entrant request so status_metrics.go's ProxyMetrics.begin can
+	// mark its ProxyConn viaAnthropic: true — the dashboard's bytesOut for
+	// this connection is the backend's OpenAI-format byte count, not what the
+	// client actually received (tw translates it), and that needs to be
+	// labeled rather than papered over. A context value is used rather than a
+	// header because a header set on innerReq would be forwarded to the
+	// upstream by newUpstreamProxy's Director.
+	innerReq = innerReq.WithContext(context.WithValue(innerReq.Context(), proxyViaAnthropicKey{}, true))
 
 	// defer, not a bare follow-up call: a client disconnecting mid-stream
 	// makes httputil.ReverseProxy's body copy fail, and the stdlib's
