@@ -262,24 +262,31 @@ func (p *BaseChatProvider) Start() error {
 }
 
 func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if !p.started.Load() {
 		return fmt.Errorf("%s: provider not started", p.transport.Name())
 	}
 
+	p.mu.Lock()
 	p.lastFiles = files
 	messages := p.transport.BuildMessages(p.session.SystemPrompt, p.copyHistory())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancelFn = cancel
 	gen := p.generation.Add(1)
+	p.mu.Unlock()
 
 	tools := p.toolDefs()
 	slog.Debug("chat: sending message", "transport", p.transport.Name(),
 		"session", p.session.ID, "tools", len(tools))
 
+	// AcquireBackend/PostChat run with p.mu released: both can block for a long
+	// time (a cold managed-server launch, or an upstream that's slow to answer
+	// headers), and StopGeneration must be able to reach cancelFn/activeBody
+	// while that's happening rather than queue up behind this call. gen is
+	// re-checked after each blocking step so a call superseded by a concurrent
+	// StopGeneration/SendMessage becomes a silent no-op instead of clobbering
+	// newer state.
+	//
 	// Managed-server transports resolve their backend here rather than at
 	// Start(), because the process may have been evicted since the last turn
 	// and can come back on a different port. The lease is held for the whole
@@ -296,11 +303,24 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 		release = r
 	}
 
+	if p.generation.Load() != gen {
+		release()
+		cancel()
+		return nil
+	}
+
 	resp, err := p.transport.PostChat(ctx, messages, tools)
 	if err != nil {
 		release()
 		cancel()
 		return fmt.Errorf("%s: %w", p.transport.Name(), err)
+	}
+
+	if p.generation.Load() != gen {
+		release()
+		cancel()
+		resp.Body.Close()
+		return nil
 	}
 
 	go p.runToolLoop(ctx, cancel, resp, messages, time.Now(), gen, release)
@@ -545,11 +565,13 @@ func (p *BaseChatProvider) StopGeneration() {
 	p.cancelFn = nil
 	body := p.activeBody
 	p.activeBody = nil
-	p.mu.Unlock()
-
-	// Increment generation first — any events the old goroutine emits after
-	// this point are silently discarded by the guarded handler.
+	// Increment generation before releasing p.mu — any events the old
+	// goroutine emits after this point are silently discarded by the guarded
+	// handler, and no SendMessage can observe the old generation between the
+	// unlock and this call (it would otherwise be able to spawn a fresh
+	// runToolLoop that this Add then wrongly marks stale).
 	p.generation.Add(1)
+	p.mu.Unlock()
 
 	// Close the response body to immediately break the scanner mid-read.
 	// This is faster than waiting for context cancellation to propagate.
