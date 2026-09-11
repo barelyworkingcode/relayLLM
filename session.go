@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -808,6 +809,10 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 	return nil
 }
 
+// sendMessageSyncTimeout bounds SendMessageSync's wait for a complete
+// response. Test-only seam — production never reassigns this.
+var sendMessageSyncTimeout = 5 * time.Minute
+
 // SendMessageSync sends a message and waits for the complete response.
 // Used by HTTP API for non-streaming clients (relayTelegram, relayScheduler).
 func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
@@ -833,7 +838,16 @@ func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAtt
 		return "", SessionStats{}, err
 	}
 
-	return collector.Wait(5 * time.Minute)
+	result, stats, err := collector.Wait(sendMessageSyncTimeout)
+	if errors.Is(err, ErrResponseTimeout) {
+		// A collector timeout means the provider is still generating with no
+		// caller left waiting on it. Without this, the managed-server lease
+		// and session.processing stay held indefinitely — the alias reports
+		// busy forever and only an explicit stop (never issued, since the
+		// caller already gave up) or the upstream closing the socket frees it.
+		_ = m.StopGeneration(sessionID)
+	}
+	return result, stats, err
 }
 
 func (m *SessionManager) GetSession(id string) (*Session, bool) {
