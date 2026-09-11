@@ -13,12 +13,19 @@ package main
 // because they require a real model.
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,7 +292,10 @@ func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
 
 func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 18000}, "")
-	port := mgr.allocatePort()
+	port, err := mgr.allocatePort()
+	if err != nil {
+		t.Fatalf("allocatePort: %v", err)
+	}
 	if port == 0 {
 		t.Fatal("allocatePort returned 0")
 	}
@@ -309,13 +319,94 @@ func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
 	}
 	defer blocker.Close()
 
-	port := mgr.allocatePort()
+	port, err := mgr.allocatePort()
+	if err != nil {
+		t.Fatalf("allocatePort: %v", err)
+	}
 	if port == 18100 {
 		t.Errorf("allocator returned a port we already bound: %d", port)
 	}
 	if port == 0 {
 		t.Errorf("allocator returned 0")
 	}
+}
+
+// TestServerManager_AllocatePort_BoundedNotInfinite verifies a persistent
+// Listen failure returns an error instead of spinning forever holding m.mu.
+func TestServerManager_AllocatePort_BoundedNotInfinite(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 70000}, "")
+	done := make(chan struct{})
+	go func() {
+		_, _ = mgr.allocatePort()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("allocatePort did not return — starting past the valid port range should fail fast, not loop forever")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// logProcessOutput — no real subprocess: cmd is never Start()ed, so
+// cmd.StdoutPipe() just hands back an os.Pipe write end we can drive
+// directly via cmd.Stdout.
+// ---------------------------------------------------------------------------
+
+// syncBuffer is a bytes.Buffer safe for one writer goroutine and one reader
+// goroutine, needed here because logProcessOutput's scanner goroutine writes
+// to it concurrently with the test polling for the result.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestLogProcessOutput_DrainsLinesLargerThanDefaultScannerLimit pins the fix
+// for bufio.Scanner's default 64KB token limit: without scanner.Buffer, a
+// single line past that size makes Scan() return false and the goroutine
+// exit without draining the pipe, silently losing everything written after
+// it and eventually blocking the child's next write once the OS pipe buffer
+// fills.
+func TestLogProcessOutput_DrainsLinesLargerThanDefaultScannerLimit(t *testing.T) {
+	var out syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// logProcessOutput itself calls cmd.StdoutPipe()/StderrPipe() — cmd is
+	// never Start()ed, so this just wires up an os.Pipe pair without a real
+	// subprocess. The write ends land on cmd.Stdout/cmd.Stderr, which we can
+	// drive directly.
+	cmd := &exec.Cmd{}
+	logProcessOutput(cmd, "test", "alias")
+
+	// Well past bufio's default 64KB MaxScanTokenSize.
+	long := strings.Repeat("a", 200*1024)
+	const marker = "MARKER-AFTER-LONG-LINE"
+	w, ok := cmd.Stdout.(io.WriteCloser)
+	if !ok {
+		t.Fatalf("cmd.Stdout = %T, want io.WriteCloser", cmd.Stdout)
+	}
+	if _, err := io.WriteString(w, long+"\n"+marker+"\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	w.Close()
+
+	waitFor(t, 2*time.Second, func() bool {
+		return strings.Contains(out.String(), marker)
+	})
 }
 
 // ---------------------------------------------------------------------------

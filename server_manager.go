@@ -467,7 +467,11 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 
 	port := m.portFromArgs(cfg.Args)
 	if port == 0 {
-		port = m.allocatePort()
+		var err error
+		port, err = m.allocatePort()
+		if err != nil {
+			return nil, fmt.Errorf("%s: cannot launch %q: %w", m.profile.Kind, alias, err)
+		}
 	}
 
 	// Pre-bind check: if the port is already held by another process
@@ -848,19 +852,29 @@ func (m *ServerManager) StopAll() {
 	wg.Wait()
 }
 
+// maxPortScanAttempts bounds allocatePort's search. Without a cap, a
+// persistent non-EADDRINUSE Listen failure (fd exhaustion, or nextPort
+// climbing past 65535) would spin forever holding m.mu, wedging every
+// Acquire/ModelCatalog/ListInstances call on this manager.
+const maxPortScanAttempts = 2000
+
 // allocatePort finds the next free TCP port starting from m.nextPort.
 // Must be called with m.mu held.
-func (m *ServerManager) allocatePort() int {
-	for {
+func (m *ServerManager) allocatePort() (int, error) {
+	for i := 0; i < maxPortScanAttempts; i++ {
 		port := m.nextPort
 		m.nextPort++
+		if port > 65535 {
+			return 0, fmt.Errorf("%s: port scan exhausted the valid range (nextPort=%d)", m.profile.Kind, port)
+		}
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue // port occupied, try next
 		}
 		ln.Close()
-		return port
+		return port, nil
 	}
+	return 0, fmt.Errorf("%s: could not find a free port after %d attempts starting at %d", m.profile.Kind, maxPortScanAttempts, m.nextPort-maxPortScanAttempts)
 }
 
 // portFromArgs extracts an explicit port from the args map, or returns 0
@@ -1106,6 +1120,13 @@ func endpointForPort(profile ServerProfile, port int) *OpenAIEndpoint {
 	}
 }
 
+// maxLogLineBytes raises bufio.Scanner's default 64KB token limit. Verbose
+// request logging (llama-server logs full request JSON, which easily
+// exceeds 64KB with a long context or an image) would otherwise hit
+// ErrTooLong, silently exit the scan loop, and stop draining the pipe —
+// once the OS pipe buffer then fills, the child's next write blocks.
+const maxLogLineBytes = 8 * 1024 * 1024
+
 // logProcessOutput pipes cmd's stdout and stderr to slog, one line at a
 // time via bufio.Scanner. This correctly handles partial writes and
 // multi-line output, unlike a bare io.Writer.
@@ -1115,6 +1136,7 @@ func logProcessOutput(cmd *exec.Cmd, kind, alias string) {
 	if err == nil {
 		go func() {
 			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 			for scanner.Scan() {
 				slog.Debug(scanner.Text(), "source", source)
 			}
@@ -1124,6 +1146,7 @@ func logProcessOutput(cmd *exec.Cmd, kind, alias string) {
 	if err == nil {
 		go func() {
 			scanner := bufio.NewScanner(stderr)
+			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 			for scanner.Scan() {
 				slog.Warn(scanner.Text(), "source", source)
 			}
