@@ -625,7 +625,15 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		return nil
 	}
 	p := NewRelayRouter(addr, managers, registry, virtual)
-	if len(p.managers) == 0 && p.registry == nil {
+	// A router with no managed servers and no OpenAI endpoints would
+	// otherwise dispatch nothing — except router.anthropic's passthrough is
+	// a real destination in its own right (api.anthropic.com), needing
+	// neither. Without this check, a deployment using relayLLM purely as a
+	// Claude Code proxy (router.anthropic configured, nothing else) got no
+	// router at all: /v1/messages, the /api/* bootstrap passthrough,
+	// everything 404'd with no indication why.
+	hasAnthropic := router != nil && router.Anthropic != nil
+	if len(p.managers) == 0 && p.registry == nil && !hasAnthropic {
 		return nil
 	}
 	if router != nil {
