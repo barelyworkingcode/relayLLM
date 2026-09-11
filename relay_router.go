@@ -453,11 +453,11 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	target, err := url.Parse(endpoint.BaseURL)
 	if err != nil {
 		// endpoint.BaseURL is normally built internally (e.g.
-		// "http://127.0.0.1:<port>/v1") and always valid, but a dropped error
-		// here used to leave target nil — newUpstreamProxy's Director
-		// dereferences target.Scheme unconditionally, so a bad URL panicked
-		// inside the handler instead of failing the request (code review
-		// item 7).
+		// "http://127.0.0.1:<port>/v1") and always valid, but this error must
+		// still be handled here rather than ignored: newUpstreamProxy's
+		// Director dereferences target.Scheme unconditionally, so passing a
+		// nil target would panic inside the handler instead of failing the
+		// request cleanly.
 		slog.Warn("relay router: bad managed server endpoint", "kind", mgr.profile.Kind, "alias", alias, "error", err)
 		writeRouterError(w, http.StatusBadGateway, fmt.Sprintf("invalid managed server endpoint: %v", err))
 		return
@@ -536,14 +536,12 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 // load-bearing, not stylistic: Go's memory model guarantees a goroutine's
 // creation happens-before its execution, so setting the fields first means
 // every connection-handling goroutine transitively spawned from the one
-// below is guaranteed to observe them. The previous shape — main calling the
-// router's (then-exported) SetReasoningEffortMap after StartRelayRouter had
-// already returned — left a window where a request accepted the instant the
-// listener came up could read the field concurrently with that write, an
-// unsynchronized race the detector flags under real traffic (code review
-// item 4). StartRelayRouter is the one production call site for this,
-// chosen over adding the parameters to NewRelayRouter because it has far
-// fewer call sites to touch.
+// below is guaranteed to observe them without synchronization. Setting them
+// after the listener is already serving would let an accepted request read
+// the field concurrently with the write — a real, race-detector-visible
+// data race under live traffic. StartRelayRouter is the one production call
+// site for this, chosen over adding the parameters to NewRelayRouter
+// because it has far fewer call sites to touch.
 //
 // tlsCert/tlsKey are the router listener's own cert/key pair (empty strings
 // mean plain http); main validates they're either both set or both empty

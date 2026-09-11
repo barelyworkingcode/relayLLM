@@ -104,7 +104,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	// happens to collide with an endpoint's prefixed id (e.g. a virtual
 	// literally named "ep/model") must win the dedup here too, or the
 	// catalog would list a row a request for that id would never actually
-	// reach (see the dedup comment above / code review item 6).
+	// reach.
 	if p.virtual != nil {
 		for i := range p.virtual.Models {
 			virtual := &p.virtual.Models[i]

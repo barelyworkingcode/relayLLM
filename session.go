@@ -385,7 +385,6 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	m.sessions[session.ID] = session
 	m.mu.Unlock()
 
-	// Initialize the provider.
 	if err := m.initProvider(session); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, session.ID)
@@ -474,8 +473,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("%s: manager not configured", kind)
 		}
 		// Validate the alias now so a typo fails at session creation rather
-		// than at the first message — the eager GetOrLaunch used to do this
-		// as a side effect of launching.
+		// than at the first message.
 		if !mgr.HasAlias(modelID) {
 			return fmt.Errorf("%s: unknown model alias %q", kind, modelID)
 		}
@@ -622,7 +620,6 @@ func resolveHookPath() (string, error) {
 }
 
 func (m *SessionManager) handleProviderEvent(session *Session, eventType string, data json.RawMessage) {
-	// Build the message once.
 	var msg map[string]interface{}
 
 	switch eventType {
@@ -708,7 +705,6 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		return
 	}
 
-	// Route to collector if one is registered for this session.
 	m.mu.RLock()
 	collector := m.collectors[session.ID]
 	m.mu.RUnlock()
@@ -717,7 +713,6 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		collector.HandleEvent(msg)
 	}
 
-	// Always forward to the main sink (WebSocket clients).
 	if m.sink != nil {
 		m.sink.SendToSession(session.ID, msg)
 	}
@@ -737,7 +732,6 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	session.processing = true
 	session.mu.Unlock()
 
-	// Restart provider if dead.
 	provider := session.getProvider()
 	if provider == nil || !provider.Alive() {
 		if err := m.initProvider(session); err != nil {
@@ -749,7 +743,6 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 		provider = session.getProvider()
 	}
 
-	// Persist user message.
 	contentJSON, _ := json.Marshal(text)
 	session.mu.Lock()
 	session.Messages = append(session.Messages, Message{
@@ -1039,7 +1032,6 @@ func (m *SessionManager) ClearSession(id string) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	// Kill existing provider
 	session.mu.Lock()
 	provider := session.provider
 	session.provider = nil
@@ -1053,15 +1045,12 @@ func (m *SessionManager) ClearSession(id string) error {
 		provider.Kill()
 	}
 
-	// Persist cleared state
 	m.saveSession(session)
 
-	// Restart provider
 	if err := m.initProvider(session); err != nil {
 		return fmt.Errorf("failed to restart provider: %w", err)
 	}
 
-	// Send clear events to WS client
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgClearMessages,
@@ -1155,7 +1144,6 @@ func (m *SessionManager) RenameSession(id, name string) error {
 
 	m.saveSession(session)
 
-	// Notify WS clients
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgSessionRenamed,
@@ -1184,7 +1172,6 @@ func (m *SessionManager) SetSessionFolder(id, folder string) error {
 
 	m.saveSession(session)
 
-	// Notify WS clients (any other viewers of this session).
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgSessionFolderChanged,
