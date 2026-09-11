@@ -2,11 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrResponseTimeout is returned by Wait when the timeout elapses before the
+// provider signals completion. Callers use errors.Is to distinguish this
+// from an error the provider itself reported, since only a timeout leaves
+// the provider still generating with nothing left waiting on it.
+var ErrResponseTimeout = errors.New("response timeout")
 
 // ResponseCollector captures a complete LLM response for synchronous HTTP callers.
 // Registered via SessionManager.collectors map — does not replace the global sink.
@@ -92,6 +99,6 @@ func (c *ResponseCollector) Wait(timeout time.Duration) (string, SessionStats, e
 		}
 		return c.text.String(), c.stats, nil
 	case <-time.After(timeout):
-		return "", SessionStats{}, fmt.Errorf("response timeout after %v", timeout)
+		return "", SessionStats{}, fmt.Errorf("%w after %v", ErrResponseTimeout, timeout)
 	}
 }
