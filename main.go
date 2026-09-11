@@ -245,6 +245,16 @@ func main() {
 	RegisterModelRoutes(mux, *ollamaURL, proxyRegistry, llamaManager, mlxManager, cfg.Pi, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
 	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, mlxManager, startTime)
+	RegisterDetailedStatusRoutes(mux, DetailedStatusDeps{
+		Sessions:  sessions,
+		Terminals: terminalMgr,
+		WSHub:     wsHub,
+		Managers:  managers,
+		Registry:  proxyRegistry,
+		Virtual:   cfg.Virtual,
+		Router:    relayRouter,
+		StartTime: startTime,
+	})
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Build the handler chain. recoverMiddleware sits closest to the mux so it

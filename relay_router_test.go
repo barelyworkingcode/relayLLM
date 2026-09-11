@@ -1593,6 +1593,32 @@ func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T)
 	}
 }
 
+// A router.anthropic-only configuration — no managed servers, no OpenAI
+// endpoints — must still start: passthrough to api.anthropic.com is a real
+// destination needing neither. Regression test for the config that used to
+// silently produce no router at all (every route 404'd, nothing logged
+// explaining why).
+func TestStartRelayRouter_AnthropicOnlyConfigStillStarts(t *testing.T) {
+	router := StartRelayRouter(":0", nil, nil, nil, &RouterConfig{
+		Anthropic: &AnthropicRouterConfig{Upstream: "https://api.anthropic.com"},
+	}, "", "")
+	if router == nil {
+		t.Fatal("expected a non-nil router when router.anthropic is configured, even with no managers/registry")
+	}
+	t.Cleanup(func() { router.Close() })
+}
+
+// With no managers, no registry, and no router.anthropic, the router has
+// nothing to dispatch to and must not bind a listener — unchanged behavior
+// from before the anthropic-only fix above.
+func TestStartRelayRouter_TrulyEmptyConfigReturnsNil(t *testing.T) {
+	router := StartRelayRouter(":0", nil, nil, nil, nil, "", "")
+	if router != nil {
+		router.Close()
+		t.Fatal("expected nil router with no managers, no registry, and no anthropic config")
+	}
+}
+
 // A nil *RouterConfig must remain a valid, no-op input.
 func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{

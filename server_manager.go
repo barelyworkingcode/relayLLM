@@ -1002,15 +1002,18 @@ const (
 )
 
 // ManagedModelInfo describes one configured alias for catalog listings.
-// ContextSize is 0 when the model does not pin a ctx-size.
+// ContextSize is 0 when the model does not pin a ctx-size. json tags added
+// for GET /api/status/detailed's models.catalog rows (status_metrics.go) —
+// nothing else marshals this type today (relay_router_models.go and
+// relay_router_anthropic.go both read fields by hand).
 type ManagedModelInfo struct {
-	Alias          string
-	Status         string
-	Failed         bool   // last explicit load failed; clients stop polling on this
-	Error          string // failure detail, empty unless Failed
-	ContextSize    int64  // configured ctx-size; 0 when unset
-	TrainedContext int64  // the model's native context; 0 when unknown
-	SupportsImages bool
+	Alias          string `json:"alias"`
+	Status         string `json:"status"`
+	Failed         bool   `json:"failed"`                   // last explicit load failed; clients stop polling on this
+	Error          string `json:"error,omitempty"`          // failure detail, empty unless Failed
+	ContextSize    int64  `json:"contextSize,omitempty"`    // configured ctx-size; 0 when unset
+	TrainedContext int64  `json:"trainedContext,omitempty"` // the model's native context; 0 when unknown
+	SupportsImages bool   `json:"supportsImages"`
 }
 
 // ModelCatalog returns every configured alias with its current load state.

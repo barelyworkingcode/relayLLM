@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Security regression suite. One file = one audit surface. Every test here
@@ -243,6 +246,37 @@ func TestSec_HostTerminalExec_ArgvNeverContainsRelaySecrets(t *testing.T) {
 				t.Errorf("tmplID=%q host terminal script leaked %q: %s", tmplID, secret, decoded)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/status/detailed must never leak an endpoint's credentials
+// (api_status_detailed.go). EndpointStatus embeds the full OpenAIEndpoint,
+// including APIKey (and, for a TLS-pinned endpoint, CAFile/PinSHA256) — the
+// endpoint rows this handler builds must construct each field explicitly
+// rather than ever marshaling EndpointStatus/OpenAIEndpoint directly.
+// ---------------------------------------------------------------------------
+
+func TestSec_DetailedStatus_NeverLeaksEndpointSecrets(t *testing.T) {
+	const secretKey = "sk-super-secret-do-not-leak-1234567890"
+	ep := OpenAIEndpoint{Name: "leaky", BaseURL: "http://127.0.0.1:1/v1", APIKey: secretKey}
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+
+	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
+	deps := DetailedStatusDeps{
+		Sessions:  sessions,
+		Registry:  registry,
+		StartTime: time.Now(),
+	}
+	got := buildDetailedStatus(context.Background(), deps)
+
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal detailed status: %v", err)
+	}
+	if strings.Contains(string(data), secretKey) {
+		t.Errorf("GET /api/status/detailed leaked the endpoint's APIKey into the response body")
 	}
 }
 
