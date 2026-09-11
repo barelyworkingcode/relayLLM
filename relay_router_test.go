@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1574,15 +1575,18 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 // accepted connection under real traffic (unsynchronized read/write on
 // reasoningEffortMap, the kind of thing -race flags). Reading the field
 // directly here (rather than over HTTP) proves the ordering structurally:
-// the write happens inside StartRelayRouter itself, before the
-// "go func(){...}()" statement that starts serving.
+// the write happens inside StartRelayRouter itself, before Serve's
+// "go func(){...}()" statements start serving.
 func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, &RouterConfig{
+	router, err := StartRelayRouter([]string{":0"}, []*ServerManager{mgr}, nil, nil, &RouterConfig{
 		ReasoningEffortMap: map[string]string{"minimal": "none"},
 	}, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
 	if router == nil {
 		t.Fatal("expected a non-nil router")
 	}
@@ -1599,9 +1603,12 @@ func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T)
 // silently produce no router at all (every route 404'd, nothing logged
 // explaining why).
 func TestStartRelayRouter_AnthropicOnlyConfigStillStarts(t *testing.T) {
-	router := StartRelayRouter(":0", nil, nil, nil, &RouterConfig{
+	router, err := StartRelayRouter([]string{":0"}, nil, nil, nil, &RouterConfig{
 		Anthropic: &AnthropicRouterConfig{Upstream: "https://api.anthropic.com"},
 	}, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
 	if router == nil {
 		t.Fatal("expected a non-nil router when router.anthropic is configured, even with no managers/registry")
 	}
@@ -1612,7 +1619,10 @@ func TestStartRelayRouter_AnthropicOnlyConfigStillStarts(t *testing.T) {
 // nothing to dispatch to and must not bind a listener — unchanged behavior
 // from before the anthropic-only fix above.
 func TestStartRelayRouter_TrulyEmptyConfigReturnsNil(t *testing.T) {
-	router := StartRelayRouter(":0", nil, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{":0"}, nil, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
 	if router != nil {
 		router.Close()
 		t.Fatal("expected nil router with no managers, no registry, and no anthropic config")
@@ -1624,7 +1634,10 @@ func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router := StartRelayRouter(":0", []*ServerManager{mgr}, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{":0"}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
 	if router == nil {
 		t.Fatal("expected a non-nil router")
 	}
@@ -1633,6 +1646,124 @@ func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 	if router.reasoningEffortMap != nil {
 		t.Errorf("reasoningEffortMap = %v, want nil (zero value) when RouterConfig is nil", router.reasoningEffortMap)
 	}
+}
+
+// StartRelayRouter given several addresses must bind and serve every one of
+// them behind the same handler — the multi-interface case this whole
+// Listen/Serve split exists for.
+func TestStartRelayRouter_MultipleAddrsAllServe(t *testing.T) {
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "a"}},
+	}, "")
+	router, err := StartRelayRouter([]string{"127.0.0.1:0", "127.0.0.1:0"}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
+	if router == nil {
+		t.Fatal("expected a non-nil router")
+	}
+	t.Cleanup(func() { router.Close() })
+
+	addrs := router.Addrs()
+	if len(addrs) != 2 {
+		t.Fatalf("Addrs() = %v, want 2 bound addresses", addrs)
+	}
+	if addrs[0] == addrs[1] {
+		t.Fatalf("expected two distinct ephemeral ports, got the same address twice: %s", addrs[0])
+	}
+	if router.Addr() != addrs[0] {
+		t.Errorf("Addr() = %q, want the first bound address %q", router.Addr(), addrs[0])
+	}
+
+	for _, addr := range addrs {
+		waitForRouterUp(t, addr)
+		resp, err := http.Get("http://" + addr + "/health")
+		if err != nil {
+			t.Fatalf("GET %s/health: %v", addr, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s/health: status %d, want 200", addr, resp.StatusCode)
+		}
+	}
+}
+
+// A bind failure on any one of several requested addresses must be fatal —
+// StartRelayRouter returns a non-nil error rather than silently running on
+// whichever addresses happened to succeed, matching startMainTCPListener's
+// fail-closed startup behavior.
+// A bind failure on one of several requested addresses is best-effort, not
+// fatal: StartRelayRouter must still return a working router serving
+// whichever addresses actually bound, logging (not erroring on) the one
+// that didn't — see listenAll's doc comment for why this is deliberate.
+func TestStartRelayRouter_PartialBindFailureStillStarts(t *testing.T) {
+	busy := freeTCPAddr(t)
+	ln, err := net.Listen("tcp", busy)
+	if err != nil {
+		t.Fatalf("occupy %s: %v", busy, err)
+	}
+	defer ln.Close()
+
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "a"}},
+	}, "")
+	router, err := StartRelayRouter([]string{"127.0.0.1:0", busy}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
+	if router == nil {
+		t.Fatal("expected a non-nil router even though one of two addresses was busy")
+	}
+	t.Cleanup(func() { router.Close() })
+
+	addrs := router.Addrs()
+	if len(addrs) != 1 {
+		t.Fatalf("Addrs() = %v, want exactly the one address that actually bound", addrs)
+	}
+	if addrs[0] == busy {
+		t.Fatalf("the surviving listener is the busy address; expected the free one to have bound instead")
+	}
+}
+
+// Only a TOTAL bind failure — every requested address rejected — is fatal.
+func TestStartRelayRouter_TotalBindFailureIsFatal(t *testing.T) {
+	busy := freeTCPAddr(t)
+	ln, err := net.Listen("tcp", busy)
+	if err != nil {
+		t.Fatalf("occupy %s: %v", busy, err)
+	}
+	defer ln.Close()
+
+	mgr := NewServerManager(llamaProfile, &ServerConfig{
+		Models: []ServerModelConfig{{Alias: "a"}},
+	}, "")
+	router, err := StartRelayRouter([]string{busy, busy}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	if err == nil {
+		router.Close()
+		t.Fatal("expected an error when every requested address is already in use")
+	}
+	if router != nil {
+		t.Errorf("expected a nil router alongside the bind error, got %v", router)
+	}
+}
+
+// waitForRouterUp polls addr until it accepts a plain TCP connection, since
+// Serve's per-listener goroutines start asynchronously relative to
+// StartRelayRouter returning.
+func waitForRouterUp(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("tcp", addr)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("router never came up at %s: %v", addr, lastErr)
 }
 
 // A Snapshot triggered by an already-canceled caller context must still

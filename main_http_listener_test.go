@@ -4,11 +4,15 @@ package main
 // --http-bind / --http-tls-cert / --http-tls-key) added so the /status
 // dashboard is reachable from a browser without hand-rolling a proxy.
 //
-// The invariant these tests exist to protect is "second front, same door":
-// the TCP listener must serve the identical handler value the Unix socket
-// serves, with the identical bearer auth. TestMainTCPListener_MatchesSocket
-// asserts that by driving one handler through both transports and comparing
-// the answers, rather than by asserting a route list that would drift.
+// The invariant these tests exist to protect is "same routes, different
+// auth": the TCP front serves the identical route table (mux) the Unix
+// socket serves, but carries NO bearer-token requirement of its own —
+// reachability is gated purely by which --http-bind addresses actually
+// bound, matching --router-port's existing unauthenticated-by-bind-address
+// posture. The socket keeps requiring the token (it carries relay's
+// manifest bridging and the permission hook's callback). See auth.go's
+// bearerAuth doc comment and main.go's handler-chain comment for the full
+// reasoning.
 //
 // Certificates come from tls_test_helpers_test.go — hermetic, loopback only.
 
@@ -19,8 +23,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,42 +47,34 @@ func TestValidateHTTPListener(t *testing.T) {
 	cases := []struct {
 		name    string
 		port    string
-		bind    string
 		cert    string
 		key     string
 		wantErr string // substring; "" means the config must be accepted
 	}{
-		{name: "disabled by default", port: "", bind: "127.0.0.1"},
+		{name: "disabled by default", port: ""},
 		// A disabled listener must not be able to fail startup for any
 		// reason, even on flags that would be invalid were it enabled.
-		{name: "disabled ignores a broken tls pair", port: "", bind: "0.0.0.0", cert: "/tmp/cert.pem"},
-		{name: "loopback plaintext", port: "8181", bind: "127.0.0.1"},
-		{name: "localhost by name is loopback", port: "8181", bind: "localhost"},
-		{name: "ipv6 loopback", port: "8181", bind: "::1"},
-		{name: "cert without key", port: "8181", bind: "127.0.0.1", cert: "/tmp/cert.pem",
+		{name: "disabled ignores a broken tls pair", port: "", cert: "/tmp/cert.pem"},
+		{name: "no tls configured", port: "8181"},
+		{name: "cert without key", port: "8181", cert: "/tmp/cert.pem",
 			wantErr: "--http-tls-key"},
-		{name: "key without cert", port: "8181", bind: "127.0.0.1", key: "/tmp/key.pem",
+		{name: "key without cert", port: "8181", key: "/tmp/key.pem",
 			wantErr: "--http-tls-cert"},
-		{name: "wildcard bind without tls", port: "8181", bind: "0.0.0.0",
-			wantErr: "plaintext"},
-		{name: "lan bind without tls", port: "8181", bind: "192.168.64.1",
-			wantErr: "plaintext"},
-		{name: "wildcard bind with tls", port: "8181", bind: "0.0.0.0",
-			cert: "/tmp/cert.pem", key: "/tmp/key.pem"},
+		{name: "matched cert and key", port: "8181", cert: "/tmp/cert.pem", key: "/tmp/key.pem"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateHTTPListener(tc.port, tc.bind, tc.cert, tc.key)
+			err := validateHTTPListener(tc.port, tc.cert, tc.key)
 			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("validateHTTPListener(%q,%q,%q,%q) = %v; want nil",
-						tc.port, tc.bind, tc.cert, tc.key, err)
+					t.Fatalf("validateHTTPListener(%q,%q,%q) = %v; want nil",
+						tc.port, tc.cert, tc.key, err)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("validateHTTPListener(%q,%q,%q,%q) = nil; want error containing %q",
-					tc.port, tc.bind, tc.cert, tc.key, tc.wantErr)
+				t.Fatalf("validateHTTPListener(%q,%q,%q) = nil; want error containing %q",
+					tc.port, tc.cert, tc.key, tc.wantErr)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
@@ -93,7 +87,7 @@ func TestValidateHTTPListener(t *testing.T) {
 // deployment (no --http-port) has to be byte-identical to the code before
 // this feature existed.
 func TestMainTCPListener_DisabledIsNoop(t *testing.T) {
-	srv, err := startMainTCPListener("", "", "", echoMux())
+	srv, err := startMainTCPListener(nil, "", "", echoMux())
 	if err != nil {
 		t.Fatalf("disabled listener returned an error: %v", err)
 	}
@@ -106,7 +100,7 @@ func TestMainTCPListener_DisabledIsNoop(t *testing.T) {
 // its base URL. Registers its own shutdown.
 func startTestFront(t *testing.T, certFile, keyFile string, handler http.Handler) (*http.Server, string) {
 	t.Helper()
-	srv, err := startMainTCPListener("127.0.0.1:0", certFile, keyFile, handler)
+	srv, err := startMainTCPListener([]string{"127.0.0.1:0"}, certFile, keyFile, handler)
 	if err != nil {
 		t.Fatalf("startMainTCPListener: %v", err)
 	}
@@ -122,19 +116,19 @@ func startTestFront(t *testing.T, certFile, keyFile string, handler http.Handler
 	return srv, scheme + "://" + srv.Addr
 }
 
-func TestMainTCPListener_RequiresTheSameBearerToken(t *testing.T) {
-	handler := bearerAuth(httpFrontToken, echoMux())
-	_, base := startTestFront(t, "", "", handler)
+// The TCP front must serve every request with no credentials at all — no
+// Authorization header, no cookie, nothing. Reachability is the only gate,
+// via --http-bind.
+func TestMainTCPListener_ServesWithoutAnyCredentials(t *testing.T) {
+	_, base := startTestFront(t, "", "", recoverMiddleware(echoMux()))
 
 	cases := []struct {
 		name   string
 		header string
-		want   int
 	}{
-		{"no credentials", "", http.StatusUnauthorized},
-		{"wrong token", "Bearer " + strings.Repeat("0", len(httpFrontToken)), http.StatusUnauthorized},
-		{"not a bearer scheme", "Basic " + httpFrontToken, http.StatusUnauthorized},
-		{"correct token", "Bearer " + httpFrontToken, http.StatusOK},
+		{"no credentials", ""},
+		{"a bearer header present but never checked", "Bearer " + httpFrontToken},
+		{"garbage credentials still work", "Basic garbage"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,18 +144,18 @@ func TestMainTCPListener_RequiresTheSameBearerToken(t *testing.T) {
 				t.Fatalf("GET /status: %v", err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != tc.want {
-				t.Fatalf("status %d; want %d", resp.StatusCode, tc.want)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d; want 200 regardless of credentials", resp.StatusCode)
 			}
 		})
 	}
 }
 
-// The load-bearing claim of this feature: the TCP front is the same door as
-// the Unix socket, not a parallel one. Same handler value, both transports,
-// identical answers — including the 401 for an unauthenticated caller.
-func TestMainTCPListener_MatchesSocket(t *testing.T) {
-	handler := bearerAuth(httpFrontToken, echoMux())
+// The load-bearing claim of this feature's new shape: the TCP front serves
+// the identical route table (mux) the Unix socket serves, but the socket
+// keeps requiring the bearer token while the TCP front never does.
+func TestMainTCPListener_SameRoutesAsSocket_DifferentAuth(t *testing.T) {
+	recovered := recoverMiddleware(echoMux())
 
 	// /tmp rather than t.TempDir(): a sockaddr_un path is capped near 104
 	// bytes and the per-test temp path overflows it (same reason
@@ -176,7 +170,7 @@ func TestMainTCPListener_MatchesSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
 	}
-	sockServer := &http.Server{Handler: handler}
+	sockServer := &http.Server{Handler: bearerAuth(httpFrontToken, recovered)}
 	go func() { _ = sockServer.Serve(ln) }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -189,7 +183,7 @@ func TestMainTCPListener_MatchesSocket(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
 		},
 	}}
-	_, base := startTestFront(t, "", "", handler)
+	_, base := startTestFront(t, "", "", recovered)
 
 	get := func(client *http.Client, rawURL, token string) (int, string) {
 		t.Helper()
@@ -209,69 +203,20 @@ func TestMainTCPListener_MatchesSocket(t *testing.T) {
 		return resp.StatusCode, strings.TrimSpace(string(body))
 	}
 
-	for _, path := range []string{"/status", "/api/status/detailed"} {
-		for _, token := range []string{httpFrontToken, ""} {
-			sockCode, sockBody := get(sockClient, "http://unix"+path, token)
-			tcpCode, tcpBody := get(http.DefaultClient, base+path, token)
-			if sockCode != tcpCode || sockBody != tcpBody {
-				t.Fatalf("path %s (token present: %t): socket gave %d %q, tcp gave %d %q",
-					path, token != "", sockCode, sockBody, tcpCode, tcpBody)
-			}
-		}
-	}
-}
-
-// The browser path end to end over a real listener: a URL carrying ?token=
-// hands back a cookie and a redirect to the same path without the secret,
-// and the cookie alone authenticates every later request (which is what the
-// dashboard's own fetch of /api/status/detailed relies on).
-func TestMainTCPListener_TokenQueryParamBootstrapsCookie(t *testing.T) {
-	handler := bearerAuth(httpFrontToken, echoMux())
-	_, base := startTestFront(t, "", "", handler)
-
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar: %v", err)
-	}
-	client := &http.Client{Jar: jar}
-
-	resp, err := client.Get(base + "/status?token=" + httpFrontToken)
-	if err != nil {
-		t.Fatalf("GET /status?token=: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	// The default client follows the redirect, so a 200 here means the
-	// cookie it was handed carried the *second* request.
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("bootstrap status %d; want 200", resp.StatusCode)
-	}
-	if got := strings.TrimSpace(string(body)); got != "served /status" {
-		t.Fatalf("bootstrap body %q; want %q", got, "served /status")
-	}
-	if q := resp.Request.URL.RawQuery; q != "" {
-		t.Fatalf("landed on %q; the token must be stripped from the final URL", resp.Request.URL)
+	// Socket without a token: still rejected.
+	if code, _ := get(sockClient, "http://unix/status", ""); code != http.StatusUnauthorized {
+		t.Fatalf("socket without a token: status %d, want 401", code)
 	}
 
-	u, _ := url.Parse(base)
-	var found *http.Cookie
-	for _, c := range jar.Cookies(u) {
-		if c.Name == authCookieName {
-			found = c
-		}
+	// Socket with the token, and the TCP front with no token at all, must
+	// answer the same route with the same body.
+	sockCode, sockBody := get(sockClient, "http://unix/status", httpFrontToken)
+	tcpCode, tcpBody := get(http.DefaultClient, base+"/status", "")
+	if sockCode != http.StatusOK || tcpCode != http.StatusOK {
+		t.Fatalf("socket (with token) = %d, tcp (no token) = %d; want both 200", sockCode, tcpCode)
 	}
-	if found == nil {
-		t.Fatal("no auth cookie was set by the bootstrap redirect")
-	}
-
-	// Cookie alone, no Authorization header, no query param.
-	resp2, err := client.Get(base + "/api/status/detailed")
-	if err != nil {
-		t.Fatalf("GET /api/status/detailed: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("cookie-only request: status %d; want 200", resp2.StatusCode)
+	if sockBody != tcpBody {
+		t.Fatalf("socket body %q != tcp body %q; expected the same route table", sockBody, tcpBody)
 	}
 }
 
@@ -280,8 +225,7 @@ func TestMainTCPListener_TLS(t *testing.T) {
 	leaf := ca.issueLeaf(t, 20)
 	certFile, keyFile := leaf.writeFiles(t)
 
-	handler := bearerAuth(httpFrontToken, echoMux())
-	_, base := startTestFront(t, certFile, keyFile, handler)
+	_, base := startTestFront(t, certFile, keyFile, recoverMiddleware(echoMux()))
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca.pem) {
@@ -291,9 +235,7 @@ func TestMainTCPListener_TLS(t *testing.T) {
 		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 	}}
 
-	req, _ := http.NewRequest(http.MethodGet, base+"/status", nil)
-	req.Header.Set("Authorization", "Bearer "+httpFrontToken)
-	resp, err := client.Do(req)
+	resp, err := client.Get(base + "/status")
 	if err != nil {
 		t.Fatalf("https GET: %v", err)
 	}
@@ -311,6 +253,56 @@ func TestMainTCPListener_TLS(t *testing.T) {
 		plainResp.Body.Close()
 		if plainResp.StatusCode < 400 {
 			t.Fatalf("plaintext request to the TLS listener succeeded with %d", plainResp.StatusCode)
+		}
+	}
+}
+
+// TestMainTCPListener_MultipleBinds is the end-to-end proof that this
+// feature works: two independent addresses, one shared *http.Server, both
+// serving the same handler, and a single Shutdown tearing down both at
+// once.
+func TestMainTCPListener_MultipleBinds(t *testing.T) {
+	// freeTCPAddr (relay_router_tls_test.go) binds then releases a loopback
+	// port, giving two addresses this test can dial by name before
+	// startMainTCPListener rebinds them for real — srv.Addr alone only ever
+	// reports the first, so this is the only way to address the second bind
+	// directly.
+	addr1 := freeTCPAddr(t)
+	addr2 := freeTCPAddr(t)
+
+	srv, err := startMainTCPListener([]string{addr1, addr2}, "", "", recoverMiddleware(echoMux()))
+	if err != nil {
+		t.Fatalf("startMainTCPListener: %v", err)
+	}
+
+	get := func(addr string) (int, error) {
+		resp, err := http.Get("http://" + addr + "/status")
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+
+	for _, addr := range []string{addr1, addr2} {
+		status, err := get(addr)
+		if err != nil {
+			t.Fatalf("GET %s: %v", addr, err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("GET %s: status %d; want 200", addr, status)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	for _, addr := range []string{addr1, addr2} {
+		if _, err := get(addr); err == nil {
+			t.Fatalf("expected %s to be closed after Shutdown", addr)
 		}
 	}
 }

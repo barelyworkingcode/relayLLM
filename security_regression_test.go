@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,116 +98,25 @@ func TestSec_BearerAuth_EmptyConfiguredTokenIsPassThrough(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Browser credential carriers: ?token= bootstrap + cookie (auth.go)
-// ---------------------------------------------------------------------------
-
-// secAuthRequest drives an arbitrary request through bearerAuth and returns
-// the recorder, for the carriers that need to inspect headers (Set-Cookie,
-// Location) rather than just a status code.
-func secAuthRequest(t *testing.T, configuredToken string, req *http.Request) *httptest.ResponseRecorder {
-	t.Helper()
+// bearerAuth no longer accepts a cookie or ?token= query parameter as a
+// credential carrier — that browser-convenience path existed only for the
+// --http-port TCP front, which now serves anonymously and never wraps
+// requests in bearerAuth at all (see auth.go's doc comment). A configured,
+// correctly-valued cookie or query param must therefore be inert on the one
+// front that still uses bearerAuth (the Unix socket): neither one should be
+// able to substitute for the Authorization header a regression could
+// otherwise silently reopen.
+func TestSec_BearerAuth_CookieAndQueryParamAreNoLongerCredentials(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	req := httptest.NewRequest(http.MethodGet, "/status?token="+secTestToken, nil)
+	req.AddCookie(&http.Cookie{Name: "relayllm_auth", Value: secTestToken})
 	rec := httptest.NewRecorder()
-	bearerAuth(configuredToken, inner).ServeHTTP(rec, req)
-	return rec
-}
-
-func TestSec_BearerAuth_RejectsWrongCookie(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
-	req.AddCookie(&http.Cookie{Name: authCookieName, Value: "not-the-token"})
-	if code := secAuthRequest(t, secTestToken, req).Code; code != http.StatusUnauthorized {
-		t.Errorf("wrong cookie: status %d; want 401", code)
-	}
-}
-
-func TestSec_BearerAuth_RejectsWrongQueryToken(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/status?token=not-the-token", nil)
-	if code := secAuthRequest(t, secTestToken, req).Code; code != http.StatusUnauthorized {
-		t.Errorf("wrong ?token=: status %d; want 401", code)
-	}
-}
-
-// A present-but-wrong Authorization header must be a rejection outright, not
-// a fall-through that a valid cookie or query param could rescue. Otherwise
-// the header check stops being a check: any request could carry a bad header
-// and be admitted on the weaker carrier behind it.
-func TestSec_BearerAuth_BadHeaderDoesNotFallThroughToCookie(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/status?token="+secTestToken, nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	req.AddCookie(&http.Cookie{Name: authCookieName, Value: secTestToken})
-	if code := secAuthRequest(t, secTestToken, req).Code; code != http.StatusUnauthorized {
-		t.Errorf("bad header with a valid cookie present: status %d; want 401", code)
-	}
-}
-
-// The cookie the bootstrap mints must be unreachable from script (HttpOnly)
-// and must never ride along on a cross-site request (SameSite=Strict) — that
-// pair is what keeps an ambient credential from becoming a CSRF handle on an
-// API that can read session transcripts.
-func TestSec_BearerAuth_BootstrapCookieIsHttpOnlyAndSameSiteStrict(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/status?token="+secTestToken, nil)
-	rec := secAuthRequest(t, secTestToken, req)
-
-	if rec.Code != http.StatusFound {
-		t.Fatalf("bootstrap status %d; want 302", rec.Code)
-	}
-	cookies := (&http.Response{Header: rec.Header()}).Cookies()
-	var got *http.Cookie
-	for _, c := range cookies {
-		if c.Name == authCookieName {
-			got = c
-		}
-	}
-	if got == nil {
-		t.Fatal("bootstrap set no auth cookie")
-	}
-	if got.Value != secTestToken {
-		t.Errorf("cookie value = %q; want the configured token", got.Value)
-	}
-	if !got.HttpOnly {
-		t.Error("auth cookie is not HttpOnly")
-	}
-	if got.SameSite != http.SameSiteStrictMode {
-		t.Errorf("auth cookie SameSite = %v; want Strict", got.SameSite)
-	}
-	if got.Secure {
-		t.Error("auth cookie set Secure on a plaintext request; it would be undeliverable")
-	}
-	// The whole point of the redirect: the secret must not survive in the
-	// URL the browser records in history or sends as a Referer.
-	loc := rec.Header().Get("Location")
-	if strings.Contains(loc, secTestToken) {
-		t.Errorf("redirect target %q still carries the token", loc)
-	}
-	if loc != "/status" {
-		t.Errorf("redirect target = %q; want /status", loc)
-	}
-}
-
-// Over TLS the same cookie must be marked Secure, so it can never downgrade
-// onto a plaintext request to the same host.
-func TestSec_BearerAuth_BootstrapCookieIsSecureOverTLS(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/status?token="+secTestToken, nil)
-	req.TLS = &tls.ConnectionState{}
-	rec := secAuthRequest(t, secTestToken, req)
-	for _, c := range (&http.Response{Header: rec.Header()}).Cookies() {
-		if c.Name == authCookieName && !c.Secure {
-			t.Error("auth cookie minted over TLS is not marked Secure")
-		}
-	}
-}
-
-// The redirect is built from the request's path and query only. A crafted
-// Host/absolute-form request line must not be able to bounce a browser to
-// another origin while it holds a valid token.
-func TestSec_BearerAuth_BootstrapRedirectIsNotOpen(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "https://evil.example/status?token="+secTestToken, nil)
-	rec := secAuthRequest(t, secTestToken, req)
-	if loc := rec.Header().Get("Location"); loc != "/status" {
-		t.Errorf("redirect target = %q; want the bare path /status", loc)
+	bearerAuth(secTestToken, inner).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("valid cookie + valid ?token=, no Authorization header: status %d; want 401", rec.Code)
 	}
 }
 

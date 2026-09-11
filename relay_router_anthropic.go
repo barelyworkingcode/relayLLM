@@ -65,8 +65,8 @@ type anthropicRouterState struct {
 
 // setAnthropic installs the router's Anthropic-compat state (settings.json's
 // router.anthropic). Subject to the same pre-serve ordering constraint as
-// setReasoningEffortMap: StartRelayRouter calls this before spawning the
-// ListenAndServe goroutine. nil cfg leaves p.anthropic nil (routes 404); an
+// setReasoningEffortMap: StartRelayRouter calls this before spawning any of
+// Serve's per-listener goroutines. nil cfg leaves p.anthropic nil (routes 404); an
 // invalid upstream URL disables the feature with a startup log rather than
 // failing the whole process, matching this codebase's "additive feature,
 // fails safe" convention for router config.

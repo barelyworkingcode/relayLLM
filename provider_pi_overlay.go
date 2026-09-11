@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,22 +21,39 @@ import (
 type PiOverlayInputs struct {
 	ServerModels []ServerModelConfig // consumed by provider_pi_models.go to synthesize Eve picker entries
 	RouterPort   string              // empty disables the relay-router provider entry
-	RouterHost   string              // --router-bind value; see routerOverlayHost
+	RouterHosts  []string            // --router-bind value(s), comma-split; see routerOverlayHost
 	RouterModels []PiRouterModel
 }
 
 // routerOverlayHost returns the host pi (a subprocess on this same machine)
-// should dial to reach the relay-router. A wildcard or unset bind still
-// accepts loopback connections, so "localhost" is correct there; a bind
-// pinned to one specific non-loopback address is not reachable via
-// "localhost" at all, so that address must be used verbatim instead.
-func routerOverlayHost(bind string) string {
-	switch bind {
-	case "", "0.0.0.0", "::", "[::]":
-		return "localhost"
-	default:
-		return bind
+// should dial to reach the relay-router, given every bind address the
+// router is actually listening on. Scans in bind order:
+//
+//   - a wildcard bind ("", "0.0.0.0", "::") → "localhost". A wildcard
+//     always accepts loopback connections regardless of where else it's
+//     also reachable, so this short-circuits as soon as one is seen.
+//   - a loopback bind → that address verbatim, not rewritten to
+//     "localhost" — a router bound only to "127.0.0.1" in a resolver where
+//     "localhost" prefers "::1" would be unreachable. Loopback is always
+//     up (unlike a LAN address, which a firewall or DHCP lease change can
+//     take away), so it's preferred over a later non-loopback bind.
+//   - no wildcard or loopback bind found (every entry is a specific
+//     non-loopback address, or the list is empty) → the first bind
+//     verbatim, or "localhost" if there is no first bind at all.
+func routerOverlayHost(binds []string) string {
+	for _, b := range binds {
+		switch b {
+		case "", "0.0.0.0", "::", "[::]":
+			return "localhost"
+		}
+		if isLoopbackHost(b) {
+			return b
+		}
 	}
+	if len(binds) > 0 {
+		return binds[0]
+	}
+	return "localhost"
 }
 
 // PiRouterModel is one row of the router snapshot written into pi's
@@ -202,7 +220,11 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 			models = append(models, map[string]any{"id": rm.ID, "input": input})
 		}
 		providers[piRelayRouterProvider] = map[string]any{
-			"baseUrl": fmt.Sprintf("http://%s:%s/v1", routerOverlayHost(inputs.RouterHost), inputs.RouterPort),
+			// net.JoinHostPort rather than a bare fmt.Sprintf("%s:%s", ...):
+			// an IPv6 host (routerOverlayHost can return one, e.g. a
+			// --router-bind of "::1") needs bracketing or the result is an
+			// unparseable "http://::1:8180/v1".
+			"baseUrl": fmt.Sprintf("http://%s/v1", net.JoinHostPort(routerOverlayHost(inputs.RouterHosts), inputs.RouterPort)),
 			"api":     "openai-completions",
 			"apiKey":  "none",
 			"models":  models,

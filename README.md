@@ -51,7 +51,7 @@ and registers a manifest (see [Service manifest](#service-manifest)).
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | llama-server binary |
 | `--mlx-serve-path` | `MLX_SERVE_PATH` | `mlx-serve` (PATH) | mlx-serve binary |
 | `--router-port` | `RELAY_ROUTER_PORT` | *(disabled)* | Port for the unified OpenAI-compatible router |
-| `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Bind address for the relay-router TCP listener; set to `0.0.0.0` to accept connections from other hosts |
+| `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. `127.0.0.1,192.168.64.1`); include `0.0.0.0` to accept connections from other hosts |
 
 Provider configuration lives in `{data-dir}/settings.json`. See
 [Providers](#providers) and the inline schema in `config.go`.

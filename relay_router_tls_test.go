@@ -118,9 +118,10 @@ func freeTCPAddr(t *testing.T) string {
 }
 
 // waitForTLSHandshake polls until addr accepts a TLS handshake under trust,
-// or fails the test after a short timeout — StartRelayRouter's ListenAndServe
-// runs in a background goroutine, so the listener isn't guaranteed bound the
-// instant the function returns.
+// or fails the test after a short timeout — Listen binds synchronously
+// inside StartRelayRouter, but Serve's per-listener accept loops start in
+// background goroutines, so a connection isn't guaranteed to be actively
+// handled the instant StartRelayRouter returns.
 func waitForTLSHandshake(t *testing.T, addr string, trust *x509.CertPool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -139,8 +140,8 @@ func waitForTLSHandshake(t *testing.T, addr string, trust *x509.CertPool) {
 
 // TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP covers item 4:
 // the --router-tls-cert/--router-tls-key pair (wired via StartRelayRouter's
-// trailing tlsCert/tlsKey parameters, set with setTLS before the serving
-// goroutine starts — see StartRelayRouter's doc comment) makes the listener
+// trailing tlsCert/tlsKey parameters, set with setTLS before Serve's
+// goroutines start — see StartRelayRouter's doc comment) makes the listener
 // speak TLS, and a plain http request to that same port no longer works.
 func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
 	ca := newTestCA(t)
@@ -151,7 +152,10 @@ func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router := StartRelayRouter(addr, []*ServerManager{mgr}, nil, nil, nil, certPath, keyPath)
+	router, err := StartRelayRouter([]string{addr}, []*ServerManager{mgr}, nil, nil, nil, certPath, keyPath)
+	if err != nil {
+		t.Fatalf("StartRelayRouter: %v", err)
+	}
 	if router == nil {
 		t.Fatal("expected a non-nil router")
 	}

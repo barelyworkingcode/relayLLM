@@ -224,21 +224,31 @@ func TestPiOverlay_ModelsCarryInputModalities(t *testing.T) {
 // wildcard or unset --router-bind still accepts loopback connections, so pi
 // (a local subprocess) reaches it via "localhost"; a bind pinned to one
 // specific non-loopback address is not reachable via "localhost" at all, so
-// that address must be used verbatim.
+// that address must be used verbatim. With several binds configured, a
+// loopback entry is always preferred (it can't be firewalled or DHCP'd away
+// the way a LAN address can), regardless of position in the list.
 func TestRouterOverlayHost(t *testing.T) {
 	cases := []struct {
-		bind string
-		want string
+		name  string
+		binds []string
+		want  string
 	}{
-		{"", "localhost"},
-		{"0.0.0.0", "localhost"},
-		{"::", "localhost"},
-		{"127.0.0.1", "127.0.0.1"},
-		{"192.168.1.5", "192.168.1.5"},
+		{"empty list", nil, "localhost"},
+		{"unset single bind", []string{""}, "localhost"},
+		{"wildcard v4", []string{"0.0.0.0"}, "localhost"},
+		{"wildcard v6", []string{"::"}, "localhost"},
+		{"single loopback", []string{"127.0.0.1"}, "127.0.0.1"},
+		{"single lan address", []string{"192.168.1.5"}, "192.168.1.5"},
+		{"loopback preferred over trailing lan address", []string{"127.0.0.1", "192.168.1.5"}, "127.0.0.1"},
+		{"loopback preferred even when listed second", []string{"192.168.1.5", "127.0.0.1"}, "127.0.0.1"},
+		{"wildcard among several binds still wins", []string{"192.168.1.5", "0.0.0.0"}, "localhost"},
+		{"no loopback or wildcard falls back to the first bind", []string{"192.168.1.5", "10.0.0.9"}, "192.168.1.5"},
 	}
 	for _, tc := range cases {
-		if got := routerOverlayHost(tc.bind); got != tc.want {
-			t.Errorf("routerOverlayHost(%q) = %q, want %q", tc.bind, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routerOverlayHost(tc.binds); got != tc.want {
+				t.Errorf("routerOverlayHost(%v) = %q, want %q", tc.binds, got, tc.want)
+			}
+		})
 	}
 }
