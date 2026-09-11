@@ -321,6 +321,64 @@ func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 	}
 }
 
+func TestUpstreamPath(t *testing.T) {
+	cases := []struct {
+		name, base, inbound, want string
+	}{
+		{"v1 route onto v1 base", "/v1", "/v1/chat/completions", "/v1/chat/completions"},
+		{"bare OpenAI route gains base", "/v1", "/chat/completions", "/v1/chat/completions"},
+		{"bare responses route gains base", "/v1", "/responses", "/v1/responses"},
+		{"deeper base path kept", "/api/v1", "/v1/chat/completions", "/api/v1/chat/completions"},
+		{"bare route onto deeper base", "/api/v1", "/embeddings", "/api/v1/embeddings"},
+		{"trailing slash on base", "/v1/", "/v1/completions", "/v1/completions"},
+		{"server-root route untouched", "/v1", "/tokenize", "/tokenize"},
+		{"v1 lookalike prefix untouched", "/v1", "/v1beta/models", "/v1beta/models"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := upstreamPath(tc.base, tc.inbound); got != tc.want {
+				t.Errorf("upstreamPath(%q, %q) = %q, want %q", tc.base, tc.inbound, got, tc.want)
+			}
+		})
+	}
+}
+
+// A /v1-only upstream (ExLlamaV3 mounts nothing else) hit by a client that
+// posts the bare /chat/completions path, as Oh My Pi does. The upstream 404s
+// every other path, so a 200 proves the router rewrote it onto /v1.
+func TestRouter_Proxy_BareChatCompletionsPath_ReachesV1OnlyUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "exl3-model"}}})
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"resp","choices":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+		{Name: "europa", BaseURL: upstream.URL + "/v1"},
+	}})
+	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vCode", Targets: []VirtualLLMTarget{{Endpoint: "europa", Model: "exl3-model"}},
+	}}})
+	srv := httptest.NewServer(router.server.Handler)
+	defer srv.Close()
+
+	for _, model := range []string{"vCode", "europa/exl3-model"} {
+		resp := postBytes(t, srv.URL+"/chat/completions", []byte(`{"model":"`+model+`"}`))
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("model %q via /chat/completions: status %d body=%s", model, resp.StatusCode, body)
+		}
+	}
+}
+
 func TestRouter_Proxy_VirtualModelUsesFirstReachableTarget(t *testing.T) {
 	var primaryCalls, fallbackCalls int
 	newTarget := func(calls *int, id string) *httptest.Server {
