@@ -148,20 +148,24 @@ func TestProxyConn_StallClassification(t *testing.T) {
 	cases := []struct {
 		name      string
 		streaming bool
+		upgraded  bool
 		headerAt  time.Duration // offset from start; -1 means never
 		lastByte  time.Duration // offset from start; meaningless if headerAt < 0
 		now       time.Duration // offset from start
 		want      string
 	}{
-		{"pre-header, streaming, within grace", true, -1, 0, 10 * time.Second, connStateActive},
-		{"pre-header, streaming, past grace -> stalled", true, -1, 0, 181 * time.Second, connStateStalled},
-		{"pre-header, non-streaming, never stalled by header wait", false, -1, 0, 10 * time.Minute, connStateActive},
-		{"headers sent, fresh write -> active", true, 0, 0, 2 * time.Second, connStateActive},
-		{"headers sent, 5s since last byte -> quiet", true, 0, 0, 5 * time.Second, connStateQuiet},
-		{"headers sent, 59s since last byte -> still quiet", true, 0, 0, 59 * time.Second, connStateQuiet},
-		{"headers sent, 60s since last byte -> stalled", true, 0, 0, 60 * time.Second, connStateStalled},
-		{"non-stream, headers sent, quiet applies too", false, 0, 0, 6 * time.Second, connStateQuiet},
-		{"non-stream, headers sent, stalled applies too", false, 0, 0, 61 * time.Second, connStateStalled},
+		{"pre-header, streaming, within grace", true, false, -1, 0, 10 * time.Second, connStateActive},
+		{"pre-header, streaming, past grace -> stalled", true, false, -1, 0, 181 * time.Second, connStateStalled},
+		{"pre-header, non-streaming, never stalled by header wait", false, false, -1, 0, 10 * time.Minute, connStateActive},
+		{"headers sent, fresh write -> active", true, false, 0, 0, 2 * time.Second, connStateActive},
+		{"headers sent, 5s since last byte -> quiet", true, false, 0, 0, 5 * time.Second, connStateQuiet},
+		{"headers sent, 59s since last byte -> still quiet", true, false, 0, 0, 59 * time.Second, connStateQuiet},
+		{"headers sent, 60s since last byte -> stalled", true, false, 0, 0, 60 * time.Second, connStateStalled},
+		{"non-stream, headers sent, quiet applies too", false, false, 0, 0, 6 * time.Second, connStateQuiet},
+		{"non-stream, headers sent, stalled applies too", false, false, 0, 0, 61 * time.Second, connStateStalled},
+		{"upgraded, fresh traffic -> active", false, true, 0, 0, 2 * time.Second, connStateActive},
+		{"upgraded, silent between turns -> idle, not quiet", false, true, 0, 0, 5 * time.Second, connStateIdle},
+		{"upgraded, silent for minutes -> idle, never stalled", false, true, 0, 0, 10 * time.Minute, connStateIdle},
 	}
 
 	for _, c := range cases {
@@ -173,7 +177,7 @@ func TestProxyConn_StallClassification(t *testing.T) {
 				headerNano = start.Add(c.headerAt).UnixNano()
 				lastWriteNano = start.Add(c.lastByte).UnixNano()
 			}
-			got := proxyConnState(now, start, headerNano, lastWriteNano, c.streaming)
+			got := proxyConnState(now, start, headerNano, lastWriteNano, c.streaming, c.upgraded)
 			if got != c.want {
 				t.Errorf("proxyConnState(...) = %q, want %q", got, c.want)
 			}

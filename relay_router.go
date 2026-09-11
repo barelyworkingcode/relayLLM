@@ -81,6 +81,10 @@ type RelayRouter struct {
 	// the same pre-serve-setter way as the reasoningEffort* fields above, via
 	// setAnthropic.
 	anthropic *anthropicRouterState
+
+	// mux is kept so setPassthrough can mount its configured /<name>/ routes
+	// after construction, before Serve.
+	mux *http.ServeMux
 }
 
 // RouterConfig holds relay-router behavior that doesn't belong to any one
@@ -165,6 +169,20 @@ type RouterConfig struct {
 	// listener — see relay_router_anthropic.go. Absent (nil, the default)
 	// means those routes 404; behavior is otherwise unchanged.
 	Anthropic *AnthropicRouterConfig `json:"anthropic,omitempty"`
+
+	// Passthrough mounts /<name>/ routes that forward byte-for-byte, client
+	// credential included, to a fixed upstream (ChatGPT's Codex backend,
+	// api.openai.com). See relay_router_passthrough.go. Absent or empty mounts
+	// nothing.
+	Passthrough map[string]PassthroughConfig `json:"passthrough,omitempty"`
+}
+
+// forwardsClientCredentials reports whether any route forwards the client's
+// own credential upstream (router.anthropic or router.passthrough). main
+// uses it to refuse a plaintext non-loopback bind. StartRelayRouter uses it
+// to start a router that has no local backends. Nil-safe.
+func (c *RouterConfig) forwardsClientCredentials() bool {
+	return c != nil && (c.Anthropic != nil || len(c.Passthrough) > 0)
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -243,6 +261,7 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleAnthropicCountTokens)
 	mux.HandleFunc("/api/", p.handleAnthropicPassthrough)
 	mux.HandleFunc("/", p.handleProxy)
+	p.mux = mux
 
 	p.server = &http.Server{
 		Addr:    addr,
@@ -751,15 +770,17 @@ func StartRelayRouter(addrs []string, managers []*ServerManager, registry *Proxy
 	// neither. Without this check, a deployment using relayLLM purely as a
 	// Claude Code proxy (router.anthropic configured, nothing else) got no
 	// router at all: /v1/messages, the /api/* bootstrap passthrough,
-	// everything 404'd with no indication why.
-	hasAnthropic := router != nil && router.Anthropic != nil
-	if len(p.managers) == 0 && p.registry == nil && !hasAnthropic {
+	// everything 404'd with no indication why. router.passthrough upstreams
+	// are real destinations the same way.
+	hasPassthrough := router.forwardsClientCredentials()
+	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
 		return nil, nil
 	}
 	if router != nil {
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
 		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
 		p.setAnthropic(router.Anthropic)
+		p.setPassthrough(router.Passthrough)
 	}
 	p.setTLS(tlsCert, tlsKey)
 	if err := p.Listen(addrs); err != nil {
