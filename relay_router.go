@@ -232,6 +232,16 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 	p.server = &http.Server{
 		Addr:    addr,
 		Handler: mux,
+		// ReadHeaderTimeout bounds how long a client may trickle in request
+		// headers (the classic slow-loris shape) before the connection is
+		// dropped. IdleTimeout bounds how long a keep-alive connection may
+		// sit idle between requests. Neither touches an in-flight
+		// request — a legitimate long generation is read/written well
+		// after headers complete, so WriteTimeout/ReadTimeout stay unset on
+		// purpose: this service's whole point is serving responses that can
+		// run for minutes.
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return p
 }
@@ -1042,10 +1052,25 @@ func rewriteMultipartModel(parts []multipartPart, boundary, upstreamID string) (
 	return buf.Bytes(), nil
 }
 
+// maxProxyBodyBytes caps the primary /v1/chat/completions-shaped route.
+// handleAudioTranscription (maxTranscriptionBytes) and the Anthropic routes
+// (maxAnthropicBodyBytes) already cap theirs; this one read the whole body
+// with no ceiling at all. Sized the same as the Anthropic cap — this is the
+// general-purpose chat route, so base64 image attachments and long tool
+// results are the realistic upper end, not a special case.
+var maxProxyBodyBytes int64 = 64 << 20
+
 func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyBodyBytes))
 	r.Body.Close()
 	if err != nil {
+		// MaxBytesReader's error is the overflow case and deserves its own
+		// status — everything else is a mundane read failure.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, fmt.Sprintf(`{"error":"request body exceeds %d bytes"}`, maxProxyBodyBytes), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
 		return
 	}

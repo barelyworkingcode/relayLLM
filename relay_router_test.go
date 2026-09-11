@@ -199,6 +199,43 @@ func TestRouter_Proxy_UnknownModel_Returns400(t *testing.T) {
 	}
 }
 
+// TestNewRelayRouter_SetsHeaderAndIdleTimeouts pins the fix for a listener
+// with no server-level timeouts at all: a slow-loris client (or one that
+// never completes a body) could tie up a goroutine indefinitely. WriteTimeout
+// and ReadTimeout stay unset on purpose — a legitimate generation can run for
+// minutes after headers complete.
+func TestNewRelayRouter_SetsHeaderAndIdleTimeouts(t *testing.T) {
+	r := NewRelayRouter(":0", nil, nil, nil)
+	if r.server.ReadHeaderTimeout <= 0 {
+		t.Error("ReadHeaderTimeout must be set to defend against slow-loris clients")
+	}
+	if r.server.IdleTimeout <= 0 {
+		t.Error("IdleTimeout must be set to reclaim idle keep-alive connections")
+	}
+	if r.server.WriteTimeout != 0 || r.server.ReadTimeout != 0 {
+		t.Error("WriteTimeout/ReadTimeout must stay unset — a long-running generation must not be cut off")
+	}
+}
+
+// TestRouter_Proxy_OversizeBody_Returns413 pins the fix for handleProxy's
+// unbounded io.ReadAll: unlike handleAudioTranscription and the Anthropic
+// routes, this one had no http.MaxBytesReader ceiling at all.
+func TestRouter_Proxy_OversizeBody_Returns413(t *testing.T) {
+	orig := maxProxyBodyBytes
+	maxProxyBodyBytes = 512
+	t.Cleanup(func() { maxProxyBodyBytes = orig })
+
+	r := NewRelayRouter(":0", nil, nil, nil)
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"does-not-exist","padding":"` + strings.Repeat("a", 4096) + `"}`)
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", body)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
 func TestRouter_Proxy_LlamaAlias_RoutesToManagedBranch(t *testing.T) {
 	// Manager has the alias but no real binary → GetOrLaunch fails → 502.
 	// The 502 is the test signal: the router DID pick the managed branch and
