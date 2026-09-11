@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -507,6 +508,56 @@ func TestAnthropicStreamTranslator_NonStreamingAggregation(t *testing.T) {
 	usage := msg["usage"].(map[string]any)
 	if usage["input_tokens"] != int64(3) || usage["output_tokens"] != int64(4) {
 		t.Errorf("usage = %v, want input=3 output=4", usage)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unbounded-buffer regressions: a runaway or adversarial backend must not
+// grow the translator's internal accumulators forever.
+// ---------------------------------------------------------------------------
+
+func TestAnthropicStreamTranslator_TextAccumIsCapped(t *testing.T) {
+	tr := newAnthropicStreamTranslator(true, "m", 0)
+	var out bytes.Buffer
+	tr.Start(&out)
+
+	big := strings.Repeat("a", maxAnthropicAccumBytes+1000)
+	tr.applyTextDelta(big, &out)
+
+	if tr.textAccum.Len() > maxAnthropicAccumBytes {
+		t.Errorf("textAccum.Len() = %d, want capped at %d", tr.textAccum.Len(), maxAnthropicAccumBytes)
+	}
+}
+
+func TestAnthropicStreamTranslator_ToolArgsBufIsCapped(t *testing.T) {
+	tr := newAnthropicStreamTranslator(true, "m", 0)
+
+	var tc openaiToolCallDelta
+	tc.Index = 0
+	tc.ID = "call_1"
+	tc.Function.Name = "f"
+	tc.Function.Arguments = strings.Repeat("a", maxAnthropicAccumBytes+1000)
+	tr.applyToolDelta(tc)
+
+	call := tr.toolCalls[0]
+	if call == nil {
+		t.Fatal("tool call not tracked")
+	}
+	if call.argsBuf.Len() > maxAnthropicAccumBytes {
+		t.Errorf("argsBuf.Len() = %d, want capped at %d", call.argsBuf.Len(), maxAnthropicAccumBytes)
+	}
+}
+
+func TestAnthropicStreamTranslator_SSEBufDroppedWhenOverCapWithNoDelimiter(t *testing.T) {
+	tr := newAnthropicStreamTranslator(true, "m", 0)
+	var out bytes.Buffer
+	tr.Start(&out)
+
+	huge := bytes.Repeat([]byte("a"), maxAnthropicSSEBufBytes+1000) // no "\n\n" anywhere
+	tr.Feed(huge, &out)
+
+	if tr.sseBuf.Len() > maxAnthropicSSEBufBytes {
+		t.Errorf("sseBuf.Len() = %d, want dropped back below the cap once it exceeded the cap with no complete event", tr.sseBuf.Len())
 	}
 }
 

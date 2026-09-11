@@ -571,6 +571,12 @@ func (t *anthropicStreamTranslator) Start(w io.Writer) {
 // finds. In streaming mode, text deltas are written to w immediately as
 // Anthropic content_block_start/delta events; tool-call deltas are always
 // buffered regardless of mode.
+// maxAnthropicSSEBufBytes bounds sseBuf while it waits for a "\n\n" event
+// terminator. A well-behaved backend never approaches this — it exists for a
+// malformed or adversarial one that emits one huge unterminated line, which
+// would otherwise grow the buffer for the entire life of the response.
+const maxAnthropicSSEBufBytes = 8 << 20
+
 func (t *anthropicStreamTranslator) Feed(chunk []byte, w io.Writer) {
 	if len(chunk) > 0 {
 		t.sseBuf.Write(chunk)
@@ -579,6 +585,11 @@ func (t *anthropicStreamTranslator) Feed(chunk []byte, w io.Writer) {
 		buf := t.sseBuf.Bytes()
 		idx := bytes.Index(buf, []byte("\n\n"))
 		if idx < 0 {
+			if t.sseBuf.Len() > maxAnthropicSSEBufBytes {
+				slog.Warn("anthropic translate: SSE buffer exceeded cap with no complete event; dropping buffered data",
+					"bytes", t.sseBuf.Len())
+				t.sseBuf.Reset()
+			}
 			return
 		}
 		event := make([]byte, idx)
@@ -654,8 +665,34 @@ func (t *anthropicStreamTranslator) applyChunk(chunk openaiStreamChunk, w io.Wri
 	}
 }
 
+// maxAnthropicAccumBytes bounds textAccum and each tool call's argsBuf — the
+// internal copies kept for BuildMessage/history persistence, mirroring the
+// tool-loop's own maxToolResultLen truncation (provider_chat_base.go). Text
+// already streamed live to the client is unaffected; only the internal
+// accumulator stops growing once a runaway or adversarial backend blows well
+// past any real response size.
+const maxAnthropicAccumBytes = 8 << 20
+
+// capAccumulator appends s up to cap total bytes, silently dropping anything
+// past it. Satisfied by both *strings.Builder (textAccum) and *bytes.Buffer
+// (a tool call's argsBuf).
+type capAccumulator interface {
+	Len() int
+	WriteString(string) (int, error)
+}
+
+func writeCapped(acc capAccumulator, s string, cap int) {
+	if acc.Len() >= cap {
+		return
+	}
+	if remaining := cap - acc.Len(); remaining < len(s) {
+		s = s[:remaining]
+	}
+	acc.WriteString(s)
+}
+
 func (t *anthropicStreamTranslator) applyTextDelta(text string, w io.Writer) {
-	t.textAccum.WriteString(text)
+	writeCapped(&t.textAccum, text, maxAnthropicAccumBytes)
 	if !t.streaming {
 		return
 	}
@@ -693,7 +730,7 @@ func (t *anthropicStreamTranslator) applyToolDelta(tc openaiToolCallDelta) {
 		call.name = tc.Function.Name
 	}
 	if tc.Function.Arguments != "" {
-		call.argsBuf.WriteString(tc.Function.Arguments)
+		writeCapped(&call.argsBuf, tc.Function.Arguments, maxAnthropicAccumBytes)
 	}
 }
 
