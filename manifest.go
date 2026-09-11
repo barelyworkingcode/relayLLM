@@ -99,6 +99,8 @@ func buildManifest(dataDir string) Manifest {
 			"/api/permission",
 			"/api/generated/",
 			"/api/status",
+			"/api/status/detailed",
+			"/status",
 			"/api/llama/",
 			"/api/mlx/",
 			"/ws",

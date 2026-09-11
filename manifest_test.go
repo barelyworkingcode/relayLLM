@@ -168,6 +168,8 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 		"/api/permission",
 		"/api/generated/",
 		"/api/status",
+		"/api/status/detailed",
+		"/status",
 		"/api/llama/",
 		"/api/mlx/",
 		"/ws",

@@ -157,6 +157,34 @@ func (s *virtualAffinityStore) size() int {
 	return len(s.entries)
 }
 
+// pinCounts returns, for each virtual model name, the number of live pins
+// (not yet past ttl) grouped by target identity — GET /api/status/detailed
+// surfaces this as each virtual candidate's pinnedConversations so the
+// dashboard can show where conversations are actually sticking, without
+// exposing any conversation key itself (the map's value is a count, never
+// the key that produced it).
+func (s *virtualAffinityStore) pinCounts() map[string]map[string]int {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock.Now()
+	out := make(map[string]map[string]int)
+	for k, e := range s.entries {
+		if now.Sub(e.lastUsed) > s.ttl {
+			continue
+		}
+		byTarget, ok := out[k.virtual]
+		if !ok {
+			byTarget = make(map[string]int)
+			out[k.virtual] = byTarget
+		}
+		byTarget[e.target]++
+	}
+	return out
+}
+
 // expireLocked drops every entry past the TTL. Called with mu held, from the
 // write path only.
 func (s *virtualAffinityStore) expireLocked() {

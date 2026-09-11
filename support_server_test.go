@@ -77,6 +77,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	}
 	terminals := NewTerminalManager(templateStore, dataDir+"/terminal_logs")
 	wsHub := NewWSHub(sessions, perms, terminals)
+	wsHub.SetClock(opts.Clock)
 	sessions.SetEventSink(wsHub)
 	perms.SetEventSink(wsHub)
 	sessions.SetHookSocket("")
@@ -109,6 +110,13 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	RegisterModelRoutes(mux, "", nil, nil, nil, nil, sessions.piOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, dataDir)
 	RegisterStatusRoutes(mux, sessions, terminals, nil, nil, time.Now())
+	RegisterDetailedStatusRoutes(mux, DetailedStatusDeps{
+		Sessions:  sessions,
+		Terminals: terminals,
+		WSHub:     wsHub,
+		StartTime: time.Now(),
+		Clock:     opts.Clock,
+	})
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	handler := bearerAuth(supportBearerToken, recoverMiddleware(mux))

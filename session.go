@@ -57,6 +57,18 @@ type Session struct {
 	mu         sync.Mutex
 }
 
+// IsProcessing reports whether this session currently has a generation in
+// flight. Used by GET /api/status/detailed to render a chat row's state
+// (processing/idle) — see CLAUDE.md's Relay-router section, judgment call J2,
+// for why this is the only signal a session row gets: there is no
+// per-session last-event timestamp, so a session can never be flagged
+// "stalled" the way a proxy connection can.
+func (s *Session) IsProcessing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.processing
+}
+
 // getHost returns Host, safe for concurrent use (Host is refreshed from a
 // provider's spawn goroutine while other goroutines — WS join, ListSessions —
 // may read it concurrently).

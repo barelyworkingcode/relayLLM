@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -23,11 +26,137 @@ type WSHub struct {
 	sessions  *SessionManager
 	perms     *PermissionManager
 	terminals *TerminalManager
+
+	// clock times each connection's activity for GET /api/status/detailed.
+	// Defaults to DefaultClock; SetClock is a setter (mirroring
+	// PermissionManager.SetClock) rather than a constructor parameter, so the
+	// three existing NewWSHub call sites stay unchanged.
+	clock Clock
 }
 
+// wsConn wraps one live WebSocket connection. id/remoteAddr/connectedAt are
+// immutable after newWSConn; the counters are atomics because a status poll
+// (SnapshotConnections) reads them from a goroutine that holds neither wc.mu
+// nor the hub lock.
 type wsConn struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
+
+	id          uint64
+	remoteAddr  string
+	connectedAt time.Time
+	clock       Clock
+
+	lastActivityNano atomic.Int64
+	bytesOut         atomic.Int64
+	bytesIn          atomic.Int64
+	msgsOut          atomic.Int64
+	msgsIn           atomic.Int64
+}
+
+var wsConnSeq atomic.Uint64
+
+// newWSConn stamps a fresh sequence id and starts the activity clock at
+// connect time, so a connection that has neither sent nor received anything
+// yet still reports a sane (zero) idle duration rather than one measured from
+// the Unix epoch.
+func newWSConn(conn *websocket.Conn, remoteAddr string, clock Clock) *wsConn {
+	if clock == nil {
+		clock = DefaultClock
+	}
+	now := clock.Now()
+	wc := &wsConn{
+		conn:        conn,
+		id:          wsConnSeq.Add(1),
+		remoteAddr:  remoteAddr,
+		connectedAt: now,
+		clock:       clock,
+	}
+	wc.lastActivityNano.Store(now.UnixNano())
+	return wc
+}
+
+// write is the single funnel every outbound WS message goes through —
+// SendToTerminal, SendToSession, Broadcast, and sendJSON (and so
+// sendWSError) all used to take wc.mu and call wc.conn.WriteMessage directly;
+// routing them all through here is what lets GET /api/status/detailed report
+// real bytesOut/messagesOut/lastActivity instead of guessing. Counters are
+// updated outside the write lock on purpose — they are atomics, and holding
+// wc.mu for them would serialize a status poll against a live terminal
+// stream for no benefit.
+func (wc *wsConn) write(data []byte) error {
+	wc.mu.Lock()
+	err := wc.conn.WriteMessage(websocket.TextMessage, data)
+	wc.mu.Unlock()
+	if err == nil {
+		wc.bytesOut.Add(int64(len(data)))
+		wc.msgsOut.Add(1)
+		wc.lastActivityNano.Store(wc.clock.Now().UnixNano())
+	}
+	return err
+}
+
+// noteRead records one inbound WS message — called from HandleUpgrade's read
+// loop right after a successful conn.ReadMessage().
+func (wc *wsConn) noteRead(n int) {
+	wc.bytesIn.Add(int64(n))
+	wc.msgsIn.Add(1)
+	wc.lastActivityNano.Store(wc.clock.Now().UnixNano())
+}
+
+// wsIdleAfter is the only threshold a WebSocket connection's state uses. A
+// viewer sitting with no session/terminal traffic is the normal steady
+// state, not a fault — unlike a proxy connection, there is no "stalled"
+// state here and no threshold-driven alerting: nothing about an idle viewer
+// socket signals a bug. Package-level var (not const) so a test can lower it.
+var wsIdleAfter = 60 * time.Second
+
+// WSConnInfo is one live WebSocket connection, as reported by
+// SnapshotConnections for GET /api/status/detailed's connections[] array
+// (kind "ws"). State is only ever "active" or "idle" — see wsIdleAfter's
+// comment for why "stalled" doesn't apply here.
+type WSConnInfo struct {
+	ID             uint64   `json:"id"`
+	RemoteAddr     string   `json:"remoteAddr"`
+	ConnectedAt    string   `json:"connectedAt"` // RFC3339
+	LastActivityAt string   `json:"lastActivityAt"`
+	AgeSeconds     int      `json:"ageSeconds"`
+	IdleSeconds    int      `json:"idleSeconds"` // since last read or write
+	State          string   `json:"state"`
+	BytesIn        int64    `json:"bytesIn"`
+	BytesOut       int64    `json:"bytesOut"`
+	MessagesIn     int64    `json:"messagesIn"`
+	MessagesOut    int64    `json:"messagesOut"`
+	Sessions       []string `json:"sessions"`  // sorted, never nil
+	Terminals      []string `json:"terminals"` // sorted, never nil
+}
+
+// snapshot builds this connection's WSConnInfo row. sessions/terminals are
+// supplied by the caller (SnapshotConnections), which already built the
+// reverse index under the hub lock.
+func (wc *wsConn) snapshot(sessions, terminals []string) WSConnInfo {
+	now := wc.clock.Now()
+	last := time.Unix(0, wc.lastActivityNano.Load())
+	idle := now.Sub(last)
+	state := "active"
+	if idle > wsIdleAfter {
+		state = "idle"
+	}
+	return WSConnInfo{
+		ID:             wc.id,
+		RemoteAddr:     wc.remoteAddr,
+		ConnectedAt:    wc.connectedAt.UTC().Format(time.RFC3339),
+		LastActivityAt: last.UTC().Format(time.RFC3339),
+		AgeSeconds:     int(now.Sub(wc.connectedAt).Seconds()),
+		IdleSeconds:    int(idle.Seconds()),
+		State:          state,
+		BytesIn:        wc.bytesIn.Load(),
+		BytesOut:       wc.bytesOut.Load(),
+		MessagesIn:     wc.msgsIn.Load(),
+		MessagesOut:    wc.msgsOut.Load(),
+		Sessions:       sessions,
+		Terminals:      terminals,
+	}
 }
 
 func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *TerminalManager) *WSHub {
@@ -38,7 +167,61 @@ func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *Ter
 		sessions:  sessions,
 		perms:     perms,
 		terminals: terminals,
+		clock:     DefaultClock,
 	}
+}
+
+// SetClock installs the clock used for connection activity timestamps.
+// Mirrors PermissionManager.SetClock — a setter rather than a constructor
+// parameter so the three existing NewWSHub call sites stay unchanged.
+func (h *WSHub) SetClock(c Clock) {
+	if c == nil {
+		c = DefaultClock
+	}
+	h.clock = c
+}
+
+// SnapshotConnections returns one row per live WebSocket connection, with the
+// sessions and terminals it is bound to. The hub's maps are keyed the other
+// way (id → viewers), so the reverse index is built in the same RLock pass
+// rather than being maintained on every join/leave — this runs once per
+// dashboard poll over a handful of connections, and a second index would
+// have to be kept correct in six more places. Only h.mu.RLock is taken, never
+// wc.mu (snapshot reads atomics), so this cannot block behind a slow
+// WebSocket write.
+func (h *WSHub) SnapshotConnections() []WSConnInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	sessionsByConn := make(map[*wsConn][]string)
+	for sid, viewers := range h.conns {
+		for wc := range viewers {
+			sessionsByConn[wc] = append(sessionsByConn[wc], sid)
+		}
+	}
+	terminalsByConn := make(map[*wsConn][]string)
+	for tid, viewers := range h.termConns {
+		for wc := range viewers {
+			terminalsByConn[wc] = append(terminalsByConn[wc], tid)
+		}
+	}
+
+	out := make([]WSConnInfo, 0, len(h.allConns))
+	for wc := range h.allConns {
+		sessions := sessionsByConn[wc]
+		sort.Strings(sessions)
+		if sessions == nil {
+			sessions = []string{}
+		}
+		terminals := terminalsByConn[wc]
+		sort.Strings(terminals)
+		if terminals == nil {
+			terminals = []string{}
+		}
+		out = append(out, wc.snapshot(sessions, terminals))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // SendToTerminal sends a message to all WebSocket clients viewing a terminal.
@@ -63,9 +246,7 @@ func (h *WSHub) SendToTerminal(terminalID string, msg map[string]interface{}) {
 	}
 
 	for _, wc := range conns {
-		wc.mu.Lock()
-		wc.conn.WriteMessage(websocket.TextMessage, data)
-		wc.mu.Unlock()
+		wc.write(data)
 	}
 }
 
@@ -90,9 +271,7 @@ func (h *WSHub) SendToSession(sessionID string, msg map[string]interface{}) {
 	}
 
 	for _, wc := range conns {
-		wc.mu.Lock()
-		wc.conn.WriteMessage(websocket.TextMessage, data)
-		wc.mu.Unlock()
+		wc.write(data)
 	}
 }
 
@@ -106,7 +285,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("websocket connected", "remote", r.RemoteAddr)
 
-	wc := &wsConn{conn: conn}
+	wc := newWSConn(conn, r.RemoteAddr, h.clock)
 	boundSessions := make(map[string]bool)
 	boundTerminals := make(map[string]bool)
 
@@ -146,6 +325,7 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		wc.noteRead(len(msgBytes))
 
 		var msg struct {
 			Type string `json:"type"`
@@ -660,9 +840,7 @@ func (h *WSHub) Broadcast(msg map[string]interface{}) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.allConns {
-		c.mu.Lock()
-		c.conn.WriteMessage(websocket.TextMessage, data)
-		c.mu.Unlock()
+		c.write(data)
 	}
 }
 
@@ -729,9 +907,7 @@ func removeViewer(sets map[string]map[*wsConn]bool, id string, wc *wsConn) int {
 
 func sendJSON(wc *wsConn, msg map[string]interface{}) {
 	data, _ := json.Marshal(msg)
-	wc.mu.Lock()
-	wc.conn.WriteMessage(websocket.TextMessage, data)
-	wc.mu.Unlock()
+	wc.write(data)
 }
 
 func sendWSError(wc *wsConn, msg string) {

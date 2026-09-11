@@ -239,7 +239,19 @@ func applyAffinity(candidates []resolvedVirtualTarget, pinned string) []resolved
 // user — in that case p.affinity.record is a no-op (see its own nil/""
 // guard), so this path costs nothing beyond the ordering already applied by
 // the caller.
-func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte, affinityKey string) {
+//
+// conn is the request's ProxyConn (status_metrics.go), nil-safe like every
+// ProxyConn method — a caller that builds a RelayRouter by hand (unit tests
+// calling routeVirtual directly) needs no special casing. It is labeled once
+// per candidate, not once for the whole call: a failed-over request must show
+// the target it actually ended on, and attempts > 1 on the dashboard is the
+// visible signal that failover happened. Because handleProxy's metered
+// writer sits OUTSIDE virtualResponseRecorder, a failed attempt contributes
+// zero bytes (its ErrorHandler is suppressed by the onError hook passed into
+// attemptVirtual, so nothing is written) and there is no second registry
+// entry — handleProxy's single `defer p.metrics.end(conn)` owns the
+// connection's lifetime regardless of how many candidates ran here.
+func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte, affinityKey string, conn *ProxyConn) {
 	var failures []string
 	for _, target := range candidates {
 		// A caller that has already hung up (client disconnect →
@@ -258,6 +270,8 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 				"model", name, "error", r.Context().Err())
 			return
 		}
+		conn.noteAttempt()
+		conn.setTarget("virtual", name+" → "+target.label())
 		wrote, status, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
 			// Pin only a response the backend actually stands behind. A 5xx
@@ -408,6 +422,11 @@ func (v *virtualResponseRecorder) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap lets http.ResponseController reach the real writer through both
+// this and the outer meteredResponseWriter (status_metrics.go) it nests
+// inside during a proxied request.
+func (v *virtualResponseRecorder) Unwrap() http.ResponseWriter { return v.ResponseWriter }
 
 // virtualDialTransport is used only by the virtual-model retry path. A
 // target host that black-holes packets (rather than actively refusing the
