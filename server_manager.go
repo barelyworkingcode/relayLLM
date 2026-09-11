@@ -538,7 +538,6 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	}
 	m.instances[alias] = inst
 
-	// Monitor process exit.
 	go func() {
 		err := cmd.Wait()
 		inst.exited.Store(true)
@@ -969,7 +968,6 @@ func buildServerArgs(profile ServerProfile, args map[string]any, port int) []str
 		case string:
 			result = append(result, flag, v)
 		default:
-			// Fallback: stringify via fmt.
 			result = append(result, flag, fmt.Sprintf("%v", v))
 		}
 	}

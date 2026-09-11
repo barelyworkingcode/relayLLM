@@ -10,8 +10,8 @@ import (
 // decode/encode pass, so an endpoint-routed body is never unmarshalled and
 // remarshalled twice for independent rewrites. model, when non-empty,
 // replaces the top-level "model" field (endpoint routes rewrite
-// "endpoint.Name/id" down to the bare id the endpoint itself expects — this
-// used to be rewriteModelField's whole job). effortMap, when non-empty,
+// "endpoint.Name/id" down to the bare id the endpoint itself expects).
+// effortMap, when non-empty,
 // rewrites or removes a top-level string "reasoning_effort" field; see
 // applyReasoningEffortMap. templateKwargsMap, when non-empty, merges an
 // object into a top-level "chat_template_kwargs" field; see

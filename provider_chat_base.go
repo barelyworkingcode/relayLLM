@@ -496,7 +496,6 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		})
 		messages = p.transport.AppendAssistantWithToolCalls(messages, streamText, toolCalls)
 
-		// Execute each tool and append its result.
 		for _, tc := range toolCalls {
 			if ctx.Err() != nil {
 				return
@@ -546,7 +545,6 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			messages = p.transport.AppendToolResult(messages, tc, toolResult)
 		}
 
-		// Follow up with the updated message list.
 		var err error
 		resp, err = p.transport.PostChat(ctx, messages, p.toolDefs())
 		if err != nil {

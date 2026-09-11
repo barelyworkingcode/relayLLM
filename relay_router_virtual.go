@@ -43,9 +43,9 @@ func (t resolvedVirtualTarget) label() string {
 // one: without the model id both candidates hash to "endpoint:lmstudio", so
 // applyAffinity matches whichever of them happens to come first in
 // candidates and can permanently re-pin a conversation that was actually
-// served by qwen-7b onto qwen-70b next turn (code review item 1) — exactly
-// the silent mid-conversation switch ADR-010 exists to prevent, and here it
-// would never even self-correct. Each part is escaped so endpoint "a" model
+// served by qwen-7b onto qwen-70b next turn — exactly the silent
+// mid-conversation switch ADR-010 exists to prevent, and here it would
+// never even self-correct. Each part is escaped so endpoint "a" model
 // "b/c" and endpoint "a/b" model "c" can't collide on the "/" join.
 func (t resolvedVirtualTarget) identity() string {
 	if t.manager != nil {
@@ -136,8 +136,7 @@ func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, manage
 			// else: no manager has this alias — skip.
 		default: // virtualTargetInvalid: neither shape (e.g. endpoint set
 			// without model, and no alias either) — skip. warnVirtualModelConfig
-			// flags this at startup, using the same classifyVirtualTarget call,
-			// so the two can no longer drift apart (code review item 5).
+			// flags this at startup, using the same classifyVirtualTarget call.
 		}
 	}
 	return append(fresh, stale...), len(fresh)
@@ -156,14 +155,11 @@ const (
 // classifyVirtualTarget is the single source of truth for what shape a
 // configured target actually is — both candidatesForVirtual (routing) and
 // warnVirtualModelConfig (startup validation, main.go) dispatch on this
-// instead of hand-maintaining parallel switch statements. They used to do
-// exactly that, and the case orders drifted apart (code review item 5): the
-// validator checked "endpoint set, model not" before "alias set", so a
-// target with both an endpoint (no model) *and* an alias — which
-// candidatesForVirtual, checking alias second, routes fine via the alias —
-// was flagged as the broken "endpoint without model" shape instead, and
-// could even make the validator warn "no usable target" about a virtual that
-// actually works.
+// instead of hand-maintaining parallel switch statements, so the two can
+// never classify the same target differently: a target with both an
+// endpoint (no model) *and* an alias always routes via the alias in both
+// places, rather than one place treating it as the broken "endpoint without
+// model" shape while the other routes it fine.
 //
 // Precedence matches candidatesForVirtual exactly: endpoint+model wins when
 // both are set, then alias. Anything else (endpoint without model and no
@@ -248,14 +244,15 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 	for _, target := range candidates {
 		// A caller that has already hung up (client disconnect →
 		// context.Canceled, or a request deadline) must stop the failover
-		// walk here rather than plow through every remaining candidate: each
-		// remaining managed-alias candidate calls ServerManager.Acquire,
-		// which takes no context and can cold-launch a model or block up to
-		// admissionTimeoutSeconds (default 120s) — for a response nobody is
-		// waiting on. Checked at the top of every iteration (not just once
-		// before the loop) because the cancellation is typically what the
+		// walk here rather than plow through every remaining candidate.
+		// ServerManager.Acquire is ctx-aware for its own admission wait, but
+		// not for a health check on a launch it ends up owning (see Acquire's
+		// doc comment) — so a candidate that wins the race to launch a cold
+		// model still rides that out to completion even after the caller is
+		// gone. Checked at the top of every iteration, not just once before
+		// the loop, because the cancellation is typically what the
 		// *previous* iteration's attemptVirtual just observed and reported
-		// as its error, not something known in advance (code review item 2).
+		// as its error, not something known in advance.
 		if r.Context().Err() != nil {
 			slog.Debug("relay router: caller context done, abandoning remaining virtual-model candidates",
 				"model", name, "error", r.Context().Err())
@@ -267,9 +264,9 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 			// is exactly the ADR-010 incident this guards against: llama.cpp
 			// 500s on reasoning_effort:"minimal", and pinning that response
 			// would lock every later turn onto the backend that just failed
-			// instead of leaving the door open to fail over next time
-			// (code review item 3). The response itself is NOT retried
-			// either way — "upstream answered, whatever it answered stands"
+			// instead of leaving the door open to fail over next time. The
+			// response itself is NOT retried either way — "upstream
+			// answered, whatever it answered stands"
 			// — only whether it's worth remembering changes. A 4xx still
 			// pins: the backend answered fine, the client sent something it
 			// didn't like, and refusing to pin that would reintroduce the
@@ -297,7 +294,7 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 // ResponseWriter through a recorder that tracks whether anything was written
 // and, when it was, what status code the backend actually answered with —
 // routeVirtual uses that to decide whether the response is worth pinning
-// (see its 5xx handling, code review item 3). release is deferred (rather
+// (see its 5xx handling above). release is deferred (rather
 // than called after ServeHTTP returns) because a mid-stream backend failure
 // in a real net/http server panics with http.ErrAbortHandler — recovered by
 // the standard library one frame up — and a bare post-call release() would
@@ -349,9 +346,9 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVi
 		targetURL, err := url.Parse(endpoint.BaseURL)
 		if err != nil {
 			rel()
-			// Same nil-target panic risk routeManaged guards against (code
-			// review item 7) — but here it's just one failed candidate, not
-			// the whole request: the loop moves on to the next target.
+			// Same nil-target panic risk routeManaged guards against — but
+			// here it's just one failed candidate, not the whole request:
+			// the loop moves on to the next target.
 			return nil, nil, fmt.Errorf("invalid managed server endpoint: %w", err)
 		}
 		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
@@ -377,7 +374,7 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVi
 // attempt is safe to retry: once a header or body byte has actually reached
 // the client, the exchange is committed. It also captures the status code
 // the backend answered with, so routeVirtual can decide whether the response
-// is worth pinning (a 5xx is not — see code review item 3).
+// is worth pinning (a 5xx is not).
 type virtualResponseRecorder struct {
 	http.ResponseWriter
 	wrote      bool
