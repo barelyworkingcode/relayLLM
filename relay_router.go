@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -645,6 +646,8 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
+			req.URL.Path = upstreamPath(target.Path, req.URL.Path)
+			req.URL.RawPath = ""
 			req.Host = target.Host
 			req.Body = io.NopCloser(bytes.NewReader(body))
 			req.ContentLength = int64(len(body))
@@ -665,6 +668,44 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("backend error: %v", err)})
 		},
 	}
+}
+
+// openAIRoutesWithoutV1 are the OpenAI API routes a client may send without
+// the /v1 prefix. llama.cpp's server mounts these at both /X and /v1/X, so
+// llama.cpp-style clients use a bare base URL — Oh My Pi posts
+// `${baseUrl}/chat/completions` verbatim, and its relay provider is configured
+// as http://127.0.0.1:8180.
+var openAIRoutesWithoutV1 = map[string]bool{
+	"/chat/completions": true,
+	"/completions":      true,
+	"/embeddings":       true,
+	"/responses":        true,
+}
+
+// upstreamPath maps an inbound router path onto an upstream whose OpenAI API
+// root is basePath — the path part of its BaseURL, e.g. "/v1". The result is
+// the same URL provider_openai.go builds as BaseURL+"/chat/completions", and
+// the one ProxyRegistry already probes as BaseURL+"/models".
+//
+// Forwarding the inbound path verbatim only worked while every upstream
+// mounted both forms. ExLlamaV3 (europa) mounts /v1 only: a bare
+// /chat/completions reached it as a 404, while the same body at
+// /v1/chat/completions got a 200. Verbatim forwarding also dropped a base
+// path deeper than /v1 (https://openrouter.ai/api/v1).
+//
+// Any other path without /v1 is a server-root route (llama.cpp's /tokenize,
+// /infill, /apply-template) and passes through unchanged. It sits outside the
+// API base, so prefixing it would 404 on the one backend that serves it.
+func upstreamPath(basePath, inbound string) string {
+	rel, hasV1 := strings.CutPrefix(inbound, "/v1")
+	switch {
+	case hasV1 && (rel == "" || strings.HasPrefix(rel, "/")):
+	case openAIRoutesWithoutV1[inbound]:
+		rel = inbound
+	default:
+		return inbound
+	}
+	return strings.TrimRight(basePath, "/") + rel
 }
 
 // StartRelayRouter binds every address in addrs it can (best-effort — see
