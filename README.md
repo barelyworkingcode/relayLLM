@@ -114,7 +114,8 @@ keeps sending the same `prompt_cache_key` (or `user`, if that's absent), and
 a pinned target always wins over the preference ordering above — a
 reachability wobble must not hop an established conversation to a different
 backend, since two backends encode reasoning differently and cannot share a
-transcript (see [ADR-010](docs/decisions/010-virtual-model-conversation-affinity.md)).
+transcript (see [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo) for the
+full incompatibility matrix behind this).
 No client identifier means no pin — same behavior as before this existed. A
 pin expires after an hour of disuse, or falls back to the remaining
 candidates immediately if its target has since been removed from config.
@@ -160,8 +161,8 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude -p "hi"
 ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude --model vCode -p "hi"
 ```
 
-See [ADR-013](docs/decisions/013-anthropic-messages-compat.md) for what's
-translated, what's deliberately out of scope, and
+See `relay_router_anthropic_translate.go`'s file header for what's
+translated and what's deliberately out of scope, and
 [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo) for the full config
 reference including the `ANTHROPIC_CUSTOM_MODEL_OPTION` client-side setting
 needed to make a redirected model selectable in Claude Code's own `/model`

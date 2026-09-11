@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -30,6 +31,17 @@ type ServerProfile struct {
 }
 
 var llamaProfile = ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
+
+// mlx-serve (ddalcu/mlx-serve, Zig + mlx-c, zero Python) was chosen over two
+// alternatives for the MLX profile: mlx_lm.server (Apple's own) needs a
+// pip/uv-managed Python environment, and SwiftLM has no Homebrew
+// distribution — its formula builds from source and pins a minimum Xcode a
+// beta-OS machine may not satisfy. mlx-serve ships pre-built arm64 release
+// tarballs as well as a brew tap, sidestepping that. It speaks the same
+// OpenAI-compatible /v1/chat/completions + SSE + GET /health shape as
+// llama-server and takes local MLX model directories, which is what let
+// ServerManager generalize to both binaries via one ServerProfile instead of
+// a second ~500-line manager.
 var mlxProfile = ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
 
 // ServerModelConfig describes one managed-server model. Alias is the routing
@@ -285,8 +297,8 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 // lease: the instance may be evicted the moment this returns. Callers that
 // will actually send traffic should use Acquire and hold the lease for the
 // duration of the work.
-func (m *ServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) {
-	endpoint, release, err := m.Acquire(alias)
+func (m *ServerManager) GetOrLaunch(ctx context.Context, alias string) (*OpenAIEndpoint, error) {
+	endpoint, release, err := m.Acquire(ctx, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +316,16 @@ func (m *ServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) {
 // the least-recently-used *idle* instance is stopped to make room. If every
 // loaded instance is busy, Acquire waits for one to go idle, bounded by the
 // admission timeout.
-func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
+//
+// ctx bounds this caller's *waiting* — for another goroutine's in-progress
+// launch of the same alias, or for the budget to free up — so a caller that
+// disconnects mid-wait doesn't keep spending admission time, and doesn't
+// evict an idle instance for a response nobody is waiting on. It does not
+// bound a launch this call itself owns: once launchLocked has started the
+// process, this goroutine rides out the health check to completion
+// regardless of ctx (see the comment at the awaitReady call below for why
+// that one is not cancellable).
+func (m *ServerManager) Acquire(ctx context.Context, alias string) (*OpenAIEndpoint, func(), error) {
 	if m.config.FindByAlias(alias) == nil {
 		return nil, nil, fmt.Errorf("%s: unknown model alias %q", m.profile.Kind, alias)
 	}
@@ -321,6 +342,10 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 	deadline := m.clock.Now().Add(m.admissionTimeout)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, fmt.Errorf("%s: %q: %w", m.profile.Kind, alias, err)
+		}
+
 		m.mu.Lock()
 
 		// Fast path: reuse a live instance, or wait out a launch in progress.
@@ -343,19 +368,30 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 			default:
 				// Another goroutine is still launching this model.
 				m.mu.Unlock()
+				readyClosed := false
 				select {
 				case <-inst.ready:
+					readyClosed = true
+				case <-ctx.Done():
 				case <-m.clock.After(m.timeUntil(deadline)):
 				}
-				// If the launch failed, drop the instance so the next pass
-				// relaunches — but only if the slot still holds it.
-				if !inst.healthy.Load() || inst.exited.Load() {
+				// Only drop the instance once the launch itself has actually
+				// finished and failed (ready closed with healthy still
+				// false, or the process exited — the two are always paired,
+				// see launchLocked/awaitReady). A bare wait timeout or
+				// cancellation means the launch may still be in progress on
+				// another goroutine; dropping the map entry here would
+				// orphan a live, still-launching process that awaitReady
+				// will later return successfully but that no code path can
+				// ever see or stop again (reaper/StopAll/budget accounting
+				// all key off the map, not the process).
+				if readyClosed && (!inst.healthy.Load() || inst.exited.Load()) {
 					m.mu.Lock()
 					m.dropLocked(alias, inst)
 					m.mu.Unlock()
 				}
 			}
-			if err := m.checkDeadline(alias, deadline); err != nil {
+			if err := m.checkDeadline(ctx, alias, deadline); err != nil {
 				return nil, nil, err
 			}
 			continue
@@ -380,10 +416,11 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 					"alias", alias, "needs", formatGB(need))
 				select {
 				case <-wait:
+				case <-ctx.Done():
 				case <-m.clock.After(m.timeUntil(deadline)):
 				}
 			}
-			if err := m.checkDeadline(alias, deadline); err != nil {
+			if err := m.checkDeadline(ctx, alias, deadline); err != nil {
 				return nil, nil, err
 			}
 			continue
@@ -399,6 +436,16 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 		m.leaseLocked(inst)
 		m.mu.Unlock()
 
+		// awaitReady is deliberately not ctx-aware: this goroutine now owns
+		// the launch it just started (launchLocked/cmd.Start already ran),
+		// and the instance holds a lease with leases==0 nowhere in its
+		// lifecycle until the health check resolves one way or the other.
+		// Racing ctx against the poll would force releasing that lease on a
+		// not-yet-healthy instance, making it eligible for LRU eviction
+		// (lruIdleVictimLocked only checks leases/exited, not healthy) while
+		// still mid-launch. A caller that disconnects here simply waits out
+		// the (bounded, 120s) health check like any other in-process
+		// operation with no cancellation seam.
 		release := m.releaser(inst)
 		if err := m.awaitReady(alias, inst); err != nil {
 			release()
@@ -408,10 +455,11 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 	}
 }
 
-// checkDeadline converts an expired admission deadline into a user-facing
-// error naming the instances that were holding the budget.
-func (m *ServerManager) checkDeadline(alias string, deadline time.Time) error {
-	if m.clock.Now().Before(deadline) {
+// checkDeadline converts an expired admission deadline or a cancelled ctx
+// into a user-facing error naming the instances that were holding the
+// budget.
+func (m *ServerManager) checkDeadline(ctx context.Context, alias string, deadline time.Time) error {
+	if ctx.Err() == nil && m.clock.Now().Before(deadline) {
 		return nil
 	}
 	m.mu.Lock()
@@ -423,11 +471,15 @@ func (m *ServerManager) checkDeadline(alias string, deadline time.Time) error {
 	}
 	m.mu.Unlock()
 	sort.Strings(busy)
-	if len(busy) > 0 {
-		return fmt.Errorf("%s: timed out waiting for capacity to run %q; busy: %s",
-			m.profile.Kind, alias, strings.Join(busy, ", "))
+	reason := "timed out"
+	if ctx.Err() != nil {
+		reason = "caller gave up"
 	}
-	return fmt.Errorf("%s: timed out waiting for capacity to run %q", m.profile.Kind, alias)
+	if len(busy) > 0 {
+		return fmt.Errorf("%s: %s waiting for capacity to run %q; busy: %s",
+			m.profile.Kind, reason, alias, strings.Join(busy, ", "))
+	}
+	return fmt.Errorf("%s: %s waiting for capacity to run %q", m.profile.Kind, reason, alias)
 }
 
 // timeUntil returns the remaining time before deadline, floored at zero so a
@@ -457,7 +509,11 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 
 	port := m.portFromArgs(cfg.Args)
 	if port == 0 {
-		port = m.allocatePort()
+		var err error
+		port, err = m.allocatePort()
+		if err != nil {
+			return nil, fmt.Errorf("%s: cannot launch %q: %w", m.profile.Kind, alias, err)
+		}
 	}
 
 	// Pre-bind check: if the port is already held by another process
@@ -493,7 +549,6 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	}
 	m.instances[alias] = inst
 
-	// Monitor process exit.
 	go func() {
 		err := cmd.Wait()
 		inst.exited.Store(true)
@@ -545,6 +600,13 @@ func (m *ServerManager) awaitReady(alias string, inst *serverInstance) error {
 // The alias's own existing instance (if any) is excluded from the totals since
 // it is about to be replaced. Models with an unknown size (need == 0) are
 // never blocked by the memory cap, only by the instance cap.
+//
+// This budget is built here rather than delegated to llama.cpp's own router
+// mode (which ships on-demand launch, LRU eviction, and --models-max) for two
+// reasons: it only knows GGUF, so mlx-serve would still need this manager,
+// and it has no idle TTL — eviction fires only when a new model needs a
+// slot, so "reclaim memory when nothing is running" would stay unimplemented.
+// Revisit if llama.cpp's router grows an idle TTL and mlx-serve is dropped.
 func (m *ServerManager) fitsLocked(alias string, need int64) bool {
 	var (
 		count int
@@ -838,19 +900,29 @@ func (m *ServerManager) StopAll() {
 	wg.Wait()
 }
 
+// maxPortScanAttempts bounds allocatePort's search. Without a cap, a
+// persistent non-EADDRINUSE Listen failure (fd exhaustion, or nextPort
+// climbing past 65535) would spin forever holding m.mu, wedging every
+// Acquire/ModelCatalog/ListInstances call on this manager.
+const maxPortScanAttempts = 2000
+
 // allocatePort finds the next free TCP port starting from m.nextPort.
 // Must be called with m.mu held.
-func (m *ServerManager) allocatePort() int {
-	for {
+func (m *ServerManager) allocatePort() (int, error) {
+	for i := 0; i < maxPortScanAttempts; i++ {
 		port := m.nextPort
 		m.nextPort++
+		if port > 65535 {
+			return 0, fmt.Errorf("%s: port scan exhausted the valid range (nextPort=%d)", m.profile.Kind, port)
+		}
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue // port occupied, try next
 		}
 		ln.Close()
-		return port
+		return port, nil
 	}
+	return 0, fmt.Errorf("%s: could not find a free port after %d attempts starting at %d", m.profile.Kind, maxPortScanAttempts, m.nextPort-maxPortScanAttempts)
 }
 
 // portFromArgs extracts an explicit port from the args map, or returns 0
@@ -914,7 +986,6 @@ func buildServerArgs(profile ServerProfile, args map[string]any, port int) []str
 		case string:
 			result = append(result, flag, v)
 		default:
-			// Fallback: stringify via fmt.
 			result = append(result, flag, fmt.Sprintf("%v", v))
 		}
 	}
@@ -1015,7 +1086,10 @@ func (m *ServerManager) StartLoad(alias string) error {
 	m.mu.Unlock()
 
 	go func() {
-		_, release, err := m.Acquire(alias)
+		// No request is waiting on this — it's a fire-and-forget background
+		// load — so there is nothing to bind the ctx to but the load's own
+		// lifetime.
+		_, release, err := m.Acquire(context.Background(), alias)
 		if err != nil {
 			slog.Warn(fmt.Sprintf("%s: explicit load failed", m.profile.Kind), "alias", alias, "error", err)
 			m.mu.Lock()
@@ -1096,6 +1170,13 @@ func endpointForPort(profile ServerProfile, port int) *OpenAIEndpoint {
 	}
 }
 
+// maxLogLineBytes raises bufio.Scanner's default 64KB token limit. Verbose
+// request logging (llama-server logs full request JSON, which easily
+// exceeds 64KB with a long context or an image) would otherwise hit
+// ErrTooLong, silently exit the scan loop, and stop draining the pipe —
+// once the OS pipe buffer then fills, the child's next write blocks.
+const maxLogLineBytes = 8 * 1024 * 1024
+
 // logProcessOutput pipes cmd's stdout and stderr to slog, one line at a
 // time via bufio.Scanner. This correctly handles partial writes and
 // multi-line output, unlike a bare io.Writer.
@@ -1105,6 +1186,7 @@ func logProcessOutput(cmd *exec.Cmd, kind, alias string) {
 	if err == nil {
 		go func() {
 			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 			for scanner.Scan() {
 				slog.Debug(scanner.Text(), "source", source)
 			}
@@ -1114,6 +1196,7 @@ func logProcessOutput(cmd *exec.Cmd, kind, alias string) {
 	if err == nil {
 		go func() {
 			scanner := bufio.NewScanner(stderr)
+			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 			for scanner.Scan() {
 				slog.Warn(scanner.Text(), "source", source)
 			}

@@ -22,7 +22,7 @@ type OpenAIEndpoint struct {
 
 	// CAFile and PinSHA256 pin the TLS trust anchor for this endpoint's https
 	// hop. Both are validated and turned into a cached transport at config
-	// load — see endpoint_tls.go. Neither has any effect on an http baseURL;
+	// load — see relay_router_endpoint_tls.go. Neither has any effect on an http baseURL;
 	// setting either alongside one is a config error, not a silent no-op.
 	CAFile    string   `json:"caFile,omitempty"`    // PEM bundle; when set it is the ONLY trust anchor (system roots not consulted)
 	PinSHA256 []string `json:"pinSHA256,omitempty"` // SHA-256 hex fingerprints of the DER leaf certificate; colons optional, case-insensitive

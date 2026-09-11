@@ -378,12 +378,8 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 		usable := 0
 		// Dispatches on classifyVirtualTarget — the same classification
 		// candidatesForVirtual uses — rather than a hand-maintained switch of
-		// its own. The two used to drift apart: this validator's first case
-		// used to be "endpoint set, model not," which swallowed a target that
-		// set endpoint (without model) *and* alias; candidatesForVirtual
-		// checks alias second and routes that target fine via the alias, so
-		// this validator flagged a virtual that actually works (code review
-		// item 5). Sharing one classifier makes that drift impossible.
+		// its own, so this validator and the actual routing logic can never
+		// disagree about whether a target is usable.
 		for _, target := range v.Targets {
 			switch classifyVirtualTarget(target) {
 			case virtualTargetEndpoint:

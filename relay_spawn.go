@@ -8,7 +8,7 @@ import (
 )
 
 // AutoRegen* are the "always | skipIfExists | never" mode values used by
-// PiProjectOverlay.Mode (config.go / pi_overlay.go). relayLLM does not
+// PiProjectOverlay.Mode (config.go / provider_pi_overlay.go). relayLLM does not
 // regenerate skills — relay owns skill generation (relay ADR-004), and the
 // ResolvePtyEnv bridge call no longer carries a regen field. Empty == never.
 const (
@@ -88,8 +88,9 @@ func childBaseEnv() []string {
 // fetch a project-scoped token via relay's bridge and expose the resolved
 // project path back as a substitution value. Both call sites build this from
 // their own config and call Resolve() — keeping the two surfaces decoupled
-// while sharing the bridge-call + substitution logic. Skill regeneration is
-// no longer requested here; relay owns it (see relay ADR-004).
+// while sharing the bridge-call + substitution logic. Skill generation is
+// relay's responsibility entirely (see relay ADR-004); this spawn path never
+// requests or triggers it.
 type RelayManagedSpec struct {
 	ProjectID     string // authoritative project key; relay validates Directory is within the project. A non-empty value makes the spawn project-scoped (gets a token).
 	Directory     string // session/terminal cwd; relay validates it against ProjectID, or (legacy) uses it to infer the project
@@ -108,7 +109,10 @@ type SpawnSubs struct {
 // ${project.path} into s. The skills directory is the convention
 // ${PROJECT_PATH}/.claude/skills — callers that need a --skill flag build it
 // from ${PROJECT_PATH} (Pi and Claude Code discover skills recursively under
-// any directory passed to --skill).
+// any directory passed to --skill). There is no ${SKILL_PATH}/${SKILLS_ROOT}
+// token: an older config or template that still references either reaches
+// the spawned process as that literal, unexpanded text — Replacer only
+// substitutes tokens it knows, and silently leaves everything else alone.
 func (s SpawnSubs) Expand(in string) string {
 	r := strings.NewReplacer(
 		"${PROJECT_PATH}", s.ProjectPath,

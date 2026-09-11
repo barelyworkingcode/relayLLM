@@ -1,14 +1,41 @@
 package main
 
 // Pure Anthropic Messages API <-> OpenAI Chat Completions translation. No
-// I/O, no globals — mirrors provider_pi.go's translate seam (ADR-003/008):
-// every function here is a plain data transform, testable without a server.
+// I/O, no globals — every function here is a plain data transform, testable
+// without a server.
 //
 // Scope is deliberately trimmed from the full Anthropic surface to what's
 // load-bearing for Claude Code's common path (system + text + images + tool
-// calls). See docs/decisions/013-anthropic-messages-compat.md for what's
-// explicitly out of scope (extended thinking, prompt caching, documents,
-// structured outputs, server-side tools).
+// calls). Explicitly out of scope, as deliberate non-goals rather than
+// oversights:
+//
+//   - Extended thinking. Anthropic `thinking` blocks carry a `signature`
+//     Claude Code replays verbatim on the next turn; there is no way to
+//     produce one from an OpenAI-shaped backend's reasoning output.
+//     thinking/redacted_thinking blocks are always dropped from translated
+//     history, and thinking:{type:disabled} maps to reasoning_effort:"none"
+//     — but a redirected model's reasoning is never streamed back as an
+//     Anthropic thinking block.
+//   - Prompt caching. cache_control is dropped everywhere it appears; usage
+//     always reports zero cached tokens. Local backends still do their own
+//     prefix caching invisibly (llama.cpp KV reuse) — just not surfaced as
+//     Anthropic cache usage.
+//   - Documents/PDFs. A document content block becomes a text placeholder;
+//     no backend here can be handed a PDF.
+//   - Structured outputs (output_config.format / response_format) — not
+//     translated.
+//   - Server-side Anthropic tools — any tools[] entry whose type is
+//     anything other than absent/"custom" (web search, bash, code
+//     execution, the MCP connector, computer use, memory) is refused with a
+//     400 invalid_request_error naming the type, rather than silently
+//     dropped or passed through broken.
+//   - An Anthropic-shaped /v1/models. Claude Code under a subscription OAuth
+//     login never calls a model-discovery endpoint at all (confirmed by
+//     reading the installed `claude` CLI binary), so nobody would read it in
+//     the setup this was built for; visibility into Claude Code's own
+//     /model picker is instead a client-side setting
+//     (ANTHROPIC_CUSTOM_MODEL_OPTION=<key>, or a modelPicker entry in Claude
+//     Code's own settings).
 
 import (
 	"bytes"
@@ -232,7 +259,7 @@ func anthropicToOpenAIRequest(body []byte, target string, opts anthropicTranslat
 // Claude Code's metadata.user_id, which carries a JSON object (not a plain
 // user id) containing "session_id" among other fields. Falls back to the raw
 // string when it isn't that shape — still a stable, unique-enough key for
-// conversation affinity (ADR-010), just less legible in logs.
+// conversation affinity (see virtualAffinityStore), just less legible in logs.
 func anthropicAffinityKey(metadata *anthropicMetadata) string {
 	if metadata == nil || metadata.UserID == "" {
 		return ""
@@ -508,11 +535,12 @@ type anthropicToolCallState struct {
 // deltas and either streams the equivalent Anthropic SSE events live
 // (streaming == true) or silently builds internal state for BuildMessage to
 // render as one JSON Message (streaming == false). Text streams live; tool
-// calls are buffered and emitted as complete blocks at Finish — see
-// docs/decisions/013-anthropic-messages-compat.md for why (OpenAI permits
-// interleaved tool-call fragments across indices; Anthropic content blocks
-// are strictly sequential, and nothing can execute a tool before
-// message_stop anyway).
+// calls are buffered and emitted as complete blocks at Finish. This is
+// deliberate, not a shortcut: OpenAI permits interleaved tool-call argument
+// fragments across indices mid-stream, but Anthropic content blocks are
+// strictly sequential — and nothing can execute a tool before message_stop
+// reaches the client anyway, so buffering costs no real latency while
+// removing a whole class of interleaving bugs.
 type anthropicStreamTranslator struct {
 	streaming           bool
 	requestedModel      string
@@ -571,6 +599,12 @@ func (t *anthropicStreamTranslator) Start(w io.Writer) {
 // finds. In streaming mode, text deltas are written to w immediately as
 // Anthropic content_block_start/delta events; tool-call deltas are always
 // buffered regardless of mode.
+// maxAnthropicSSEBufBytes bounds sseBuf while it waits for a "\n\n" event
+// terminator. A well-behaved backend never approaches this — it exists for a
+// malformed or adversarial one that emits one huge unterminated line, which
+// would otherwise grow the buffer for the entire life of the response.
+const maxAnthropicSSEBufBytes = 8 << 20
+
 func (t *anthropicStreamTranslator) Feed(chunk []byte, w io.Writer) {
 	if len(chunk) > 0 {
 		t.sseBuf.Write(chunk)
@@ -579,6 +613,11 @@ func (t *anthropicStreamTranslator) Feed(chunk []byte, w io.Writer) {
 		buf := t.sseBuf.Bytes()
 		idx := bytes.Index(buf, []byte("\n\n"))
 		if idx < 0 {
+			if t.sseBuf.Len() > maxAnthropicSSEBufBytes {
+				slog.Warn("anthropic translate: SSE buffer exceeded cap with no complete event; dropping buffered data",
+					"bytes", t.sseBuf.Len())
+				t.sseBuf.Reset()
+			}
 			return
 		}
 		event := make([]byte, idx)
@@ -654,8 +693,34 @@ func (t *anthropicStreamTranslator) applyChunk(chunk openaiStreamChunk, w io.Wri
 	}
 }
 
+// maxAnthropicAccumBytes bounds textAccum and each tool call's argsBuf — the
+// internal copies kept for BuildMessage/history persistence, mirroring the
+// tool-loop's own maxToolResultLen truncation (provider_chat_base.go). Text
+// already streamed live to the client is unaffected; only the internal
+// accumulator stops growing once a runaway or adversarial backend blows well
+// past any real response size.
+const maxAnthropicAccumBytes = 8 << 20
+
+// capAccumulator appends s up to cap total bytes, silently dropping anything
+// past it. Satisfied by both *strings.Builder (textAccum) and *bytes.Buffer
+// (a tool call's argsBuf).
+type capAccumulator interface {
+	Len() int
+	WriteString(string) (int, error)
+}
+
+func writeCapped(acc capAccumulator, s string, cap int) {
+	if acc.Len() >= cap {
+		return
+	}
+	if remaining := cap - acc.Len(); remaining < len(s) {
+		s = s[:remaining]
+	}
+	acc.WriteString(s)
+}
+
 func (t *anthropicStreamTranslator) applyTextDelta(text string, w io.Writer) {
-	t.textAccum.WriteString(text)
+	writeCapped(&t.textAccum, text, maxAnthropicAccumBytes)
 	if !t.streaming {
 		return
 	}
@@ -693,7 +758,7 @@ func (t *anthropicStreamTranslator) applyToolDelta(tc openaiToolCallDelta) {
 		call.name = tc.Function.Name
 	}
 	if tc.Function.Arguments != "" {
-		call.argsBuf.WriteString(tc.Function.Arguments)
+		writeCapped(&call.argsBuf, tc.Function.Arguments, maxAnthropicAccumBytes)
 	}
 }
 

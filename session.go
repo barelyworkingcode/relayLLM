@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -136,13 +137,24 @@ type SessionManager struct {
 // SetProviderFactory installs a function that constructs the Provider for a
 // new session. When set, it short-circuits the built-in switch on
 // session.ProviderType. Test-only.
+//
+// This, SetMCPClientFactory, PermissionManager.SetClock, and the MCPClient
+// interface are the hermetic tier's only test seams — no DI framework, no
+// exec.Command factory (the live tier exercises real spawn instead), no
+// PTYSpawner abstraction (terminal tests spawn a real shell — fast enough),
+// no broader http.Client injection than already existed. Add a new one only
+// when all three hold: a planned default-tier test needs to control this
+// piece, the seam is a small interface or setter rather than a DI rewrite,
+// and production's shape doesn't get worse — invisible unless invoked. If
+// you can't meet all three, the test belongs in the live or llm tier.
 func (m *SessionManager) SetProviderFactory(f func(*Session, EventHandler) (Provider, error)) {
 	m.providerFactory = f
 }
 
 // SetMCPClientFactory installs a function that produces the MCPClient for
 // each chat-based session. When set, BaseChatProvider's settings-driven MCP
-// is replaced after construction. Test-only.
+// is replaced after construction. Test-only — see SetProviderFactory's
+// comment for the seam-design rule this and every other setter here follows.
 func (m *SessionManager) SetMCPClientFactory(f func(*Session) MCPClient) {
 	m.mcpClientFactory = f
 }
@@ -384,7 +396,6 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	m.sessions[session.ID] = session
 	m.mu.Unlock()
 
-	// Initialize the provider.
 	if err := m.initProvider(session); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, session.ID)
@@ -473,8 +484,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("%s: manager not configured", kind)
 		}
 		// Validate the alias now so a typo fails at session creation rather
-		// than at the first message — the eager GetOrLaunch used to do this
-		// as a side effect of launching.
+		// than at the first message.
 		if !mgr.HasAlias(modelID) {
 			return fmt.Errorf("%s: unknown model alias %q", kind, modelID)
 		}
@@ -484,8 +494,8 @@ func (m *SessionManager) initProvider(session *Session) error {
 		// lease taken by each Acquire is what stops an eviction landing
 		// mid-generation. Launching eagerly at session start would also pin a
 		// model the user has not sent a message to yet.
-		resolve := func() (OpenAIEndpoint, func(), error) {
-			endpoint, release, err := mgr.Acquire(modelID)
+		resolve := func(ctx context.Context) (OpenAIEndpoint, func(), error) {
+			endpoint, release, err := mgr.Acquire(ctx, modelID)
 			if err != nil {
 				return OpenAIEndpoint{}, nil, err
 			}
@@ -621,7 +631,6 @@ func resolveHookPath() (string, error) {
 }
 
 func (m *SessionManager) handleProviderEvent(session *Session, eventType string, data json.RawMessage) {
-	// Build the message once.
 	var msg map[string]interface{}
 
 	switch eventType {
@@ -707,7 +716,6 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		return
 	}
 
-	// Route to collector if one is registered for this session.
 	m.mu.RLock()
 	collector := m.collectors[session.ID]
 	m.mu.RUnlock()
@@ -716,7 +724,6 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		collector.HandleEvent(msg)
 	}
 
-	// Always forward to the main sink (WebSocket clients).
 	if m.sink != nil {
 		m.sink.SendToSession(session.ID, msg)
 	}
@@ -736,7 +743,6 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	session.processing = true
 	session.mu.Unlock()
 
-	// Restart provider if dead.
 	provider := session.getProvider()
 	if provider == nil || !provider.Alive() {
 		if err := m.initProvider(session); err != nil {
@@ -748,7 +754,6 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 		provider = session.getProvider()
 	}
 
-	// Persist user message.
 	contentJSON, _ := json.Marshal(text)
 	session.mu.Lock()
 	session.Messages = append(session.Messages, Message{
@@ -808,6 +813,10 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 	return nil
 }
 
+// sendMessageSyncTimeout bounds SendMessageSync's wait for a complete
+// response. Test-only seam — production never reassigns this.
+var sendMessageSyncTimeout = 5 * time.Minute
+
 // SendMessageSync sends a message and waits for the complete response.
 // Used by HTTP API for non-streaming clients (relayTelegram, relayScheduler).
 func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
@@ -833,7 +842,16 @@ func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAtt
 		return "", SessionStats{}, err
 	}
 
-	return collector.Wait(5 * time.Minute)
+	result, stats, err := collector.Wait(sendMessageSyncTimeout)
+	if errors.Is(err, ErrResponseTimeout) {
+		// A collector timeout means the provider is still generating with no
+		// caller left waiting on it. Without this, the managed-server lease
+		// and session.processing stay held indefinitely — the alias reports
+		// busy forever and only an explicit stop (never issued, since the
+		// caller already gave up) or the upstream closing the socket frees it.
+		_ = m.StopGeneration(sessionID)
+	}
+	return result, stats, err
 }
 
 func (m *SessionManager) GetSession(id string) (*Session, bool) {
@@ -1025,7 +1043,6 @@ func (m *SessionManager) ClearSession(id string) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	// Kill existing provider
 	session.mu.Lock()
 	provider := session.provider
 	session.provider = nil
@@ -1039,15 +1056,12 @@ func (m *SessionManager) ClearSession(id string) error {
 		provider.Kill()
 	}
 
-	// Persist cleared state
 	m.saveSession(session)
 
-	// Restart provider
 	if err := m.initProvider(session); err != nil {
 		return fmt.Errorf("failed to restart provider: %w", err)
 	}
 
-	// Send clear events to WS client
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgClearMessages,
@@ -1141,7 +1155,6 @@ func (m *SessionManager) RenameSession(id, name string) error {
 
 	m.saveSession(session)
 
-	// Notify WS clients
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgSessionRenamed,
@@ -1170,7 +1183,6 @@ func (m *SessionManager) SetSessionFolder(id, folder string) error {
 
 	m.saveSession(session)
 
-	// Notify WS clients (any other viewers of this session).
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
 			"type":      WSMsgSessionFolderChanged,

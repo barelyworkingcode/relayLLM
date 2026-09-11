@@ -552,11 +552,11 @@ func TestAnthropic_PingGoroutineStoppedEvenWhenWrappedCallPanics(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
-	// Headers arrive immediately (as real llama-server/oMLX backends do —
-	// see docs/decisions/013-anthropic-messages-compat.md), then the stream
-	// goes silent mid-generation before the next chunk. Pings cover exactly
-	// this gap, not the pre-header gap (model launch / prompt processing),
-	// which is Claude Code's own request timeout's problem instead.
+	// Headers arrive immediately (as real llama-server/oMLX backends do),
+	// then the stream goes silent mid-generation before the next chunk.
+	// Pings cover exactly this gap, not the pre-header gap (model launch /
+	// prompt processing), which is Claude Code's own request timeout's
+	// problem instead.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
