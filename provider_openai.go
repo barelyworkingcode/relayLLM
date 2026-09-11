@@ -27,8 +27,9 @@ type BackendAcquirer interface {
 }
 
 // BackendResolver launches-or-reuses a managed server and returns the endpoint
-// to talk to plus a lease release. See ServerManager.Acquire.
-type BackendResolver func() (OpenAIEndpoint, func(), error)
+// to talk to plus a lease release. See ServerManager.Acquire — ctx bounds the
+// resolver's own admission wait, not a launch it ends up owning.
+type BackendResolver func(ctx context.Context) (OpenAIEndpoint, func(), error)
 
 // OpenAIChatTransport implements ChatTransport for any server that speaks
 // the OpenAI /v1/chat/completions protocol (OpenAI itself, LM Studio, Ollama's
@@ -90,7 +91,7 @@ func (t *OpenAIChatTransport) AcquireBackend(ctx context.Context) (func(), error
 	if t.resolve == nil {
 		return func() {}, nil
 	}
-	endpoint, release, err := t.resolve()
+	endpoint, release, err := t.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}

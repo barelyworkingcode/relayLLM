@@ -1187,18 +1187,20 @@ func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testi
 	}
 }
 
-// Code review item 2, the sharper reproduction: an endpoint target's
-// RoundTrip already respects context cancellation on its own (it fails fast,
-// without dialing, the instant the context is Done), so a test built only
-// from endpoint targets can't actually distinguish the fix from the bug — a
+// A sharper reproduction than the endpoint-only case above: an endpoint
+// target's RoundTrip already respects context cancellation on its own (it
+// fails fast, without dialing, the instant the context is Done), so a test
+// built only from endpoint targets can't actually distinguish "the router
+// checked the context" from "the backend happened to fail fast anyway" — a
 // pre-canceled context makes every endpoint candidate fail near-instantly
-// either way. ServerManager.Acquire is different: it takes no context
-// parameter at all, so nothing about a canceled request stops it from
-// actually entering its admission wait. This seeds a manager at its instance
-// cap with a busy, non-idle instance (leases > 0) on a FakeClock that is
-// never advanced, so a real call to Acquire("wanted") would park in that
-// wait indefinitely — proving, if the request ever returns, that Acquire was
-// never called at all rather than merely "returned quickly by luck."
+// either way. This seeds a manager at its instance cap with a busy,
+// non-idle instance (leases > 0) on a FakeClock that is never advanced, so
+// a real call to Acquire("wanted") would park in its admission wait
+// indefinitely (Acquire's own ctx parameter is bound to the *same*
+// pre-canceled context here, so this specifically pins the top-of-loop
+// check in routeVirtual/attemptVirtual — the request must never even reach
+// Acquire) — proving, if the request ever returns, that Acquire was never
+// called at all rather than merely "returned quickly by luck."
 func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmission(t *testing.T) {
 	mgr, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
 		map[string]float64{"busy": 1, "wanted": 1})
@@ -1228,6 +1230,42 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 		// and "busy" is never released).
 	case <-time.After(2 * time.Second):
 		t.Fatal("request never returned — the router appears stuck inside ServerManager.Acquire's admission wait for a response nobody will read")
+	}
+}
+
+// TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt is the
+// complement of the "pre-canceled" test above: here the request context is
+// still live when ServeHTTP starts, so the router does call Acquire("wanted")
+// and it does enter the admission wait — then the client disconnects mid-wait.
+// Acquire's ctx parameter must abort that wait rather than riding out the
+// (here: never-advanced) 120s admission deadline.
+func TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt(t *testing.T) {
+	mgr, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
+		map[string]float64{"busy": 1, "wanted": 1})
+	addInstance(mgr, "busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
+
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
+		Name: "vGuard", Targets: []VirtualLLMTarget{{Alias: "wanted"}},
+	}}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"vGuard"}`))).WithContext(ctx)
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		router.server.Handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForWaiters(t, clk, 1) // proves Acquire actually entered its admission wait
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request never returned after the client disconnected mid-admission-wait — Acquire's ctx parameter did not abort it")
 	}
 }
 

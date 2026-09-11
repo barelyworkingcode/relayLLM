@@ -485,8 +485,8 @@ func (m *SessionManager) initProvider(session *Session) error {
 		// lease taken by each Acquire is what stops an eviction landing
 		// mid-generation. Launching eagerly at session start would also pin a
 		// model the user has not sent a message to yet.
-		resolve := func() (OpenAIEndpoint, func(), error) {
-			endpoint, release, err := mgr.Acquire(modelID)
+		resolve := func(ctx context.Context) (OpenAIEndpoint, func(), error) {
+			endpoint, release, err := mgr.Acquire(ctx, modelID)
 			if err != nil {
 				return OpenAIEndpoint{}, nil, err
 			}

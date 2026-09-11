@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -285,8 +286,8 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 // lease: the instance may be evicted the moment this returns. Callers that
 // will actually send traffic should use Acquire and hold the lease for the
 // duration of the work.
-func (m *ServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) {
-	endpoint, release, err := m.Acquire(alias)
+func (m *ServerManager) GetOrLaunch(ctx context.Context, alias string) (*OpenAIEndpoint, error) {
+	endpoint, release, err := m.Acquire(ctx, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +305,16 @@ func (m *ServerManager) GetOrLaunch(alias string) (*OpenAIEndpoint, error) {
 // the least-recently-used *idle* instance is stopped to make room. If every
 // loaded instance is busy, Acquire waits for one to go idle, bounded by the
 // admission timeout.
-func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
+//
+// ctx bounds this caller's *waiting* — for another goroutine's in-progress
+// launch of the same alias, or for the budget to free up — so a caller that
+// disconnects mid-wait doesn't keep spending admission time, and doesn't
+// evict an idle instance for a response nobody is waiting on. It does not
+// bound a launch this call itself owns: once launchLocked has started the
+// process, this goroutine rides out the health check to completion
+// regardless of ctx (see the comment at the awaitReady call below for why
+// that one is not cancellable).
+func (m *ServerManager) Acquire(ctx context.Context, alias string) (*OpenAIEndpoint, func(), error) {
 	if m.config.FindByAlias(alias) == nil {
 		return nil, nil, fmt.Errorf("%s: unknown model alias %q", m.profile.Kind, alias)
 	}
@@ -321,6 +331,10 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 	deadline := m.clock.Now().Add(m.admissionTimeout)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, fmt.Errorf("%s: %q: %w", m.profile.Kind, alias, err)
+		}
+
 		m.mu.Lock()
 
 		// Fast path: reuse a live instance, or wait out a launch in progress.
@@ -347,25 +361,26 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 				select {
 				case <-inst.ready:
 					readyClosed = true
+				case <-ctx.Done():
 				case <-m.clock.After(m.timeUntil(deadline)):
 				}
 				// Only drop the instance once the launch itself has actually
 				// finished and failed (ready closed with healthy still
 				// false, or the process exited — the two are always paired,
-				// see launchLocked/awaitReady). A bare wait timeout means
-				// the launch may still be in progress on another goroutine;
-				// dropping the map entry here would orphan a live,
-				// still-launching process that awaitReady will later return
-				// successfully but that no code path can ever see or stop
-				// again (reaper/StopAll/budget accounting all key off the
-				// map, not the process).
+				// see launchLocked/awaitReady). A bare wait timeout or
+				// cancellation means the launch may still be in progress on
+				// another goroutine; dropping the map entry here would
+				// orphan a live, still-launching process that awaitReady
+				// will later return successfully but that no code path can
+				// ever see or stop again (reaper/StopAll/budget accounting
+				// all key off the map, not the process).
 				if readyClosed && (!inst.healthy.Load() || inst.exited.Load()) {
 					m.mu.Lock()
 					m.dropLocked(alias, inst)
 					m.mu.Unlock()
 				}
 			}
-			if err := m.checkDeadline(alias, deadline); err != nil {
+			if err := m.checkDeadline(ctx, alias, deadline); err != nil {
 				return nil, nil, err
 			}
 			continue
@@ -390,10 +405,11 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 					"alias", alias, "needs", formatGB(need))
 				select {
 				case <-wait:
+				case <-ctx.Done():
 				case <-m.clock.After(m.timeUntil(deadline)):
 				}
 			}
-			if err := m.checkDeadline(alias, deadline); err != nil {
+			if err := m.checkDeadline(ctx, alias, deadline); err != nil {
 				return nil, nil, err
 			}
 			continue
@@ -409,6 +425,16 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 		m.leaseLocked(inst)
 		m.mu.Unlock()
 
+		// awaitReady is deliberately not ctx-aware: this goroutine now owns
+		// the launch it just started (launchLocked/cmd.Start already ran),
+		// and the instance holds a lease with leases==0 nowhere in its
+		// lifecycle until the health check resolves one way or the other.
+		// Racing ctx against the poll would force releasing that lease on a
+		// not-yet-healthy instance, making it eligible for LRU eviction
+		// (lruIdleVictimLocked only checks leases/exited, not healthy) while
+		// still mid-launch. A caller that disconnects here simply waits out
+		// the (bounded, 120s) health check like any other in-process
+		// operation with no cancellation seam.
 		release := m.releaser(inst)
 		if err := m.awaitReady(alias, inst); err != nil {
 			release()
@@ -418,10 +444,11 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 	}
 }
 
-// checkDeadline converts an expired admission deadline into a user-facing
-// error naming the instances that were holding the budget.
-func (m *ServerManager) checkDeadline(alias string, deadline time.Time) error {
-	if m.clock.Now().Before(deadline) {
+// checkDeadline converts an expired admission deadline or a cancelled ctx
+// into a user-facing error naming the instances that were holding the
+// budget.
+func (m *ServerManager) checkDeadline(ctx context.Context, alias string, deadline time.Time) error {
+	if ctx.Err() == nil && m.clock.Now().Before(deadline) {
 		return nil
 	}
 	m.mu.Lock()
@@ -433,11 +460,15 @@ func (m *ServerManager) checkDeadline(alias string, deadline time.Time) error {
 	}
 	m.mu.Unlock()
 	sort.Strings(busy)
-	if len(busy) > 0 {
-		return fmt.Errorf("%s: timed out waiting for capacity to run %q; busy: %s",
-			m.profile.Kind, alias, strings.Join(busy, ", "))
+	reason := "timed out"
+	if ctx.Err() != nil {
+		reason = "caller gave up"
 	}
-	return fmt.Errorf("%s: timed out waiting for capacity to run %q", m.profile.Kind, alias)
+	if len(busy) > 0 {
+		return fmt.Errorf("%s: %s waiting for capacity to run %q; busy: %s",
+			m.profile.Kind, reason, alias, strings.Join(busy, ", "))
+	}
+	return fmt.Errorf("%s: %s waiting for capacity to run %q", m.profile.Kind, reason, alias)
 }
 
 // timeUntil returns the remaining time before deadline, floored at zero so a
@@ -1039,7 +1070,10 @@ func (m *ServerManager) StartLoad(alias string) error {
 	m.mu.Unlock()
 
 	go func() {
-		_, release, err := m.Acquire(alias)
+		// No request is waiting on this — it's a fire-and-forget background
+		// load — so there is nothing to bind the ctx to but the load's own
+		// lifetime.
+		_, release, err := m.Acquire(context.Background(), alias)
 		if err != nil {
 			slog.Warn(fmt.Sprintf("%s: explicit load failed", m.profile.Kind), "alias", alias, "error", err)
 			m.mu.Lock()

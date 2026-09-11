@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestAcquire_ReusesHealthyInstanceAndTracksLeases(t *testing.T) {
 	m, clk := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10})
 	inst := addInstance(m, "a", 0, clk.Now())
 
-	endpoint, release, err := m.Acquire("a")
+	endpoint, release, err := m.Acquire(context.Background(), "a")
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestAcquire_ReusesHealthyInstanceAndTracksLeases(t *testing.T) {
 func TestAcquire_RejectsModelLargerThanEntireBudget(t *testing.T) {
 	m, _ := newBudgetManager(t, &ServerConfig{MaxMemoryGB: 20}, map[string]float64{"huge": 41})
 
-	_, _, err := m.Acquire("huge")
+	_, _, err := m.Acquire(context.Background(), "huge")
 	if err == nil {
 		t.Fatal("Acquire succeeded; want rejection for a model bigger than the budget")
 	}
@@ -108,7 +109,7 @@ func TestAcquire_RejectsModelLargerThanEntireBudget(t *testing.T) {
 
 func TestAcquire_UnknownAlias(t *testing.T) {
 	m, _ := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10})
-	if _, _, err := m.Acquire("nope"); err == nil {
+	if _, _, err := m.Acquire(context.Background(), "nope"); err == nil {
 		t.Fatal("Acquire of an unconfigured alias should fail")
 	}
 }
@@ -255,7 +256,7 @@ func TestAcquire_EvictsIdleLRUToMakeRoom(t *testing.T) {
 	// The launch itself fails (no llama-server binary on the test path), but
 	// eviction happens before the launch, so the observable effect is that the
 	// resident instance was stopped to make room.
-	_, _, err := m.Acquire("wanted")
+	_, _, err := m.Acquire(context.Background(), "wanted")
 	if err == nil {
 		t.Fatal("expected the launch to fail without a real binary")
 	}
@@ -272,7 +273,7 @@ func TestAcquire_TimesOutWhenEverythingIsBusy(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := m.Acquire("wanted")
+		_, _, err := m.Acquire(context.Background(), "wanted")
 		errCh <- err
 	}()
 
@@ -317,7 +318,7 @@ func TestAcquire_ProceedsWhenBusyInstanceGoesIdle(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := m.Acquire("wanted")
+		_, _, err := m.Acquire(context.Background(), "wanted")
 		errCh <- err
 	}()
 
@@ -375,7 +376,7 @@ func TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := m.Acquire("a")
+		_, _, err := m.Acquire(context.Background(), "a")
 		errCh <- err
 	}()
 
@@ -396,6 +397,79 @@ func TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch(t *testing.T) {
 	m.mu.Unlock()
 	if !ok || got != inst {
 		t.Fatal("waiter's own timeout incorrectly dropped the in-progress launch from the instance map")
+	}
+}
+
+// TestAcquire_CtxCancelAbortsWaitForInProgressLaunch verifies a disconnected
+// caller stops waiting on another goroutine's in-progress launch as soon as
+// its context is cancelled, rather than riding out the full (here: never
+// firing) admission deadline. The instance must survive untouched, same as
+// the plain-timeout case above.
+func TestAcquire_CtxCancelAbortsWaitForInProgressLaunch(t *testing.T) {
+	m, clk := newBudgetManager(t, &ServerConfig{AdmissionTimeoutSeconds: 120}, map[string]float64{"a": 10})
+
+	inst := &serverInstance{
+		config: ServerModelConfig{Alias: "a"},
+		port:   9000,
+		ready:  make(chan struct{}),
+		memory: m.memory["a"],
+	}
+	m.mu.Lock()
+	m.instances["a"] = inst
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := m.Acquire(ctx, "a")
+		errCh <- err
+	}()
+
+	waitForWaiters(t, clk, 1) // parked on the 120s admission deadline
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected Acquire to fail once ctx was cancelled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire did not react to context cancellation — it's still bound only to the (120s, never advanced) admission deadline")
+	}
+
+	m.mu.Lock()
+	got, ok := m.instances["a"]
+	m.mu.Unlock()
+	if !ok || got != inst {
+		t.Fatal("ctx cancellation incorrectly dropped the in-progress launch from the instance map")
+	}
+}
+
+// TestAcquire_CtxCancelAbortsBudgetFullWait mirrors the above for the other
+// wait inside Acquire's admission loop: waiting for a busy instance to go
+// idle so its slot can be reused.
+func TestAcquire_CtxCancelAbortsBudgetFullWait(t *testing.T) {
+	m, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
+		map[string]float64{"busy": 10, "wanted": 10})
+	addInstance(m, "busy", 1, clk.Now()) // leased: not evictable, forces the wait branch
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := m.Acquire(ctx, "wanted")
+		errCh <- err
+	}()
+
+	waitForWaiters(t, clk, 1)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected Acquire to fail once ctx was cancelled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire did not react to context cancellation while waiting for budget to free up")
 	}
 }
 
