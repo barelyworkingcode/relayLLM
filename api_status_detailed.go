@@ -177,9 +177,11 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 	}
 
 	routerAddr := ""
+	var routerAddrs []string
 	routerTLS := false
 	if deps.Router != nil {
 		routerAddr = deps.Router.Addr()
+		routerAddrs = deps.Router.Addrs()
 		routerTLS = deps.Router.TLSEnabled()
 	}
 
@@ -216,6 +218,7 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 			"router": map[string]any{
 				"enabled": deps.Router != nil,
 				"addr":    routerAddr,
+				"addrs":   routerAddrs,
 				"tls":     routerTLS,
 			},
 			"throughput": map[string]any{

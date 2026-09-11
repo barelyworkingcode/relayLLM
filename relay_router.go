@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -30,6 +31,14 @@ type RelayRouter struct {
 	virtual  *VirtualLLMConfig
 	affinity *virtualAffinityStore
 	server   *http.Server
+
+	// listeners holds every bound listener from Listen, one per configured
+	// bind address. Serve fans the shared server out across all of them;
+	// Close (via p.server.Close) tears down every one at once — the stdlib
+	// tracks a server's listeners internally regardless of how many Serve
+	// calls registered them, so this field exists only for Listen to hand
+	// listeners to Serve, not for shutdown bookkeeping.
+	listeners []net.Listener
 
 	// metrics instruments the proxy path for GET /api/status/detailed
 	// (status_metrics.go). Always non-nil after NewRelayRouter; the
@@ -57,8 +66,8 @@ type RelayRouter struct {
 	// reasoningEffortMap above.
 	reasoningEffortTemplateKwargs map[string]map[string]any
 
-	// tlsCert/tlsKey, when both set, make ListenAndServe serve this listener
-	// over TLS instead of plain http — this is the router's own listener
+	// tlsCert/tlsKey, when both set, make Serve serve every listener over
+	// TLS instead of plain http — this is the router's own listener(s)
 	// (the relayLLM-to-upstream hop is Part A, above; this is a client
 	// dialing INTO the router). Wired in the same before-the-serving-goroutine
 	// way as the reasoningEffort* fields above, via setTLS.
@@ -163,16 +172,17 @@ type RouterConfig struct {
 // never called on behaves exactly as it did before the feature existed.
 //
 // MUST be called before the router starts serving — StartRelayRouter is the
-// only production call site, and it calls this before spawning the
-// ListenAndServe goroutine. Go's memory model guarantees a goroutine's
-// creation happens-before its execution, so every request-handling goroutine
-// transitively spawned from that one is guaranteed to observe the write; a
-// call made after the goroutine is already running (the previous shape:
-// main called the exported SetReasoningEffortMap after StartRelayRouter had
-// already returned) races the first accepted connection under -race. Kept
-// unexported, rather than removed, so tests that drive a router's handler
-// directly without ever calling ListenAndServe (no goroutine, so no race)
-// can still configure it post-construction.
+// only production call site, and it calls this before spawning any of
+// Serve's per-listener goroutines. Go's memory model guarantees a
+// goroutine's creation happens-before its execution, so every
+// request-handling goroutine transitively spawned from one of those is
+// guaranteed to observe the write; a call made after they're already
+// running (the previous shape: main called the exported
+// SetReasoningEffortMap after StartRelayRouter had already returned) races
+// the first accepted connection under -race. Kept unexported, rather than
+// removed, so tests that drive a router's handler directly without ever
+// calling Listen/Serve (no goroutine, so no race) can still configure it
+// post-construction.
 func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
 	p.reasoningEffortMap = m
 }
@@ -183,7 +193,8 @@ func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
 // this field's zero value — so a router this is never called on behaves
 // exactly as it did before the feature existed. Subject to the same
 // pre-serve constraint as setReasoningEffortMap above (see its comment):
-// StartRelayRouter calls this before spawning the ListenAndServe goroutine.
+// StartRelayRouter calls this before spawning any of Serve's per-listener
+// goroutines.
 func (p *RelayRouter) setReasoningEffortTemplateKwargs(m map[string]map[string]any) {
 	p.reasoningEffortTemplateKwargs = m
 }
@@ -192,16 +203,21 @@ func (p *RelayRouter) setReasoningEffortTemplateKwargs(m map[string]map[string]a
 // no section for this — it comes from --router-tls-cert/--router-tls-key,
 // validated as a matched pair in main). Subject to the same pre-serve
 // ordering constraint as setReasoningEffortMap above: StartRelayRouter calls
-// this before spawning the ListenAndServe goroutine.
+// this before spawning any of Serve's per-listener goroutines.
 func (p *RelayRouter) setTLS(cert, key string) {
 	p.tlsCert = cert
 	p.tlsKey = key
 }
 
-// NewRelayRouter creates a router on addr. Nil entries in managers are
-// dropped; registry may be nil to disable the endpoint branch; virtual may be
-// nil to disable the virtual-model branch. A router with no live backends
-// 400s every request — StartRelayRouter guards against starting one.
+// NewRelayRouter creates a router reporting addr as its canonical address
+// (Addr()) — it does not bind anything itself; call Listen for that. A
+// single addr rather than a list keeps this constructor's ~60 test call
+// sites (which never call Listen) unchanged by multi-bind support; addr is
+// overwritten with the first real bound address once Listen runs. Nil
+// entries in managers are dropped; registry may be nil to disable the
+// endpoint branch; virtual may be nil to disable the virtual-model branch. A
+// router with no live backends 400s every request — StartRelayRouter guards
+// against starting one.
 func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
 	live := make([]*ServerManager, 0, len(managers))
 	for _, m := range managers {
@@ -244,17 +260,56 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 	return p
 }
 
-func (p *RelayRouter) ListenAndServe() error {
-	if p.tlsCert != "" {
-		slog.Info("relay router listening", "addr", p.server.Addr, "scheme", "https")
-		// MinVersion is set here rather than left at the stdlib default so a
-		// future Go toolchain lowering that default can't silently loosen
-		// this listener.
-		p.server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-		return p.server.ListenAndServeTLS(p.tlsCert, p.tlsKey)
+// Listen binds every address in addrs on a best-effort basis (see
+// listenAll's doc comment) and records whichever listeners actually bound
+// for Serve. Must be called before Serve; StartRelayRouter is the one
+// production caller and does so in that order. Returns an error only if
+// NOT ONE address could be bound.
+//
+// p.server.Addr is overwritten with the first bound listener's real address
+// so a port-0 caller (the whole test suite passes ":0") sees the port it
+// actually got, not the literal string NewRelayRouter was constructed with.
+func (p *RelayRouter) Listen(addrs []string) error {
+	lns, err := listenAll(addrs, "relay router")
+	if err != nil {
+		return err
 	}
-	slog.Info("relay router listening", "addr", p.server.Addr, "scheme", "http")
-	return p.server.ListenAndServe()
+	p.listeners = lns
+	p.server.Addr = lns[0].Addr().String()
+	return nil
+}
+
+// Serve starts one goroutine per listener bound by Listen, all serving the
+// same *http.Server — so the same handler, same TLS config, same
+// keep-alive/timeout settings on every bound interface. Each goroutine exits
+// when its listener closes (Close, via p.server.Close, closes every listener
+// the server is tracking at once) and logs only if that wasn't the expected
+// shutdown signal.
+func (p *RelayRouter) Serve() {
+	scheme := "http"
+	if p.tlsCert != "" {
+		scheme = "https"
+		// Pinned rather than left at the stdlib default, matching the main
+		// mux's TCP front: a future toolchain lowering that default must not
+		// silently loosen this listener.
+		p.server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	for _, ln := range p.listeners {
+		slog.Info("relay router listening", "addr", ln.Addr().String(), "scheme", scheme)
+	}
+	for _, ln := range p.listeners {
+		go func() {
+			var err error
+			if p.tlsCert != "" {
+				err = p.server.ServeTLS(ln, p.tlsCert, p.tlsKey)
+			} else {
+				err = p.server.Serve(ln)
+			}
+			if err != nil && err != http.ErrServerClosed {
+				slog.Error("relay router error", "addr", ln.Addr().String(), "error", err)
+			}
+		}()
+	}
 }
 
 func (p *RelayRouter) Close() error {
@@ -275,13 +330,28 @@ func (p *RelayRouter) Metrics() *ProxyMetrics {
 	return p.metrics
 }
 
-// Addr returns the router listener's configured address (e.g.
-// "127.0.0.1:8180"), or "" for a nil router.
+// Addr returns the router's primary listener address (e.g.
+// "127.0.0.1:8180") — the first of possibly several bound by Listen, or ""
+// for a nil router. See Addrs for the full set.
 func (p *RelayRouter) Addr() string {
 	if p == nil {
 		return ""
 	}
 	return p.server.Addr
+}
+
+// Addrs returns every address Listen actually bound, in bind order. Nil for
+// a nil router or one Listen was never called on (e.g. a test that drives
+// the handler directly without ever serving).
+func (p *RelayRouter) Addrs() []string {
+	if p == nil || len(p.listeners) == 0 {
+		return nil
+	}
+	addrs := make([]string, len(p.listeners))
+	for i, ln := range p.listeners {
+		addrs[i] = ln.Addr().String()
+	}
+	return addrs
 }
 
 // TLSEnabled reports whether the router listener serves TLS.
@@ -597,19 +667,26 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 	}
 }
 
-// StartRelayRouter starts the router in a background goroutine. Returns nil
-// (no-op) when addr is empty or no live backend remains after dropping nil
-// managers.
+// StartRelayRouter binds every address in addrs it can (best-effort — see
+// listenAll) and starts serving each bound one in its own background
+// goroutine (see Listen/Serve). Returns (nil, nil) — a clean no-op, not an
+// error — when addrs is empty or no live backend remains after dropping nil
+// managers. Returns a non-nil error only when NOT ONE address in addrs could
+// be bound, which is fatal: the caller is expected to log it and exit rather
+// than run with the router silently absent, matching the main HTTP front's
+// startMainTCPListener. A partial failure (some addresses bound, at least
+// one didn't) is not an error here at all — listenAll already logged the
+// failure and Serve simply runs on whichever listeners exist.
 //
 // router (may be nil) carries RouterConfig-level behavior — the
 // reasoning_effort rewrite map and its sibling chat_template_kwargs merge
-// table — and both are applied via their setters before the serving
-// goroutine is spawned, not after StartRelayRouter returns. That ordering is
-// load-bearing, not stylistic: Go's memory model guarantees a goroutine's
-// creation happens-before its execution, so setting the fields first means
-// every connection-handling goroutine transitively spawned from the one
-// below is guaranteed to observe them without synchronization. Setting them
-// after the listener is already serving would let an accepted request read
+// table — and both are applied via their setters before any of Serve's
+// per-listener goroutines are spawned, not after StartRelayRouter returns.
+// That ordering is load-bearing, not stylistic: Go's memory model guarantees
+// a goroutine's creation happens-before its execution, so setting the fields
+// first means every connection-handling goroutine transitively spawned from
+// Serve is guaranteed to observe them without synchronization. Setting them
+// after a listener is already serving would let an accepted request read
 // the field concurrently with the write — a real, race-detector-visible
 // data race under live traffic. StartRelayRouter is the one production call
 // site for this, chosen over adding the parameters to NewRelayRouter
@@ -619,12 +696,14 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 // mean plain http); main validates they're either both set or both empty
 // before calling in, so this never has to fail startup on a mismatched pair
 // itself. Applied via setTLS under the same pre-serve ordering rule as the
-// reasoningEffort* fields.
-func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig, tlsCert, tlsKey string) *RelayRouter {
-	if addr == "" {
-		return nil
+// reasoningEffort* fields. One cert/key pair covers every bound address —
+// there's no per-bind TLS config — so the cert must be valid for all of
+// them if more than one is configured.
+func StartRelayRouter(addrs []string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
+	if len(addrs) == 0 {
+		return nil, nil
 	}
-	p := NewRelayRouter(addr, managers, registry, virtual)
+	p := NewRelayRouter(addrs[0], managers, registry, virtual)
 	// A router with no managed servers and no OpenAI endpoints would
 	// otherwise dispatch nothing — except router.anthropic's passthrough is
 	// a real destination in its own right (api.anthropic.com), needing
@@ -634,7 +713,7 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 	// everything 404'd with no indication why.
 	hasAnthropic := router != nil && router.Anthropic != nil
 	if len(p.managers) == 0 && p.registry == nil && !hasAnthropic {
-		return nil
+		return nil, nil
 	}
 	if router != nil {
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
@@ -642,10 +721,9 @@ func StartRelayRouter(addr string, managers []*ServerManager, registry *ProxyReg
 		p.setAnthropic(router.Anthropic)
 	}
 	p.setTLS(tlsCert, tlsKey)
-	go func() {
-		if err := p.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("relay router error", "error", err)
-		}
-	}()
-	return p
+	if err := p.Listen(addrs); err != nil {
+		return nil, err
+	}
+	p.Serve()
+	return p, nil
 }

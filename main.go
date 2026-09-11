@@ -28,14 +28,20 @@ func main() {
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
 	mlxServePath := flag.String("mlx-serve-path", envOrDefault("MLX_SERVE_PATH", ""), "Path to mlx-serve binary (default: mlx-serve on PATH)")
 	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve) + OpenAI endpoints (empty to disable)")
-	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Bind address for the relay-router TCP listener. Set to 0.0.0.0 to accept connections from other hosts.")
+	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Include 0.0.0.0 to accept connections from other hosts.")
 	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
 	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
-	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional TCP listener serving the same bearer-authenticated API as --socket (sessions, terminals, /status dashboard). Empty to disable.")
-	httpBind := flag.String("http-bind", envOrDefault("RELAY_LLM_HTTP_BIND", "127.0.0.1"), "Bind address for the --http-port listener. A non-loopback address requires --http-tls-cert.")
+	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving the same routes as --socket (sessions, terminals, /status dashboard) — protected by --http-bind, not a bearer token, same as --router-port. Empty to disable.")
+	httpBind := flag.String("http-bind", envOrDefault("RELAY_LLM_HTTP_BIND", "127.0.0.1"), "Comma-separated bind addresses for the --http-port listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Set to 0.0.0.0 to accept connections from other hosts.")
 	httpTLSCert := flag.String("http-tls-cert", envOrDefault("RELAY_LLM_HTTP_TLS_CERT", ""), "TLS certificate file for the --http-port listener. Requires --http-tls-key; empty (with key also empty) serves plain http.")
 	httpTLSKey := flag.String("http-tls-key", envOrDefault("RELAY_LLM_HTTP_TLS_KEY", ""), "TLS private key file for the --http-port listener. Requires --http-tls-cert.")
 	flag.Parse()
+
+	// Parsed once here; every downstream consumer (loopback validation,
+	// listenAddrs, the pi-overlay host, the manifest) works off these lists
+	// rather than re-splitting the raw flag value.
+	routerBinds := parseBindList(*routerBind)
+	httpBinds := parseBindList(*httpBind)
 
 	if (*routerTLSCert == "") != (*routerTLSKey == "") {
 		missing := "--router-tls-cert/RELAY_LLM_ROUTER_TLS_CERT"
@@ -46,7 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := validateHTTPListener(*httpPort, *httpBind, *httpTLSCert, *httpTLSKey); err != nil {
+	if err := validateHTTPListener(*httpPort, *httpTLSCert, *httpTLSKey); err != nil {
 		slog.Error("refusing to start: --http-port is misconfigured", "error", err)
 		os.Exit(1)
 	}
@@ -103,10 +109,12 @@ func main() {
 	// on a non-loopback bind with no TLS on the router's own listener, it's
 	// a credential leaving the box in plaintext to anyone who can reach the
 	// port. Same fail-closed shape as the router-TLS-pair guard above.
-	if cfg.Router != nil && cfg.Router.Anthropic != nil && !isLoopbackHost(*routerBind) && *routerTLSCert == "" {
-		slog.Error("relay router: router.anthropic is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real Anthropic credential on every request)",
-			"router-bind", *routerBind)
-		os.Exit(1)
+	if cfg.Router != nil && cfg.Router.Anthropic != nil && *routerTLSCert == "" {
+		if host, ok := firstNonLoopbackBind(routerBinds); ok {
+			slog.Error("relay router: router.anthropic is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real Anthropic credential on every request)",
+				"router-bind", host)
+			os.Exit(1)
+		}
 	}
 
 	sessions.SetPiConfig(cfg.Pi)
@@ -239,14 +247,24 @@ func main() {
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
 	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
-	routerAddr := listenAddr(*routerBind, *routerPort)
+	routerAddrs := listenAddrs(routerBinds, *routerPort)
 	// cfg.Router is passed straight into StartRelayRouter rather than set on
 	// the router afterward — see StartRelayRouter's doc comment for why a
 	// separate post-construction setter call raced the router's first
-	// accepted connection.
-	relayRouter := StartRelayRouter(routerAddr, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// accepted connection. Each configured address binds best-effort (see
+	// listenAll) — one that can't be bound in this deployment is logged and
+	// skipped, not fatal, since --router-bind may legitimately name an
+	// address that's only assignable in some environments. Only if every
+	// single one fails does StartRelayRouter return an error, the same as
+	// the http front's below: that's the case where the router would
+	// otherwise be silently absent from a healthy-looking process.
+	relayRouter, err := StartRelayRouter(routerAddrs, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	if err != nil {
+		slog.Error("failed to start relay router", "error", err)
+		os.Exit(1)
+	}
 	sessions.SetRouterPort(*routerPort)
-	sessions.SetRouterHost(*routerBind)
+	sessions.SetRouterHosts(routerBinds)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
 
 	mux := http.NewServeMux()
@@ -269,11 +287,20 @@ func main() {
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Build the handler chain. recoverMiddleware sits closest to the mux so it
-	// catches panics from real handlers; bearerAuth sits in front so unauth
-	// requests never reach a real handler (and never allocate a WS session).
-	handler := bearerAuth(*internalToken, recoverMiddleware(mux))
+	// catches panics from real handlers regardless of which front is used.
+	//
+	// The Unix socket and the --http-port TCP front deliberately do NOT
+	// share one handler value anymore: the socket carries relay's manifest
+	// bridging and the permission hook's callback (both machine clients
+	// authenticating with the bearer token, never a browser), so it keeps
+	// bearerAuth in front. The TCP front is plain — no bearerAuth at all —
+	// protected only by which --http-bind addresses were actually bound,
+	// the same posture --router-port already has. See bearerAuth's doc
+	// comment.
+	recovered := recoverMiddleware(mux)
+	socketHandler := bearerAuth(*internalToken, recovered)
 
-	server := &http.Server{Handler: handler}
+	server := &http.Server{Handler: socketHandler}
 
 	if err := os.MkdirAll(filepath.Dir(*socketPath), 0o700); err != nil {
 		slog.Error("failed to create socket parent dir", "path", *socketPath, "error", err)
@@ -290,16 +317,20 @@ func main() {
 		slog.Warn("failed to chmod socket", "path", *socketPath, "error", err)
 	}
 
-	// Optional second front on TCP, same handler value as the socket above —
-	// not a parallel mux. Sharing `handler` is the point: whatever bearerAuth
-	// and the route table do for the socket is exactly what they do here, so
-	// the two fronts cannot drift into different auth or different routes.
-	// A bind failure is fatal for the same reason the socket's is: a port
-	// already in use would otherwise leave the operator with a silently
-	// absent listener and a healthy-looking process.
-	tcpServer, err := startMainTCPListener(listenAddr(*httpBind, *httpPort), *httpTLSCert, *httpTLSKey, handler)
+	// Optional second front on TCP, same mux and route table as the socket
+	// above — not bearer-authenticated (see the handler-chain comment
+	// above and bearerAuth's doc comment): reachability is gated purely by
+	// which --http-bind addresses actually bound. Each configured address
+	// binds best-effort (see listenAll): one that fails is logged and
+	// skipped, not fatal, since the address may only be assignable in some
+	// deployments. Only a total failure — every address rejected — is
+	// fatal, the same reason the socket's is: it would otherwise leave the
+	// operator with a silently absent listener and a healthy-looking
+	// process.
+	httpAddrs := listenAddrs(httpBinds, *httpPort)
+	tcpServer, err := startMainTCPListener(httpAddrs, *httpTLSCert, *httpTLSKey, recovered)
 	if err != nil {
-		slog.Error("failed to listen on http port", "addr", listenAddr(*httpBind, *httpPort), "error", err)
+		slog.Error("failed to listen on http port", "addrs", httpAddrs, "error", err)
 		os.Exit(1)
 	}
 
@@ -530,15 +561,102 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-// listenAddr composes a TCP listen address from a bind/port flag pair
-// (--router-bind/--router-port, --http-bind/--http-port). An empty port
-// means that listener is disabled, so bind is irrelevant and deliberately
-// not defaulted in that case; both callers treat "" as "don't listen".
-func listenAddr(bind, port string) string {
-	if port == "" {
-		return ""
+// parseBindList splits a --router-bind/--http-bind value into its component
+// binds, so both flags can name more than one interface (e.g.
+// "127.0.0.1,192.168.64.1") without going all the way to the promiscuous
+// 0.0.0.0. There's no separate env-var syntax for a list — RELAY_ROUTER_BIND
+// / RELAY_LLM_HTTP_BIND carry the same comma-separated string envOrDefault
+// hands back as-is, so CLI and env configuration parse through one path.
+//
+// Elements are trimmed, and an IPv6 literal's surrounding brackets are
+// stripped (net.JoinHostPort re-adds them as needed, and isLoopbackHost's
+// net.ParseIP rejects a bracketed literal outright). Exact duplicates are
+// dropped in order, since "127.0.0.1,127.0.0.1" is a guaranteed
+// self-inflicted EADDRINUSE, not two distinct interfaces.
+//
+// A value that trims to nothing at all still returns one empty-string
+// element — that's today's wildcard bind (net.JoinHostPort("", port) binds
+// every interface), not "listen nowhere".
+func parseBindList(s string) []string {
+	parts := strings.Split(s, ",")
+	binds := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		p = strings.TrimPrefix(p, "[")
+		p = strings.TrimSuffix(p, "]")
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		binds = append(binds, p)
 	}
-	return net.JoinHostPort(bind, port)
+	if len(binds) == 0 {
+		return []string{""}
+	}
+	return binds
+}
+
+// listenAddrs composes one TCP listen address per bind (already split by
+// parseBindList) for a --router-bind/--router-port or
+// --http-bind/--http-port pair. An empty port means that listener is
+// disabled, so binds are irrelevant and deliberately not consulted in that
+// case; every caller treats a nil result as "don't listen".
+func listenAddrs(binds []string, port string) []string {
+	if port == "" {
+		return nil
+	}
+	addrs := make([]string, len(binds))
+	for i, b := range binds {
+		addrs[i] = net.JoinHostPort(b, port)
+	}
+	return addrs
+}
+
+// firstNonLoopbackBind returns the first bind that isn't loopback, so a
+// caller can name the specific offender in an error message rather than
+// dumping the whole list. The wildcards ("", "0.0.0.0", "::") report as
+// non-loopback here — net.ParseIP gives them no IsLoopback — which is the
+// correct fail-closed answer: they accept off-box connections too.
+func firstNonLoopbackBind(binds []string) (string, bool) {
+	for _, b := range binds {
+		if !isLoopbackHost(b) {
+			return b, true
+		}
+	}
+	return "", false
+}
+
+// listenAll binds every address in addrs on a best-effort basis: an address
+// that fails to bind (already in use, no such interface, …) is logged and
+// skipped rather than aborting every other bind. This is deliberate, not an
+// oversight — a configured address is not guaranteed locally assignable in
+// every deployment (a gateway IP, say, that some environments can bind and
+// others can't), and requiring every one of several binds to succeed would
+// make that address's mere presence in the list a single point of failure
+// for the whole listener. what tags the log line (e.g. "relay router",
+// "http front") so an operator can tell which listener a failure belongs to
+// when both are configured with overlapping addresses.
+//
+// Only when NOT ONE address could be bound does this return an error — a
+// listener that binds nothing at all is exactly the original single-bind
+// failure case and must still surface as a startup failure, the same as
+// before this function accepted more than one address.
+func listenAll(addrs []string, what string) ([]net.Listener, error) {
+	lns := make([]net.Listener, 0, len(addrs))
+	for _, addr := range addrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			slog.Error("failed to bind listener; continuing with any other configured addresses",
+				"component", what, "addr", addr, "error", err)
+			continue
+		}
+		lns = append(lns, ln)
+	}
+	if len(lns) == 0 {
+		return nil, fmt.Errorf("%s: no listener could be bound (tried %v)", what, addrs)
+	}
+	return lns, nil
 }
 
 // validateHTTPListener checks the --http-port flag group before anything
@@ -546,16 +664,14 @@ func listenAddr(bind, port string) string {
 // in the group becomes moot, so it returns nil without looking at them —
 // the default deployment must reach zero new failure modes.
 //
-// The non-loopback guard is stricter than the relay-router's equivalent
-// because what's behind this listener is stricter. The router's mux is
-// deliberately unauthenticated local-inference plumbing; this one fronts
-// session transcripts, terminal state, and project paths, and clients
-// authenticate to it by sending a long-lived bearer token — in a header, or
-// in a cookie — on every request. Off the loopback interface without TLS
-// that credential is readable by anything on the path, so the fail-closed
-// answer matches router.anthropic's above: refuse to start rather than
-// quietly serve.
-func validateHTTPListener(port, bind, certFile, keyFile string) error {
+// The --http-port listener carries no bearer token (see bearerAuth's doc
+// comment) — it is protected only by --http-bind, deliberately matching
+// --router-port's existing unauthenticated-by-bind-address posture, so
+// there is no credential-in-transit rationale for forcing TLS on a
+// non-loopback bind here. TLS (--http-tls-cert/--http-tls-key) stays
+// available for whoever wants the transport encrypted anyway; this check is
+// only the ordinary "both flags or neither" pairing sanity check.
+func validateHTTPListener(port, certFile, keyFile string) error {
 	if port == "" {
 		return nil
 	}
@@ -566,32 +682,36 @@ func validateHTTPListener(port, bind, certFile, keyFile string) error {
 		}
 		return fmt.Errorf("TLS requires both cert and key; missing %s", missing)
 	}
-	if !isLoopbackHost(bind) && certFile == "" {
-		return fmt.Errorf("--http-bind %q is not loopback and no --http-tls-cert is set; "+
-			"the API bearer token would cross the network in plaintext", bind)
-	}
 	return nil
 }
 
-// startMainTCPListener serves `handler` on addr, returning the server so the
-// caller can shut it down. An empty addr is the disabled case: (nil, nil),
-// nothing bound, no goroutine started.
+// startMainTCPListener serves `handler` on every address in addrs that can
+// actually be bound, returning the shared server so the caller can shut it
+// down. An empty addrs is the disabled case: (nil, nil), nothing bound, no
+// goroutine started.
 //
-// The bind happens synchronously and its error is the caller's to report,
-// while only the accept loop runs in the background — a port conflict has to
-// surface as a startup failure, not as a log line the operator finds later
-// while wondering why the port is dead.
-func startMainTCPListener(addr, certFile, keyFile string, handler http.Handler) (*http.Server, error) {
-	if addr == "" {
+// Every bind happens synchronously (via listenAll), on a best-effort
+// basis — an address that fails to bind is logged and skipped rather than
+// taking the others down with it (see listenAll's doc comment) — while only
+// the accept loops run in the background. The returned error means every
+// single requested address failed to bind: that's the one case where "the
+// listener silently isn't there" must instead surface as a startup failure.
+// One *http.Server is shared across every listener: the stdlib supports
+// Serve being called on it from multiple goroutines concurrently, and
+// Shutdown/Close on that one server tears down every listener it's
+// tracking — so a multi-bind front costs no new shutdown machinery over a
+// single-bind one.
+func startMainTCPListener(addrs []string, certFile, keyFile string, handler http.Handler) (*http.Server, error) {
+	if len(addrs) == 0 {
 		return nil, nil
 	}
-	ln, err := net.Listen("tcp", addr)
+	lns, err := listenAll(addrs, "http front")
 	if err != nil {
 		return nil, err
 	}
-	// Addr is re-read from the bound listener, not the requested string, so
-	// a port-0 request reports the port it actually got.
-	srv := &http.Server{Addr: ln.Addr().String(), Handler: handler}
+	// Addr is re-read from the first bound listener, not the requested
+	// string, so a port-0 request reports the port it actually got.
+	srv := &http.Server{Addr: lns[0].Addr().String(), Handler: handler}
 	scheme := "http"
 	if certFile != "" {
 		scheme = "https"
@@ -600,17 +720,21 @@ func startMainTCPListener(addr, certFile, keyFile string, handler http.Handler) 
 		// must not silently loosen this one.
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	slog.Info("listening", "addr", srv.Addr, "scheme", scheme)
-	go func() {
-		var serveErr error
-		if certFile != "" {
-			serveErr = srv.ServeTLS(ln, certFile, keyFile)
-		} else {
-			serveErr = srv.Serve(ln)
-		}
-		if serveErr != nil && serveErr != http.ErrServerClosed {
-			slog.Error("http listener error", "addr", srv.Addr, "error", serveErr)
-		}
-	}()
+	for _, ln := range lns {
+		slog.Info("listening", "addr", ln.Addr().String(), "scheme", scheme)
+	}
+	for _, ln := range lns {
+		go func() {
+			var serveErr error
+			if certFile != "" {
+				serveErr = srv.ServeTLS(ln, certFile, keyFile)
+			} else {
+				serveErr = srv.Serve(ln)
+			}
+			if serveErr != nil && serveErr != http.ErrServerClosed {
+				slog.Error("http listener error", "addr", ln.Addr().String(), "error", serveErr)
+			}
+		}()
+	}
 	return srv, nil
 }
