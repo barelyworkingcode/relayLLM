@@ -1129,7 +1129,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte) {
 	// The lease is held for the whole proxied exchange, including the SSE
 	// stream, so the budget cannot evict this instance mid-response.
-	endpoint, release, err := mgr.Acquire(alias)
+	endpoint, release, err := mgr.Acquire(r.Context(), alias)
 	if err != nil {
 		slog.Warn("relay router: failed to launch managed server", "kind", mgr.profile.Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -1263,7 +1263,7 @@ func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, tar
 	// newUpstreamProxy the caller is handling the failure itself, so a
 	// retryable attempt never leaks a partial error body to the client before
 	// routeVirtual tries the next candidate.
-	proxy, release, buildErr := p.buildVirtualAttempt(target, body, func(e error) bool {
+	proxy, release, buildErr := p.buildVirtualAttempt(r.Context(), target, body, func(e error) bool {
 		backendErr = e
 		return true
 	})
@@ -1290,9 +1290,9 @@ func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, tar
 // Requests are replayable across attempts because newUpstreamProxy's
 // Director re-installs the body from the captured []byte on every call, so
 // each candidate gets a fresh, undrained body.
-func (p *RelayRouter) buildVirtualAttempt(target resolvedVirtualTarget, body []byte, onError func(error) bool) (proxy *httputil.ReverseProxy, release func(), err error) {
+func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVirtualTarget, body []byte, onError func(error) bool) (proxy *httputil.ReverseProxy, release func(), err error) {
 	if target.manager != nil {
-		endpoint, rel, err := target.manager.Acquire(target.alias)
+		endpoint, rel, err := target.manager.Acquire(ctx, target.alias)
 		if err != nil {
 			return nil, nil, err
 		}
