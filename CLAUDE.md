@@ -170,6 +170,8 @@ It currently **ships no tools**. Image generation is no longer a built-in — it
 
 Unix socket at `--socket` (defaults to `{data-dir}/relayllm.sock`). WebSocket at `/ws`.
 
+Optionally also on TCP: `--http-port` / `RELAY_LLM_HTTP_PORT` (empty = disabled, the default) bound to `--http-bind` / `RELAY_LLM_HTTP_BIND` (default `127.0.0.1`), with `--http-tls-cert` / `--http-tls-key` for TLS. This is a *second front on the same handler value*, not a second mux — identical routes, identical `bearerAuth`. It exists because the `/status` dashboard is a browser page and nothing else reaches it: relay's front door is a Unix socket only Eve dials, and Eve proxies only the specific `/api/*` + `/ws` routes its own code knows about. Not to be confused with `--router-port`, which is a different mux (OpenAI-compatible proxy) that is deliberately unauthenticated. A non-loopback `--http-bind` with no TLS cert **fails startup** — same fail-closed shape as `router.anthropic`'s non-loopback guard, and stricter than the router's because this mux serves session transcripts and terminal state behind a bearer token that would otherwise cross the network in plaintext.
+
 ### HTTP Endpoints
 ```
 GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp + MLX)
@@ -378,6 +380,8 @@ See `../relay/docs/service-manifest.md` for the full protocol contract.
 ## Local Auth
 
 `auth.go::bearerAuth` validates every HTTP/WS request against `--token` / `RELAY_LLM_TOKEN`. Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The same token is plumbed through `SessionManager` → `ClaudeProvider` → hook child env as `RELAY_LLM_HOOK_TOKEN`; the hook binary uses it on its `/api/permission` POST.
+
+Three carriers of that one token are accepted, checked in this order: `Authorization: Bearer <token>` (machine clients — a present-but-wrong header is rejected outright, never a fall-through to a weaker carrier), a `relayllm_auth` cookie, and a one-shot `?token=<token>` URL parameter. The parameter exists only to mint the cookie: a browser navigating to a URL can't attach a header, and the `/status` page's own `fetch('/api/status/detailed')` inherits nothing from the address bar but cookies — so a valid parameter on a GET/HEAD answers with `Set-Cookie` + a 302 back to the same path *without* the parameter, keeping the secret out of history and out of any `Referer` the page's subresources send. The cookie is the same secret compared the same way; it is issued `HttpOnly`, `SameSite=Strict` (an ambient credential on an API that can read session transcripts must never ride a cross-site request), and `Secure` only when the request arrived over TLS. Practical effect: `http://localhost:<http-port>/status?token=<token>` is a one-click bookmark, which is what relay's tray `-url` for the `relay-llm` service points at.
 
 ### Relay-side token rotation
 
