@@ -343,13 +343,23 @@ func (m *ServerManager) Acquire(alias string) (*OpenAIEndpoint, func(), error) {
 			default:
 				// Another goroutine is still launching this model.
 				m.mu.Unlock()
+				readyClosed := false
 				select {
 				case <-inst.ready:
+					readyClosed = true
 				case <-m.clock.After(m.timeUntil(deadline)):
 				}
-				// If the launch failed, drop the instance so the next pass
-				// relaunches — but only if the slot still holds it.
-				if !inst.healthy.Load() || inst.exited.Load() {
+				// Only drop the instance once the launch itself has actually
+				// finished and failed (ready closed with healthy still
+				// false, or the process exited — the two are always paired,
+				// see launchLocked/awaitReady). A bare wait timeout means
+				// the launch may still be in progress on another goroutine;
+				// dropping the map entry here would orphan a live,
+				// still-launching process that awaitReady will later return
+				// successfully but that no code path can ever see or stop
+				// again (reaper/StopAll/budget accounting all key off the
+				// map, not the process).
+				if readyClosed && (!inst.healthy.Load() || inst.exited.Load()) {
 					m.mu.Lock()
 					m.dropLocked(alias, inst)
 					m.mu.Unlock()
