@@ -1,7 +1,7 @@
 package main
 
 // Coverage for the pure Anthropic <-> OpenAI translation in
-// anthropic_translate.go — request shape translation and the OpenAI-SSE ->
+// relay_router_anthropic_translate.go — request shape translation and the OpenAI-SSE ->
 // Anthropic-SSE streaming state machine. No HTTP here; relay_router_anthropic_test.go
 // covers the router-level wiring (dispatch, passthrough, credential handling).
 

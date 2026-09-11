@@ -1,6 +1,6 @@
 package main
 
-// Unit coverage for virtualAffinityStore and applyAffinity (virtual_affinity.go,
+// Unit coverage for virtualAffinityStore and applyAffinity (relay_router_virtual_affinity.go,
 // relay_router.go). Full request-path coverage (pinning surviving a
 // reachability flip, independent conversations, fallback when a pin's target
 // is gone, re-pin after a mid-conversation failure) lives in

@@ -18,7 +18,7 @@ import (
 // managed-server aliases bare (llama + mlx), OpenAI endpoint models prefixed
 // with the endpoint name.
 type PiOverlayInputs struct {
-	ServerModels []ServerModelConfig // consumed by pi_models.go to synthesize Eve picker entries
+	ServerModels []ServerModelConfig // consumed by provider_pi_models.go to synthesize Eve picker entries
 	RouterPort   string              // empty disables the relay-router provider entry
 	RouterHost   string              // --router-bind value; see routerOverlayHost
 	RouterModels []PiRouterModel
