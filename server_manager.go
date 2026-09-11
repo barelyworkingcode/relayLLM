@@ -31,6 +31,17 @@ type ServerProfile struct {
 }
 
 var llamaProfile = ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
+
+// mlx-serve (ddalcu/mlx-serve, Zig + mlx-c, zero Python) was chosen over two
+// alternatives for the MLX profile: mlx_lm.server (Apple's own) needs a
+// pip/uv-managed Python environment, and SwiftLM has no Homebrew
+// distribution — its formula builds from source and pins a minimum Xcode a
+// beta-OS machine may not satisfy. mlx-serve ships pre-built arm64 release
+// tarballs as well as a brew tap, sidestepping that. It speaks the same
+// OpenAI-compatible /v1/chat/completions + SSE + GET /health shape as
+// llama-server and takes local MLX model directories, which is what let
+// ServerManager generalize to both binaries via one ServerProfile instead of
+// a second ~500-line manager.
 var mlxProfile = ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
 
 // ServerModelConfig describes one managed-server model. Alias is the routing
@@ -589,6 +600,13 @@ func (m *ServerManager) awaitReady(alias string, inst *serverInstance) error {
 // The alias's own existing instance (if any) is excluded from the totals since
 // it is about to be replaced. Models with an unknown size (need == 0) are
 // never blocked by the memory cap, only by the instance cap.
+//
+// This budget is built here rather than delegated to llama.cpp's own router
+// mode (which ships on-demand launch, LRU eviction, and --models-max) for two
+// reasons: it only knows GGUF, so mlx-serve would still need this manager,
+// and it has no idle TTL — eviction fires only when a new model needs a
+// slot, so "reclaim memory when nothing is running" would stay unimplemented.
+// Revisit if llama.cpp's router grows an idle TTL and mlx-serve is dropped.
 func (m *ServerManager) fitsLocked(alias string, need int64) bool {
 	var (
 		count int

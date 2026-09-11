@@ -70,13 +70,12 @@ func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing
 	}
 }
 
-// Code review item 1 (HIGH): identity() used to be just "endpoint:<name>",
-// so two targets on the same endpoint with different models — a natural
-// big-then-small fallback pair — hashed to the same pin. applyAffinity then
-// matched whichever one happened to come first in candidates and could
-// permanently re-pin a conversation that was actually served by the small
-// model onto the big one next turn. The upstream model id must be part of
-// the identity.
+// identity() must include the upstream model id, not just the endpoint
+// name: two targets on the same endpoint with different models — a natural
+// big-then-small fallback pair — would otherwise hash to the same pin, and
+// applyAffinity would match whichever one happens to come first in
+// candidates, permanently re-pinning a conversation that was actually served
+// by the small model onto the big one next turn.
 func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *testing.T) {
 	big := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
 	small := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}

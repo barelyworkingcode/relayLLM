@@ -180,10 +180,11 @@ func (p *PiProvider) resolveSkillDir(subs SpawnSubs) string {
 
 // buildPiArgs assembles the `pi --mode rpc` argv. sessionDir is the resolved
 // --session-dir; skillDir is the resolved --skill directory ("" to omit, see
-// resolveSkillDir). Pure over provider fields + arguments, so the model-routing
-// flags (--provider/--model/--thinking), session resume (--session), and
-// extraArgs expansion are hermetically testable without spawning. See
-// provider_pi_spawn_test.go.
+// resolveSkillDir). Pure over provider fields + arguments — same
+// plain-function-over-exec-fake choice as provider_claude.go's
+// buildClaudeArgs — so the model-routing flags (--provider/--model/
+// --thinking), session resume (--session), and extraArgs expansion are
+// hermetically testable without spawning. See provider_pi_spawn_test.go.
 func (p *PiProvider) buildPiArgs(subs SpawnSubs, sessionDir, skillDir string) []string {
 	args := []string{"--mode", "rpc"}
 

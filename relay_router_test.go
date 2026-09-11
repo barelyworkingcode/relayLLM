@@ -763,10 +763,10 @@ func TestRouterCatalog_VirtualModel_InheritsMetadataFromAliasTarget(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// Conversation affinity for virtual models (ADR-010). Two backends cannot
-// safely share a reasoning transcript, so once some target has actually
-// served a conversation, later turns must stick to it even when the
-// reachability cache would otherwise prefer something else.
+// Conversation affinity for virtual models (see virtualAffinityStore). Two
+// backends cannot safely share a reasoning transcript, so once some target
+// has actually served a conversation, later turns must stick to it even when
+// the reachability cache would otherwise prefer something else.
 // ---------------------------------------------------------------------------
 
 // newCountingChatUpstream returns an httptest server that advertises modelID
@@ -1107,13 +1107,13 @@ func TestRouterAffinity_FailedAttemptRecordsNoPin(t *testing.T) {
 	}
 }
 
-// Code review item 1 (HIGH), end to end: a virtual model with two targets on
-// the SAME endpoint but different models — a natural big-then-small fallback
-// pair — must pin independently. Before the fix, identity() was just
-// "endpoint:<name>", so both targets hashed identically and applyAffinity
-// matched whichever one happened to come first in declared order (here,
-// qwen-70b) regardless of which one the pin actually named — silently
-// re-pinning a conversation onto the wrong model, permanently.
+// A virtual model with two targets on the SAME endpoint but different
+// models — a natural big-then-small fallback pair — must pin independently.
+// identity() includes the upstream model id precisely so both targets don't
+// hash to the same "endpoint:<name>" string, which would let applyAffinity
+// match whichever one happens to come first in declared order regardless of
+// which one the pin actually named — silently re-pinning a conversation onto
+// the wrong model, permanently.
 func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T) {
 	var bigCalls, smallCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1167,15 +1167,15 @@ func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T
 	}
 }
 
-// Code review item 2 (MEDIUM): a client disconnect must not send the router
-// walking every remaining candidate. Pre-fix, a canceled request context was
-// treated exactly like any other pre-response failure and the loop simply
-// advanced — for a managed-alias candidate that means an unbounded
+// A client disconnect must not send the router walking every remaining
+// candidate: a canceled request context is checked at the top of
+// routeVirtual's loop, before any candidate is attempted, precisely because
+// treating it like any other pre-response failure and simply advancing would
+// mean a managed-alias candidate still pays for an unbounded
 // ServerManager.Acquire call (cold launch, or up to admissionTimeoutSeconds)
 // for a response nobody is waiting on. This drives the router's real HTTP
 // handler directly with a pre-canceled request context so the check is
-// exercised exactly where routeVirtual added it: at the top of the loop,
-// before any candidate is attempted.
+// exercised exactly where it lives.
 func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testing.T) {
 	var firstCalls, secondCalls, thirdCalls atomic.Int64
 	newTarget := func(calls *atomic.Int64) *httptest.Server {
@@ -1306,12 +1306,12 @@ func TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt(t *testin
 	}
 }
 
-// Code review item 3 (MEDIUM): a backend that answers with a 5xx must not
-// get pinned. This is the exact ADR-010 incident — llama.cpp 500s on
-// reasoning_effort:"minimal" — pinning that response would lock every later
-// turn onto the backend that just failed instead of leaving the door open to
-// fail over. The 500 itself is NOT retried: "upstream answered, whatever it
-// answered stands" is unchanged; only whether it's worth remembering does.
+// A backend that answers with a 5xx must not get pinned — llama.cpp 500s on
+// reasoning_effort:"minimal" is a real example; pinning that response would
+// lock every later turn onto the backend that just failed instead of
+// leaving the door open to fail over. The 500 itself is NOT retried:
+// "upstream answered, whatever it answered stands" is unchanged; only
+// whether it's worth remembering does.
 func TestRouterAffinity_FailingBackendGets500ButNoPin(t *testing.T) {
 	var calls atomic.Int64
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1387,14 +1387,13 @@ func TestRouterAffinity_4xxResponseStillPins(t *testing.T) {
 	}
 }
 
-// Code review item 5 (LOW): classifyVirtualTarget is the single classifier
-// both candidatesForVirtual and warnVirtualModelConfig now dispatch on. This
-// pins the exact case that used to make them disagree: a target that sets
-// endpoint (without model) *and* alias. candidatesForVirtual's original case
-// order checks endpoint+model first (fails, model is empty), then alias
-// (matches) — so it routes fine via the alias. The old validator's first
-// case was "endpoint set, model not," which caught this target before ever
-// reaching its alias case, and warned about a virtual that actually works.
+// classifyVirtualTarget is the single classifier both candidatesForVirtual
+// and warnVirtualModelConfig dispatch on, so they can never disagree about a
+// target that sets endpoint (without model) *and* alias:
+// candidatesForVirtual's case order checks endpoint+model first (fails,
+// model is empty), then alias (matches) — so it routes fine via the alias,
+// and classifyVirtualTarget must resolve it the same way rather than as the
+// broken "endpoint without model" shape.
 func TestClassifyVirtualTarget_EndpointWithoutModelButWithAliasIsAlias(t *testing.T) {
 	target := VirtualLLMTarget{Endpoint: "ep", Alias: "local"}
 	if got := classifyVirtualTarget(target); got != virtualTargetAlias {
@@ -1439,14 +1438,14 @@ func TestCandidatesForVirtual_EndpointWithoutModelButWithAliasRoutesViaAlias(t *
 	}
 }
 
-// Code review item 6 (LOW): a virtual named exactly like an endpoint's
-// prefixed id (<endpoint>/<upstream-id>) must be listed in the catalog as
-// the row that will actually serve — the virtual, since handleProxy checks
-// p.virtual.Find before p.registry.LookupModel. Before the fix, handleModels
-// built endpoint rows before virtual rows, so the catalog listed the
-// endpoint (which a request for that id would never actually reach) while
-// dispatch served the virtual — a client saw one behavior advertised and got
-// another.
+// A virtual named exactly like an endpoint's prefixed id
+// (<endpoint>/<upstream-id>) must be listed in the catalog as the row that
+// will actually serve — the virtual, since handleProxy checks p.virtual.Find
+// before p.registry.LookupModel. handleModels must therefore build virtual
+// rows before endpoint rows and dedup on the virtual's name winning; building
+// them in the other order would list the endpoint (which a request for that
+// id would never actually reach) while dispatch served the virtual — a
+// client seeing one behavior advertised and getting another.
 func TestRouterCatalog_VirtualNameCollidesWithEndpointID_CatalogMatchesDispatch(t *testing.T) {
 	endpointBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1503,12 +1502,12 @@ func TestRouterCatalog_VirtualNameCollidesWithEndpointID_CatalogMatchesDispatch(
 	}
 }
 
-// Code review item 7 (LOW): a managed instance with a malformed BaseURL used
-// to panic inside the handler (newUpstreamProxy's Director dereferences a
-// nil target.Scheme after a dropped url.Parse error). Seeding an instance
-// with a negative port reproduces this hermetically: endpointForPort's
-// "http://127.0.0.1:%d/v1" formats a negative port into an unparseable
-// ":-1" port suffix.
+// A managed instance with a malformed BaseURL must fail the request, not
+// panic the handler: newUpstreamProxy's Director dereferences target.Scheme
+// unconditionally, so a dropped url.Parse error must never reach it with a
+// nil target. Seeding an instance with a negative port reproduces a bad URL
+// hermetically: endpointForPort's "http://127.0.0.1:%d/v1" formats a
+// negative port into an unparseable ":-1" port suffix.
 func TestRouter_Proxy_ManagedAlias_BadEndpointURL_Returns502NotPanic(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "bad-url"}},
@@ -1569,14 +1568,14 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 	}
 }
 
-// Code review item 4 (MEDIUM): StartRelayRouter's trailing *RouterConfig
-// parameter must be fully applied before it returns — main no longer makes a
-// separate post-construction setter call, which used to race the router's
-// first accepted connection under real traffic (unsynchronized read/write on
-// reasoningEffortMap, flagged by -race). Reading the field directly here
-// (rather than over HTTP) proves the ordering structurally: the write
-// happens inside StartRelayRouter itself, before the "go func(){...}()"
-// statement that starts serving.
+// StartRelayRouter's trailing *RouterConfig parameter must be fully applied
+// before it returns, not via a separate post-construction setter call —
+// applying it after the listener is already serving would race the first
+// accepted connection under real traffic (unsynchronized read/write on
+// reasoningEffortMap, the kind of thing -race flags). Reading the field
+// directly here (rather than over HTTP) proves the ordering structurally:
+// the write happens inside StartRelayRouter itself, before the
+// "go func(){...}()" statement that starts serving.
 func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &ServerConfig{
 		Models: []ServerModelConfig{{Alias: "a"}},

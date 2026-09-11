@@ -137,13 +137,24 @@ type SessionManager struct {
 // SetProviderFactory installs a function that constructs the Provider for a
 // new session. When set, it short-circuits the built-in switch on
 // session.ProviderType. Test-only.
+//
+// This, SetMCPClientFactory, PermissionManager.SetClock, and the MCPClient
+// interface are the hermetic tier's only test seams — no DI framework, no
+// exec.Command factory (the live tier exercises real spawn instead), no
+// PTYSpawner abstraction (terminal tests spawn a real shell — fast enough),
+// no broader http.Client injection than already existed. Add a new one only
+// when all three hold: a planned default-tier test needs to control this
+// piece, the seam is a small interface or setter rather than a DI rewrite,
+// and production's shape doesn't get worse — invisible unless invoked. If
+// you can't meet all three, the test belongs in the live or llm tier.
 func (m *SessionManager) SetProviderFactory(f func(*Session, EventHandler) (Provider, error)) {
 	m.providerFactory = f
 }
 
 // SetMCPClientFactory installs a function that produces the MCPClient for
 // each chat-based session. When set, BaseChatProvider's settings-driven MCP
-// is replaced after construction. Test-only.
+// is replaced after construction. Test-only — see SetProviderFactory's
+// comment for the seam-design rule this and every other setter here follows.
 func (m *SessionManager) SetMCPClientFactory(f func(*Session) MCPClient) {
 	m.mcpClientFactory = f
 }

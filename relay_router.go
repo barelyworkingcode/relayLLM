@@ -146,9 +146,8 @@ type RouterConfig struct {
 
 	// Anthropic enables Anthropic Messages API compatibility (/v1/messages,
 	// /v1/messages/count_tokens, and an /api/ passthrough) on this same
-	// listener — see relay_router_anthropic.go and
-	// docs/decisions/013-anthropic-messages-compat.md. Absent (nil, the
-	// default) means those routes 404; behavior is otherwise unchanged.
+	// listener — see relay_router_anthropic.go. Absent (nil, the default)
+	// means those routes 404; behavior is otherwise unchanged.
 	Anthropic *AnthropicRouterConfig `json:"anthropic,omitempty"`
 }
 
@@ -400,7 +399,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("virtual model %q: no usable target configured", envelope.Model))
 				return
 			}
-			// A pinned target (see ADR-010) outranks reachability ordering —
+			// A pinned target (see virtualAffinityStore) outranks reachability ordering —
 			// it goes to the front even if candidatesForVirtual currently
 			// believes something else is more reachable. A pin naming a
 			// target dropped from candidates (removed from config) is a

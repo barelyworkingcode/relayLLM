@@ -1,10 +1,10 @@
 package main
 
 // Shared in-memory certificate generation for the TLS-pinning suite
-// (endpoint_tls_test.go, relay_router_tls_test.go). No openssl dependency —
-// everything is crypto/x509 + crypto/ecdsa, so the suite stays hermetic
-// (see docs/decisions/002-three-tier-testing.md: default tier, no external
-// deps).
+// (relay_router_endpoint_tls_test.go, relay_router_tls_test.go). No openssl
+// dependency — everything is crypto/x509 + crypto/ecdsa, so the suite stays
+// hermetic (the default tier has no external deps, per CLAUDE.md's Testing
+// section).
 
 import (
 	"crypto/ecdsa"
