@@ -252,6 +252,14 @@ func (p *RelayRouter) handleAnthropicRedirect(w http.ResponseWriter, r *http.Req
 		return
 	}
 	innerReq.Header.Set("Content-Type", "application/json")
+	// Tag the re-entrant request so status_metrics.go's ProxyMetrics.begin can
+	// mark its ProxyConn viaAnthropic: true — the dashboard's bytesOut for
+	// this connection is the backend's OpenAI-format byte count, not what the
+	// client actually received (tw translates it), and that needs to be
+	// labeled rather than papered over. A context value is used rather than a
+	// header because a header set on innerReq would be forwarded to the
+	// upstream by newUpstreamProxy's Director.
+	innerReq = innerReq.WithContext(context.WithValue(innerReq.Context(), proxyViaAnthropicKey{}, true))
 
 	// defer, not a bare follow-up call: a client disconnecting mid-stream
 	// makes httputil.ReverseProxy's body copy fail, and the stdlib's
