@@ -353,6 +353,52 @@ func waitForWaiters(t *testing.T, clk *FakeClock, n int) {
 	t.Fatalf("timed out waiting for %d clock waiter(s); have %d", n, clk.Waiters())
 }
 
+// TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch pins the fix for a
+// waiter that times out while a different goroutine's launch is still in
+// flight: the instance must stay in the map so awaitReady's eventual success
+// is still visible to the reaper/StopAll/budget accounting, instead of
+// leaving a live process nothing can ever see or stop again.
+func TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch(t *testing.T) {
+	m, clk := newBudgetManager(t, &ServerConfig{AdmissionTimeoutSeconds: 1}, map[string]float64{"a": 10})
+
+	// Simulate another goroutine's launch already in progress: present in the
+	// map, neither healthy nor exited yet, ready never closes during this test.
+	inst := &serverInstance{
+		config: ServerModelConfig{Alias: "a"},
+		port:   9000,
+		ready:  make(chan struct{}),
+		memory: m.memory["a"],
+	}
+	m.mu.Lock()
+	m.instances["a"] = inst
+	m.mu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := m.Acquire("a")
+		errCh <- err
+	}()
+
+	waitForWaiters(t, clk, 1)
+	clk.Advance(2 * time.Second)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected Acquire to time out waiting for the in-progress launch")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire never returned after the deadline")
+	}
+
+	m.mu.Lock()
+	got, ok := m.instances["a"]
+	m.mu.Unlock()
+	if !ok || got != inst {
+		t.Fatal("waiter's own timeout incorrectly dropped the in-progress launch from the instance map")
+	}
+}
+
 func TestBuildServerArgs_OmitsBudgetOnlyKeys(t *testing.T) {
 	args := buildServerArgs(llamaProfile, map[string]any{
 		"memoryGB": 26.0,
