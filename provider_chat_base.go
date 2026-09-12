@@ -207,9 +207,9 @@ type BaseChatProvider struct {
 	mu         sync.Mutex
 	started    atomic.Bool
 	cancelFn   context.CancelFunc
-	activeBody io.Closer          // resp.Body of the in-flight stream; closed on stop
-	generation atomic.Uint64      // incremented on send/stop to discard stale goroutine events
-	lastFiles  []FileAttachment   // files from the most recent user message, available to built-in tools
+	activeBody io.Closer        // resp.Body of the in-flight stream; closed on stop
+	generation atomic.Uint64    // incremented on send/stop to discard stale goroutine events
+	lastFiles  []FileAttachment // files from the most recent user message, available to built-in tools
 }
 
 // NewBaseChatProvider constructs a provider around a transport. The mcpManager
@@ -595,7 +595,6 @@ func (p *BaseChatProvider) DeleteSession() error           { return nil }
 func (p *BaseChatProvider) Alive() bool                    { return p.started.Load() }
 func (p *BaseChatProvider) GetState() json.RawMessage      { return json.RawMessage(`{}`) }
 func (p *BaseChatProvider) RestoreState(_ json.RawMessage) {}
-
 
 func timeNow() string {
 	return time.Now().UTC().Format(time.RFC3339)

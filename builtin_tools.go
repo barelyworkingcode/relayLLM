@@ -23,10 +23,10 @@ type BuiltinToolHandler func(ctx context.Context, args json.RawMessage,
 // BuiltinToolDef is the static definition of a built-in tool, used both for
 // ChatToolDefs() export and for the handler registry.
 type BuiltinToolDef struct {
-	Name        string
-	Description string
-	Parameters  json.RawMessage // JSON Schema
-	parsedParams any            // cached parse of Parameters, set at registration
+	Name         string
+	Description  string
+	Parameters   json.RawMessage // JSON Schema
+	parsedParams any             // cached parse of Parameters, set at registration
 }
 
 // BuiltinToolRegistry holds built-in tools that run alongside MCP tools in

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +15,10 @@ import (
 
 // newBudgetManager builds a manager with the given caps and aliases. Every
 // alias gets an explicit memoryGB so estimation never touches the filesystem.
-func newBudgetManager(t *testing.T, cfg *ServerConfig, sizes map[string]float64) (*ServerManager, *FakeClock) {
+func newBudgetManager(t *testing.T, cfg *config.ServerConfig, sizes map[string]float64) (*ServerManager, *FakeClock) {
 	t.Helper()
 	for alias, gb := range sizes {
-		cfg.Models = append(cfg.Models, ServerModelConfig{
+		cfg.Models = append(cfg.Models, config.ServerModelConfig{
 			Alias: alias,
 			Args:  map[string]any{"memoryGB": gb, "model": "/nonexistent/" + alias + ".gguf"},
 		})
@@ -36,7 +37,7 @@ func newBudgetManager(t *testing.T, cfg *ServerConfig, sizes map[string]float64)
 // StopInstance treats it as already-dead and simply unregisters it.
 func addInstance(m *ServerManager, alias string, leases int, lastUsed time.Time) *serverInstance {
 	inst := &serverInstance{
-		config:    ServerModelConfig{Alias: alias},
+		config:    config.ServerModelConfig{Alias: alias},
 		port:      9000,
 		ready:     make(chan struct{}),
 		startTime: lastUsed,
@@ -62,7 +63,7 @@ func loadedAliases(m *ServerManager) []string {
 }
 
 func TestAcquire_ReusesHealthyInstanceAndTracksLeases(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{}, map[string]float64{"a": 10})
 	inst := addInstance(m, "a", 0, clk.Now())
 
 	endpoint, release, err := m.Acquire(context.Background(), "a")
@@ -94,7 +95,7 @@ func TestAcquire_ReusesHealthyInstanceAndTracksLeases(t *testing.T) {
 }
 
 func TestAcquire_RejectsModelLargerThanEntireBudget(t *testing.T) {
-	m, _ := newBudgetManager(t, &ServerConfig{MaxMemoryGB: 20}, map[string]float64{"huge": 41})
+	m, _ := newBudgetManager(t, &config.ServerConfig{MaxMemoryGB: 20}, map[string]float64{"huge": 41})
 
 	_, _, err := m.Acquire(context.Background(), "huge")
 	if err == nil {
@@ -108,7 +109,7 @@ func TestAcquire_RejectsModelLargerThanEntireBudget(t *testing.T) {
 }
 
 func TestAcquire_UnknownAlias(t *testing.T) {
-	m, _ := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10})
+	m, _ := newBudgetManager(t, &config.ServerConfig{}, map[string]float64{"a": 10})
 	if _, _, err := m.Acquire(context.Background(), "nope"); err == nil {
 		t.Fatal("Acquire of an unconfigured alias should fail")
 	}
@@ -117,7 +118,7 @@ func TestAcquire_UnknownAlias(t *testing.T) {
 func TestFitsLocked_CountAndMemoryCaps(t *testing.T) {
 	tests := []struct {
 		name      string
-		cfg       ServerConfig
+		cfg       config.ServerConfig
 		loaded    map[string]float64 // alias → size already resident
 		want      bool
 		wantAlias string
@@ -125,29 +126,29 @@ func TestFitsLocked_CountAndMemoryCaps(t *testing.T) {
 	}{
 		{
 			name: "under both caps",
-			cfg:  ServerConfig{MaxLoaded: 3, MaxMemoryGB: 100},
+			cfg:  config.ServerConfig{MaxLoaded: 3, MaxMemoryGB: 100},
 			// 26GB resident, adding 15GB stays under 100GB and 3 instances.
 			loaded: map[string]float64{"big": 26}, need: 15, want: true,
 		},
 		{
 			name:   "instance cap reached",
-			cfg:    ServerConfig{MaxLoaded: 1},
+			cfg:    config.ServerConfig{MaxLoaded: 1},
 			loaded: map[string]float64{"big": 26}, need: 1, want: false,
 		},
 		{
 			name: "memory cap reached",
-			cfg:  ServerConfig{MaxMemoryGB: 32},
+			cfg:  config.ServerConfig{MaxMemoryGB: 32},
 			// 26 + 15 = 41GB, over the 32GB cap even though the count is fine.
 			loaded: map[string]float64{"big": 26}, need: 15, want: false,
 		},
 		{
 			name:   "no caps configured means unlimited",
-			cfg:    ServerConfig{},
+			cfg:    config.ServerConfig{},
 			loaded: map[string]float64{"a": 26, "b": 41, "c": 15}, need: 99, want: true,
 		},
 		{
 			name: "unknown size is not blocked by the memory cap",
-			cfg:  ServerConfig{MaxMemoryGB: 32},
+			cfg:  config.ServerConfig{MaxMemoryGB: 32},
 			// need == 0 means "could not estimate"; the count cap still applies
 			// but the byte cap cannot meaningfully judge it.
 			loaded: map[string]float64{"big": 26}, need: 0, want: true,
@@ -178,7 +179,7 @@ func TestFitsLocked_CountAndMemoryCaps(t *testing.T) {
 }
 
 func TestLRUVictim_PrefersOldestAndSkipsLeased(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{}, map[string]float64{"old": 10, "new": 10, "busy": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{}, map[string]float64{"old": 10, "new": 10, "busy": 10})
 
 	// "busy" is both the oldest and leased — it must never be chosen, because
 	// evicting it would kill an in-flight generation.
@@ -201,7 +202,7 @@ func TestLRUVictim_PrefersOldestAndSkipsLeased(t *testing.T) {
 }
 
 func TestLRUVictim_NoneWhenAllLeased(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10, "b": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{}, map[string]float64{"a": 10, "b": 10})
 	addInstance(m, "a", 1, clk.Now())
 	addInstance(m, "b", 2, clk.Now())
 
@@ -215,7 +216,7 @@ func TestLRUVictim_NoneWhenAllLeased(t *testing.T) {
 }
 
 func TestReapIdle_StopsOnlyInstancesPastTheTimeout(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{IdleTimeoutMinutes: 30},
+	m, clk := newBudgetManager(t, &config.ServerConfig{IdleTimeoutMinutes: 30},
 		map[string]float64{"stale": 10, "busy": 10, "recent": 10})
 
 	addInstance(m, "stale", 0, clk.Now())
@@ -237,7 +238,7 @@ func TestReapIdle_StopsOnlyInstancesPastTheTimeout(t *testing.T) {
 }
 
 func TestReapIdle_NoOpWithoutTimeout(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{}, map[string]float64{"a": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{}, map[string]float64{"a": 10})
 	addInstance(m, "a", 0, clk.Now())
 	clk.Advance(30 * 24 * time.Hour)
 
@@ -249,7 +250,7 @@ func TestReapIdle_NoOpWithoutTimeout(t *testing.T) {
 }
 
 func TestAcquire_EvictsIdleLRUToMakeRoom(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1},
+	m, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1},
 		map[string]float64{"resident": 10, "wanted": 10})
 	addInstance(m, "resident", 0, clk.Now())
 
@@ -267,7 +268,7 @@ func TestAcquire_EvictsIdleLRUToMakeRoom(t *testing.T) {
 }
 
 func TestAcquire_TimesOutWhenEverythingIsBusy(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
+	m, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
 		map[string]float64{"busy": 10, "wanted": 10})
 	addInstance(m, "busy", 1, clk.Now()) // mid-generation
 
@@ -306,7 +307,7 @@ func TestAcquire_TimesOutWhenEverythingIsBusy(t *testing.T) {
 }
 
 func TestAcquire_ProceedsWhenBusyInstanceGoesIdle(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1},
+	m, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1},
 		map[string]float64{"busy": 10, "wanted": 10})
 	inst := addInstance(m, "busy", 0, clk.Now())
 
@@ -360,12 +361,12 @@ func waitForWaiters(t *testing.T, clk *FakeClock, n int) {
 // is still visible to the reaper/StopAll/budget accounting, instead of
 // leaving a live process nothing can ever see or stop again.
 func TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{AdmissionTimeoutSeconds: 1}, map[string]float64{"a": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{AdmissionTimeoutSeconds: 1}, map[string]float64{"a": 10})
 
 	// Simulate another goroutine's launch already in progress: present in the
 	// map, neither healthy nor exited yet, ready never closes during this test.
 	inst := &serverInstance{
-		config: ServerModelConfig{Alias: "a"},
+		config: config.ServerModelConfig{Alias: "a"},
 		port:   9000,
 		ready:  make(chan struct{}),
 		memory: m.memory["a"],
@@ -406,10 +407,10 @@ func TestAcquire_WaiterTimeoutDoesNotOrphanInProgressLaunch(t *testing.T) {
 // firing) admission deadline. The instance must survive untouched, same as
 // the plain-timeout case above.
 func TestAcquire_CtxCancelAbortsWaitForInProgressLaunch(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{AdmissionTimeoutSeconds: 120}, map[string]float64{"a": 10})
+	m, clk := newBudgetManager(t, &config.ServerConfig{AdmissionTimeoutSeconds: 120}, map[string]float64{"a": 10})
 
 	inst := &serverInstance{
-		config: ServerModelConfig{Alias: "a"},
+		config: config.ServerModelConfig{Alias: "a"},
 		port:   9000,
 		ready:  make(chan struct{}),
 		memory: m.memory["a"],
@@ -449,7 +450,7 @@ func TestAcquire_CtxCancelAbortsWaitForInProgressLaunch(t *testing.T) {
 // wait inside Acquire's admission loop: waiting for a busy instance to go
 // idle so its slot can be reused.
 func TestAcquire_CtxCancelAbortsBudgetFullWait(t *testing.T) {
-	m, clk := newBudgetManager(t, &ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
+	m, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
 		map[string]float64{"busy": 10, "wanted": 10})
 	addInstance(m, "busy", 1, clk.Now()) // leased: not evictable, forces the wait branch
 

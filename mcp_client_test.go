@@ -280,10 +280,10 @@ func TestProgressTokenString(t *testing.T) {
 		in   any
 		want string
 	}{
-		{"abc123", "abc123"},   // string passthrough
-		{float64(5), "5"},      // JSON numbers decode to float64
-		{42, "42"},             // int via %v
-		{nil, "<nil>"},         // defensive
+		{"abc123", "abc123"}, // string passthrough
+		{float64(5), "5"},    // JSON numbers decode to float64
+		{42, "42"},           // int via %v
+		{nil, "<nil>"},       // defensive
 	}
 	for _, c := range cases {
 		if got := progressTokenString(c.in); got != c.want {

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"testing"
 )
 
@@ -298,7 +299,7 @@ func TestGGUFKVCacheBytes_MissingGeometryErrors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEstimateModelMemory_ExplicitOverrideWins(t *testing.T) {
-	cfg := ServerModelConfig{
+	cfg := config.ServerModelConfig{
 		Alias: "override",
 		Args:  map[string]any{"memoryGB": 26.0, "model": "/does/not/exist.gguf"},
 	}
@@ -310,7 +311,7 @@ func TestEstimateModelMemory_ExplicitOverrideWins(t *testing.T) {
 }
 
 func TestEstimateModelMemory_UnreadableModelIsUnknown(t *testing.T) {
-	cfg := ServerModelConfig{
+	cfg := config.ServerModelConfig{
 		Alias: "missing",
 		Args:  map[string]any{"model": "/does/not/exist.gguf"},
 	}
@@ -335,7 +336,7 @@ func TestEstimateModelMemory_AppliesHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := ServerModelConfig{
+	cfg := config.ServerModelConfig{
 		Alias: "tiny",
 		Args:  map[string]any{"model": path, "ctx-size": 128.0},
 	}

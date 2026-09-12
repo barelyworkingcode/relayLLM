@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -253,7 +254,7 @@ func TestOpenAIConfigLoad_File(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadOpenAIConfig(path)
+	cfg, err := config.LoadOpenAIConfig(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -286,7 +287,7 @@ func TestOpenAIConfigLoad_EnvFallback(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "env-key")
 	t.Setenv("OPENAI_ENDPOINT_NAME", "env-endpoint")
 
-	cfg, err := LoadOpenAIConfig(path)
+	cfg, err := config.LoadOpenAIConfig(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestOpenAIConfigLoad_EmptyWhenNothingConfigured(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_API_KEY", "")
 
-	cfg, err := LoadOpenAIConfig(path)
+	cfg, err := config.LoadOpenAIConfig(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -318,8 +319,8 @@ func TestOpenAIConfigLoad_EmptyWhenNothingConfigured(t *testing.T) {
 // --- Provider-type derivation ---
 
 func TestDeriveProviderType_OpenAIPrefix(t *testing.T) {
-	cfg := &OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{
+	cfg := &config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
 			{Name: "lmstudio", BaseURL: "http://x/v1"},
 			{Name: "omlx", BaseURL: "http://y/v1"},
 		},
@@ -347,13 +348,13 @@ func TestDeriveProviderType_OpenAIPrefix(t *testing.T) {
 }
 
 func TestDeriveProviderType_MlxAlias(t *testing.T) {
-	cfg := &OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{
+	cfg := &config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
 			{Name: "lmstudio", BaseURL: "http://x/v1"},
 		},
 	}
-	mlxCfg := &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "foo"}},
+	mlxCfg := &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "foo"}},
 	}
 	cases := []struct {
 		model string
@@ -403,7 +404,7 @@ data: [DONE]
 	}))
 	t.Cleanup(srv.Close)
 
-	endpoint := OpenAIEndpoint{Name: "test", BaseURL: srv.URL, APIKey: "sk-test"}
+	endpoint := config.OpenAIEndpoint{Name: "test", BaseURL: srv.URL, APIKey: "sk-test"}
 	transport := NewOpenAIChatTransport(endpoint, "test-model", nil, srv.Client())
 
 	if err := transport.Ping(context.Background()); err != nil {
@@ -464,7 +465,7 @@ data: [DONE]
 	}))
 	t.Cleanup(srv.Close)
 
-	endpoint := OpenAIEndpoint{Name: "test", BaseURL: srv.URL}
+	endpoint := config.OpenAIEndpoint{Name: "test", BaseURL: srv.URL}
 	transport := NewOpenAIChatTransport(endpoint, "test-model", nil, srv.Client())
 
 	msgs := transport.BuildMessages("", []Message{

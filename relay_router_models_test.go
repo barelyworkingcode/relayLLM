@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"testing"
 	"time"
 )
@@ -76,12 +77,12 @@ func assertLlamaClientAccepts(t *testing.T, rows []catalogRow) {
 
 func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *FakeClock) {
 	t.Helper()
-	cfg := &ServerConfig{}
+	cfg := &config.ServerConfig{}
 	mgr, clk := newBudgetManager(t, cfg, nil)
 	// Two models: one plain, one multimodal with a pinned context.
 	cfg.Models = append(cfg.Models,
-		ServerModelConfig{Alias: "plain", Args: map[string]any{"memoryGB": 4.0, "ctx-size": 32768.0}},
-		ServerModelConfig{Alias: "vision", Args: map[string]any{"memoryGB": 4.0, "mmproj": "/p.gguf"}},
+		config.ServerModelConfig{Alias: "plain", Args: map[string]any{"memoryGB": 4.0, "ctx-size": 32768.0}},
+		config.ServerModelConfig{Alias: "vision", Args: map[string]any{"memoryGB": 4.0, "mmproj": "/p.gguf"}},
 	)
 	mgr.memory["plain"] = 4 * bytesPerGB
 	mgr.memory["vision"] = 4 * bytesPerGB
@@ -328,11 +329,11 @@ func TestRouterModelLoad_RejectsUnmanagedModel(t *testing.T) {
 }
 
 func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &config.ServerConfig{}
 	mgr, _ := newBudgetManager(t, cfg, nil)
 	cfg.Models = append(cfg.Models,
-		ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
-		ServerModelConfig{Alias: "unpinned", Args: map[string]any{}},
+		config.ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		config.ServerModelConfig{Alias: "unpinned", Args: map[string]any{}},
 	)
 	// Native context as read from model metadata at construction.
 	mgr.trainedContext["pinned"] = 131072
@@ -389,8 +390,8 @@ func TestUpstreamModelRow_ContextLengthFieldNames(t *testing.T) {
 // omits it, taking the whole catalog down with it.
 func TestRouterCatalog_EndpointRowsCarryArchitecture(t *testing.T) {
 	upstream := newFakeOpenAIUpstream(t, []string{"gpt-test"})
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
 			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "test-key"},
 		},
 	})
@@ -430,8 +431,8 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 	router := NewRelayRouter(":0", nil, registry, nil)
 
@@ -458,12 +459,12 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 // hardcoded default when the field is absent. These tests pin that flat field
 // across all three row shapes, additively alongside meta.n_ctx/n_ctx_train.
 func TestRouterCatalog_ManagedContextLengthTopLevel(t *testing.T) {
-	cfg := &ServerConfig{}
+	cfg := &config.ServerConfig{}
 	mgr, _ := newBudgetManager(t, cfg, nil)
 	cfg.Models = append(cfg.Models,
-		ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
-		ServerModelConfig{Alias: "trained-only", Args: map[string]any{}},
-		ServerModelConfig{Alias: "unknown", Args: map[string]any{}},
+		config.ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		config.ServerModelConfig{Alias: "trained-only", Args: map[string]any{}},
+		config.ServerModelConfig{Alias: "unknown", Args: map[string]any{}},
 	)
 	mgr.trainedContext["pinned"] = 131072
 	mgr.trainedContext["trained-only"] = 262144
@@ -513,8 +514,8 @@ func TestRouterCatalog_EndpointContextLengthTopLevel(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 	router := NewRelayRouter(":0", nil, registry, nil)
 
@@ -539,13 +540,13 @@ func TestRouterCatalog_EndpointContextLengthTopLevel(t *testing.T) {
 // would actually try first — same source virtualRowMetadata already uses for
 // meta and modalities.
 func TestRouterCatalog_VirtualModel_ContextLengthTopLevel(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
 			"mmproj": "/p.gguf", "ctx-size": 32768.0,
 		}}},
 	}, "")
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &VirtualLLMConfig{Models: []VirtualLLM{{
-		Name: "vVision", Targets: []VirtualLLMTarget{{Alias: "vision-alias"}},
+	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+		Name: "vVision", Targets: []config.VirtualLLMTarget{{Alias: "vision-alias"}},
 	}}})
 
 	var row catalogRow

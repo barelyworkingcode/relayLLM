@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"relayllm/internal/config"
 )
 
 // Manifest is the wire shape relayLLM declares to relay. Must stay
@@ -148,7 +150,7 @@ func buildManifest(dataDir string) Manifest {
 // map. Help text replaces the JSONC comments the file used to carry (they
 // don't survive a form save).
 func settingsSchema() []FieldDecl {
-	regen := []string{AutoRegenAlways, "skipIfExists", AutoRegenNever}
+	regen := []string{config.AutoRegenAlways, "skipIfExists", config.AutoRegenNever}
 	return []FieldDecl{
 		{
 			ID: "openai", Label: "OpenAI-compatible endpoints", Type: "object",
@@ -247,7 +249,7 @@ func settingsSchema() []FieldDecl {
 				{ID: "projectOverlay", Label: "Project overlay", Type: "object", Fields: []FieldDecl{
 					{ID: "mode", Label: "Mode", Type: "select", Options: regen},
 					{ID: "dirName", Label: "Dir name", Type: "text", Placeholder: ".pi"},
-					{ID: "authStrategy", Label: "Auth strategy", Type: "select", Options: []string{PiAuthStrategySymlink, PiAuthStrategyNone}},
+					{ID: "authStrategy", Label: "Auth strategy", Type: "select", Options: []string{config.PiAuthStrategySymlink, config.PiAuthStrategyNone}},
 					{ID: "defaultProvider", Label: "Default provider", Type: "text"},
 					{ID: "defaultModel", Label: "Default model", Type: "text"},
 					{ID: "defaultThinking", Label: "Default thinking", Type: "select", Options: []string{"off", "minimal", "low", "medium", "high", "xhigh"}},

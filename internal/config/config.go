@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -9,6 +9,16 @@ import (
 	"strings"
 
 	"github.com/tidwall/jsonc"
+)
+
+// AutoRegen* are the "always | skipIfExists | never" mode values used by
+// PiProjectOverlay.Mode. relayLLM does not regenerate skills — relay owns
+// skill generation (relay ADR-004), and the ResolvePtyEnv bridge call no
+// longer carries a regen field. Empty == never.
+const (
+	AutoRegenAlways       = "always"
+	AutoRegenSkipIfExists = "skipIfExists"
+	AutoRegenNever        = "never"
 )
 
 // LoadedConfig bundles every section LoadConfig can produce. The config
@@ -208,7 +218,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		if err := json.Unmarshal(*raw.LlamaServer, llamaCfg); err != nil {
 			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
 		}
-		if err := parseServerRawModels(llamaCfg, source); err != nil {
+		if err := ParseServerRawModels(llamaCfg, source); err != nil {
 			return nil, err
 		}
 	}
@@ -218,7 +228,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		if err := json.Unmarshal(*raw.MlxServer, mlxCfg); err != nil {
 			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
 		}
-		if err := parseServerRawModels(mlxCfg, source); err != nil {
+		if err := ParseServerRawModels(mlxCfg, source); err != nil {
 			return nil, err
 		}
 	}
@@ -226,7 +236,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	piCfg := &PiConfig{}
 	if raw.Pi != nil {
 		piCfg = raw.Pi
-		piCfg.BinaryPath = expandHome(piCfg.BinaryPath)
+		piCfg.BinaryPath = ExpandHome(piCfg.BinaryPath)
 	}
 
 	return &LoadedConfig{
@@ -245,7 +255,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 // first so users can hand-edit with comment toggles. The raw os.ReadFile error
 // is returned unwrapped (callers use os.IsNotExist); parse errors are wrapped
 // with the source path since json errors don't include it.
-func readJSONCFile(path string, out any) error {
+func ReadJSONCFile(path string, out any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -260,7 +270,7 @@ func readJSONCFile(path string, out any) error {
 // Does not fall back to env vars.
 func loadOpenAIConfigFile(path string, allowPlaintext bool) (*OpenAIConfig, error) {
 	var cfg OpenAIConfig
-	if err := readJSONCFile(path, &cfg); err != nil {
+	if err := ReadJSONCFile(path, &cfg); err != nil {
 		return nil, err
 	}
 	if err := normalizeOpenAI(&cfg, allowPlaintext); err != nil {
@@ -272,13 +282,13 @@ func loadOpenAIConfigFile(path string, allowPlaintext bool) (*OpenAIConfig, erro
 // loadLlamaConfigFile reads a standalone llama_models.json file.
 func loadLlamaConfigFile(path string) (*ServerConfig, error) {
 	var cfg ServerConfig
-	if err := readJSONCFile(path, &cfg); err != nil {
+	if err := ReadJSONCFile(path, &cfg); err != nil {
 		if os.IsNotExist(err) {
 			return &ServerConfig{}, nil
 		}
 		return nil, err
 	}
-	if err := parseServerRawModels(&cfg, path); err != nil {
+	if err := ParseServerRawModels(&cfg, path); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -291,7 +301,7 @@ func loadLlamaConfigFile(path string) (*ServerConfig, error) {
 func LoadOpenAIConfig(path string) (*OpenAIConfig, error) {
 	if path != "" {
 		var cfg OpenAIConfig
-		err := readJSONCFile(path, &cfg)
+		err := ReadJSONCFile(path, &cfg)
 		if err == nil {
 			if err := normalizeOpenAI(&cfg, false); err != nil {
 				return nil, err
@@ -341,7 +351,7 @@ func normalizeOpenAI(cfg *OpenAIConfig, allowPlaintext bool) error {
 		if cfg.Endpoints[i].Group == "" {
 			cfg.Endpoints[i].Group = cfg.Endpoints[i].Name
 		}
-		if err := prepareEndpointTransports(&cfg.Endpoints[i], allowPlaintext); err != nil {
+		if err := PrepareEndpointTransports(&cfg.Endpoints[i], allowPlaintext); err != nil {
 			return err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"relayllm/internal/config"
 	"relayllm/internal/netutil"
 )
 
@@ -21,9 +22,9 @@ import (
 // managed-server aliases bare (llama + mlx), OpenAI endpoint models prefixed
 // with the endpoint name.
 type PiOverlayInputs struct {
-	ServerModels []ServerModelConfig // consumed by provider_pi_models.go to synthesize Eve picker entries
-	RouterPort   string              // empty disables the relay-router provider entry
-	RouterHosts  []string            // --router-bind value(s), comma-split; see routerOverlayHost
+	ServerModels []config.ServerModelConfig // consumed by provider_pi_models.go to synthesize Eve picker entries
+	RouterPort   string                     // empty disables the relay-router provider entry
+	RouterHosts  []string                   // --router-bind value(s), comma-split; see routerOverlayHost
 	RouterModels []PiRouterModel
 }
 
@@ -81,7 +82,7 @@ const piRelayRouterProvider = "relay-router"
 // PI_CODING_AGENT_DIR in env. Returned env replaces the caller's. Single
 // hook used by both LLM RPC spawns (provider_pi.go) and PTY spawns
 // (terminal_session.go) so the two surfaces stay in sync.
-func applyPiOverlayEnv(env []string, projectDir string, cfg *PiConfig, inputs PiOverlayInputs) ([]string, error) {
+func applyPiOverlayEnv(env []string, projectDir string, cfg *config.PiConfig, inputs PiOverlayInputs) ([]string, error) {
 	overlayDir, err := MaterializePiOverlay(projectDir, cfg, inputs)
 	if err != nil {
 		return env, err
@@ -96,7 +97,7 @@ func applyPiOverlayEnv(env []string, projectDir string, cfg *PiConfig, inputs Pi
 // reflecting relayLLM's curated provider set and returns the overlay dir path
 // for use as PI_CODING_AGENT_DIR. Returns ("", nil) when overlay is disabled
 // or projectDir is empty.
-func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInputs) (string, error) {
+func MaterializePiOverlay(projectDir string, cfg *config.PiConfig, inputs PiOverlayInputs) (string, error) {
 	if cfg == nil || !cfg.ProjectOverlay.Enabled() {
 		return "", nil
 	}
@@ -115,8 +116,8 @@ func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInpu
 		return "", fmt.Errorf("pi overlay: mkdir %s: %w", overlayDir, err)
 	}
 
-	rewriteAll := overlay.Mode == AutoRegenAlways
-	skipIfExists := overlay.Mode == AutoRegenSkipIfExists
+	rewriteAll := overlay.Mode == config.AutoRegenAlways
+	skipIfExists := overlay.Mode == config.AutoRegenSkipIfExists
 
 	modelsPath := filepath.Join(overlayDir, "models.json")
 	settingsPath := filepath.Join(overlayDir, "settings.json")
@@ -148,7 +149,7 @@ func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInpu
 		required bool // fail closed if global is missing
 		skip     bool
 	}{
-		{"auth.json", true, overlay.AuthStrategy == PiAuthStrategyNone},
+		{"auth.json", true, overlay.AuthStrategy == config.PiAuthStrategyNone},
 		{"bin", false, false},
 	}
 	for _, p := range passthroughs {
@@ -184,7 +185,7 @@ func MaterializePiOverlay(projectDir string, cfg *PiConfig, inputs PiOverlayInpu
 // expects. User-global providers are merged underneath (ours wins on
 // collision) unless ExcludeUserProviders is set; an empty RouterPort means
 // relayLLM contributes nothing and globals carry through unchanged.
-func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalAgent string) map[string]any {
+func buildPiModelsJSON(inputs PiOverlayInputs, overlay config.PiProjectOverlay, globalAgent string) map[string]any {
 	providers := map[string]any{}
 
 	// 1. Start from user's global models.json (so their custom providers
@@ -240,7 +241,7 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay PiProjectOverlay, globalA
 // skill paths. When IncludeUserSettings (the default), the user's global
 // settings.json is read and merged underneath so theme/keybindings/etc carry
 // over.
-func buildPiSettingsJSON(projectDir string, overlay PiProjectOverlay, globalAgent string, inputs PiOverlayInputs) map[string]any {
+func buildPiSettingsJSON(projectDir string, overlay config.PiProjectOverlay, globalAgent string, inputs PiOverlayInputs) map[string]any {
 	settings := map[string]any{}
 
 	if !overlay.ExcludeUserSettings {
@@ -363,7 +364,7 @@ func ensureGitignoreEntry(projectDir, dirName string) error {
 // actually using as their global config, not the literal home path.
 func globalPiAgentDir() string {
 	if env := os.Getenv("PI_CODING_AGENT_DIR"); env != "" {
-		return expandHome(env)
+		return config.ExpandHome(env)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -379,7 +380,7 @@ func readPiModelsJSON(path string) map[string]any {
 	var parsed struct {
 		Providers map[string]any `json:"providers"`
 	}
-	if err := readJSONCFile(path, &parsed); err != nil {
+	if err := config.ReadJSONCFile(path, &parsed); err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("pi overlay: failed to read global models.json", "path", path, "error", err)
 		}
@@ -392,7 +393,7 @@ func readPiModelsJSON(path string) map[string]any {
 // error so callers gracefully skip absent or malformed files.
 func readJSONCMap(path string) map[string]any {
 	out := map[string]any{}
-	if err := readJSONCFile(path, &out); err != nil {
+	if err := config.ReadJSONCFile(path, &out); err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("pi overlay: failed to read JSONC file", "path", path, "error", err)
 		}

@@ -1,4 +1,4 @@
-package main
+package config
 
 // No InsecureSkipVerify knob exists anywhere in this file, and none may be
 // added: a pinned or CA-anchored hop that can be silently downgraded to
@@ -177,7 +177,7 @@ func newEndpointTransport(ep OpenAIEndpoint, base *http.Transport) (*http.Transp
 // transport per request. Called once per endpoint by normalizeOpenAI, at
 // config load — a bad endpoint fails relayLLM startup rather than the first
 // chat request against it.
-func prepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
+func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err := validateEndpointTransport(*ep, allowPlaintext); err != nil {
 		return err
 	}
@@ -185,7 +185,7 @@ func prepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err != nil {
 		return err
 	}
-	vt, err := newEndpointTransport(*ep, virtualDialTransport.(*http.Transport))
+	vt, err := newEndpointTransport(*ep, VirtualDialTransport.(*http.Transport))
 	if err != nil {
 		return err
 	}

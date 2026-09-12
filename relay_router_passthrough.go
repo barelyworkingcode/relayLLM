@@ -35,16 +35,9 @@ import (
 	"slices"
 	"strings"
 
+	"relayllm/internal/config"
 	"relayllm/internal/netutil"
 )
-
-// PassthroughConfig is one entry of settings.json's router.passthrough map.
-// The map key is the path segment the route mounts at.
-type PassthroughConfig struct {
-	// Upstream is the base URL /<name>/<rest> forwards to as
-	// <Upstream>/<rest>, e.g. "https://chatgpt.com/backend-api".
-	Upstream string `json:"upstream"`
-}
 
 // passthroughReservedNames are first path segments the router's own mux
 // already routes. A passthrough mounted there would be shadowed, and a
@@ -57,7 +50,7 @@ var passthroughNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 // pre-serve constraint as setReasoningEffortMap: StartRelayRouter calls it
 // before Serve. An invalid entry is logged and skipped rather than failing
 // startup, the same fail-safe convention setAnthropic follows.
-func (p *RelayRouter) setPassthrough(cfg map[string]PassthroughConfig) {
+func (p *RelayRouter) setPassthrough(cfg map[string]config.PassthroughConfig) {
 	for _, name := range slices.Sorted(maps.Keys(cfg)) {
 		proxy, upstream, err := newPassthroughProxy(name, cfg[name])
 		if err != nil {
@@ -82,7 +75,7 @@ func (p *RelayRouter) setPassthrough(cfg map[string]PassthroughConfig) {
 // Director) keeps X-Forwarded-* off the outbound request, so the hop stays
 // invisible. ReverseProxy carries WebSocket upgrades on its own; see
 // meteredResponseWriter.Hijack for how they are counted.
-func newPassthroughProxy(name string, cfg PassthroughConfig) (*httputil.ReverseProxy, *url.URL, error) {
+func newPassthroughProxy(name string, cfg config.PassthroughConfig) (*httputil.ReverseProxy, *url.URL, error) {
 	if !passthroughNamePattern.MatchString(name) {
 		return nil, nil, fmt.Errorf("name must be one path segment of letters, digits, '-' or '_'")
 	}

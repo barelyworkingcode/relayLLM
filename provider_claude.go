@@ -37,10 +37,10 @@ type ClaudeProvider struct {
 	handler EventHandler
 	emitter *EventEmitter
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	mu     sync.Mutex // serializes writes to stdin
-	alive  atomic.Bool
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	mu    sync.Mutex // serializes writes to stdin
+	alive atomic.Bool
 
 	claudeSessionID string
 	model           string
@@ -835,15 +835,15 @@ type controlResponseResult struct {
 }
 
 type controlResponseBody struct {
-	RequestID json.RawMessage         `json:"request_id"`
-	Subtype   string                  `json:"subtype"`
-	Response  *controlResponseResult  `json:"response,omitempty"`
-	Error     string                  `json:"error,omitempty"`
+	RequestID json.RawMessage        `json:"request_id"`
+	Subtype   string                 `json:"subtype"`
+	Response  *controlResponseResult `json:"response,omitempty"`
+	Error     string                 `json:"error,omitempty"`
 }
 
 type controlResponseEnvelope struct {
-	Type     string               `json:"type"`
-	Response controlResponseBody  `json:"response"`
+	Type     string              `json:"type"`
+	Response controlResponseBody `json:"response"`
 }
 
 // buildControlResponseAllow builds the exact allow control_response bytes

@@ -535,9 +535,9 @@ func TestClaudeTranslate_FullTurn(t *testing.T) {
 	}
 
 	expected := []struct {
-		eventType    string
-		llmType      string
-		llmSubtype   string
+		eventType  string
+		llmType    string
+		llmSubtype string
 	}{
 		{"llm_event", "system", "init"},
 		{"llm_event", "assistant", ""},

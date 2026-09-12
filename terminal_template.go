@@ -8,34 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"relayllm/internal/config"
 )
-
-// TerminalTemplate defines a launchable terminal type.
-//
-// On disk inside settings.json's `pty` map the entries omit `id` (the map key
-// IS the id) and `builtIn` (computed from protectedTemplateIDs at API time).
-// In-memory copies returned by Get/List have both populated for consumers.
-//
-// Relay-managed fields (UseRelayToken, EnvPassthrough) opt the template into
-// spawn-time resolution via relay's bridge ResolvePtyEnv. Args may reference
-// ${PROJECT_PATH} and ${RELAY_TOKEN}; the skills directory is the convention
-// ${PROJECT_PATH}/.claude/skills (relay generates and manages the SKILL.md
-// files there). See terminal_session.go:Start for the substitution rules.
-type TerminalTemplate struct {
-	ID          string            `json:"id,omitempty"`
-	Name        string            `json:"name"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Icon        string            `json:"icon,omitempty"`
-	BuiltIn     bool              `json:"builtIn,omitempty"`
-	IdleTimeout int               `json:"idleTimeout,omitempty"` // minutes, 0 = default (1440 = 24h)
-
-	// Relay-managed PTY fields. Zero values mean "not relay-managed".
-	UseRelayToken  bool     `json:"useRelayToken,omitempty"`
-	EnvPassthrough []string `json:"env_passthrough,omitempty"`
-}
 
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
 // via the API. Users can still hand-edit settings.json to fully remove them.
@@ -46,13 +21,13 @@ var protectedTemplateIDs = map[string]bool{
 	"shell":       true,
 }
 
-// ResolveCommand returns the absolute path to the command, checking
-// well-known locations before falling back to PATH lookup. Routing is keyed
-// off the command (not template ID) so custom user-created templates that
-// invoke `claude` get the same well-known-locations resolution as the
+// ResolveTemplateCommand returns the absolute path to the template's command,
+// checking well-known locations before falling back to PATH lookup. Routing
+// is keyed off the command (not template ID) so custom user-created templates
+// that invoke `claude` get the same well-known-locations resolution as the
 // built-in claude-code template — important when relay is launched from
 // launchd/Spotlight where ~/.local/bin isn't on PATH.
-func (t TerminalTemplate) ResolveCommand() string {
+func ResolveTemplateCommand(t config.TerminalTemplate) string {
 	if t.ID == "shell" || t.Command == "" {
 		return resolveShell()
 	}
@@ -67,8 +42,8 @@ func (t TerminalTemplate) ResolveCommand() string {
 
 // seedDefaultPTYConfig returns the initial pty map written to settings.json on
 // first run. Lean shape — only the fields users care to see and edit.
-func seedDefaultPTYConfig() map[string]TerminalTemplate {
-	return map[string]TerminalTemplate{
+func seedDefaultPTYConfig() map[string]config.TerminalTemplate {
+	return map[string]config.TerminalTemplate{
 		"claude-code": {
 			Name:           "Claude Code",
 			Command:        "claude",
@@ -77,8 +52,8 @@ func seedDefaultPTYConfig() map[string]TerminalTemplate {
 			UseRelayToken:  true,
 			EnvPassthrough: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"},
 		},
-		"opencode":    {Name: "OpenCode", Command: "opencode", Icon: "terminal", Description: "OpenCode CLI agent"},
-		"shell":       {Name: "Shell", Icon: "shell", Description: "Default system shell"},
+		"opencode": {Name: "OpenCode", Command: "opencode", Icon: "terminal", Description: "OpenCode CLI agent"},
+		"shell":    {Name: "Shell", Icon: "shell", Description: "Default system shell"},
 	}
 }
 
@@ -94,24 +69,24 @@ func resolveShell() string {
 type TemplateStore struct {
 	mu        sync.RWMutex
 	dataDir   string
-	templates map[string]TerminalTemplate // keyed by ID; entries do NOT carry their ID inside
+	templates map[string]config.TerminalTemplate // keyed by ID; entries do NOT carry their ID inside
 }
 
 func NewTemplateStore(dataDir string) *TemplateStore {
 	return &TemplateStore{
 		dataDir:   dataDir,
-		templates: make(map[string]TerminalTemplate),
+		templates: make(map[string]config.TerminalTemplate),
 	}
 }
 
 // Load initializes the store from the pty map loaded out of settings.json.
 // If the map is nil/empty, the store seeds defaults and persists them.
-func (s *TemplateStore) Load(initial map[string]TerminalTemplate) error {
+func (s *TemplateStore) Load(initial map[string]config.TerminalTemplate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if len(initial) > 0 {
-		s.templates = make(map[string]TerminalTemplate, len(initial))
+		s.templates = make(map[string]config.TerminalTemplate, len(initial))
 		for k, v := range initial {
 			s.templates[k] = v
 		}
@@ -133,19 +108,19 @@ func (s *TemplateStore) Load(initial map[string]TerminalTemplate) error {
 // MUST be called with s.mu held — serializes the read-modify-write to
 // settings.json so concurrent Creates/Updates/Deletes can't lose each other.
 func (s *TemplateStore) persist() error {
-	return WriteConfigPTY(s.dataDir, s.templates)
+	return config.WriteConfigPTY(s.dataDir, s.templates)
 }
 
 // hydrate fills in the synthetic ID and BuiltIn fields on a template copy
 // before returning it to API consumers.
-func hydrate(id string, t TerminalTemplate) TerminalTemplate {
+func hydrate(id string, t config.TerminalTemplate) config.TerminalTemplate {
 	t.ID = id
 	t.BuiltIn = protectedTemplateIDs[id]
 	return t
 }
 
 // List returns all templates, sorted by ID for deterministic UI ordering.
-func (s *TemplateStore) List() []TerminalTemplate {
+func (s *TemplateStore) List() []config.TerminalTemplate {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -155,7 +130,7 @@ func (s *TemplateStore) List() []TerminalTemplate {
 	}
 	sort.Strings(ids)
 
-	out := make([]TerminalTemplate, 0, len(ids))
+	out := make([]config.TerminalTemplate, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, hydrate(id, s.templates[id]))
 	}
@@ -163,12 +138,12 @@ func (s *TemplateStore) List() []TerminalTemplate {
 }
 
 // Get looks up a template by ID.
-func (s *TemplateStore) Get(id string) (TerminalTemplate, bool) {
+func (s *TemplateStore) Get(id string) (config.TerminalTemplate, bool) {
 	s.mu.RLock()
 	t, ok := s.templates[id]
 	s.mu.RUnlock()
 	if !ok {
-		return TerminalTemplate{}, false
+		return config.TerminalTemplate{}, false
 	}
 	return hydrate(id, t), true
 }

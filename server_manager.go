@@ -7,10 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	clk "relayllm/internal/clock"
+	"relayllm/internal/config"
 	"relayllm/internal/types"
 	"sort"
 	"strconv"
@@ -21,18 +20,7 @@ import (
 	"time"
 )
 
-// ServerProfile parameterizes ServerManager for a specific managed-server
-// binary. Kind doubles as the model routing prefix ("{kind}/{alias}"), the
-// types.ModelInfo.Provider string, and the log/error prefix.
-type ServerProfile struct {
-	Kind            string   // "llama" | "mlx"
-	DefaultBinary   string   // PATH fallback when config/flag give no path
-	Group           string   // Eve UI model group label
-	FixedArgs       []string // injected after --port/--host, before per-model flags (e.g. --serve)
-	DefaultBasePort int
-}
-
-var llamaProfile = ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
+var llamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
 
 // mlx-serve (ddalcu/mlx-serve, Zig + mlx-c, zero Python) was chosen over two
 // alternatives for the MLX profile: mlx_lm.server (Apple's own) needs a
@@ -42,111 +30,13 @@ var llamaProfile = ServerProfile{Kind: "llama", DefaultBinary: "llama-server", G
 // tarballs as well as a brew tap, sidestepping that. It speaks the same
 // OpenAI-compatible /v1/chat/completions + SSE + GET /health shape as
 // llama-server and takes local MLX model directories, which is what let
-// ServerManager generalize to both binaries via one ServerProfile instead of
+// ServerManager generalize to both binaries via one config.ServerProfile instead of
 // a second ~500-line manager.
-var mlxProfile = ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
-
-// ServerModelConfig describes one managed-server model. Alias is the routing
-// name (users select "{kind}/{alias}"). Args holds every other key from the
-// JSON entry — each maps 1:1 to a CLI flag.
-type ServerModelConfig struct {
-	Alias string
-	Args  map[string]any // key → value, translated to --key [value]
-}
-
-// ServerConfig is the top-level config structure for a managed-server section
-// (llama-server or mlx-serve).
-type ServerConfig struct {
-	BinaryPath string              `json:"binaryPath,omitempty"`
-	ModelDir   string              `json:"modelDir,omitempty"` // prepended to relative model paths
-	BasePort   int                 `json:"basePort,omitempty"`
-	Models     []ServerModelConfig `json:"-"` // custom unmarshal
-	RawModels  []map[string]any    `json:"models"`
-
-	// Resource budget. All optional; zero means "no limit" for the caps and
-	// "no reclaim" for the idle timeout, which is the pre-budget behavior.
-	//
-	// MaxLoaded caps instance count; MaxMemoryGB caps the sum of estimated
-	// resident memory (see server_memory.go). Either can trigger eviction —
-	// the count cap is exact but blunt, the memory cap tracks the fact that
-	// two loaded models can differ by 6x. Models whose size cannot be
-	// estimated count toward MaxLoaded but not MaxMemoryGB.
-	MaxLoaded          int     `json:"maxLoaded,omitempty"`
-	MaxMemoryGB        float64 `json:"maxMemoryGB,omitempty"`
-	IdleTimeoutMinutes int     `json:"idleTimeoutMinutes,omitempty"`
-
-	// MemoryHeadroomPercent pads each model's estimate to cover compute
-	// buffers and allocator slack, which are not modelled directly.
-	// Defaults to defaultMemoryHeadroomPercent.
-	MemoryHeadroomPercent int `json:"memoryHeadroomPercent,omitempty"`
-
-	// AdmissionTimeoutSeconds bounds how long a request waits for a busy
-	// instance to go idle when the budget is full. Defaults to
-	// defaultAdmissionTimeout.
-	AdmissionTimeoutSeconds int `json:"admissionTimeoutSeconds,omitempty"`
-}
-
-// FindByAlias returns the config for the given alias, or nil.
-func (c *ServerConfig) FindByAlias(alias string) *ServerModelConfig {
-	if c == nil {
-		return nil
-	}
-	for i := range c.Models {
-		if c.Models[i].Alias == alias {
-			return &c.Models[i]
-		}
-	}
-	return nil
-}
-
-// parseServerRawModels converts RawModels entries into typed ServerModelConfig
-// values. Each raw entry must have an "alias" key; all other keys become Args.
-// If modelDir is set, relative "model" paths are resolved against it.
-func parseServerRawModels(cfg *ServerConfig, source string) error {
-	modelDir := expandHome(cfg.ModelDir)
-
-	for i, raw := range cfg.RawModels {
-		alias, _ := raw["alias"].(string)
-		if alias == "" {
-			return fmt.Errorf("parse %s: models[%d] missing \"alias\"", source, i)
-		}
-		args := make(map[string]any, len(raw)-1)
-		for k, v := range raw {
-			if k == "alias" {
-				continue
-			}
-			args[k] = v
-		}
-		// Resolve relative file paths against modelDir.
-		if modelDir != "" {
-			for _, k := range []string{"model", "mmproj"} {
-				if v, ok := args[k].(string); ok && !filepath.IsAbs(v) {
-					args[k] = filepath.Join(modelDir, v)
-				}
-			}
-		}
-		cfg.Models = append(cfg.Models, ServerModelConfig{Alias: alias, Args: args})
-	}
-	cfg.RawModels = nil
-	return nil
-}
-
-// expandHome replaces a leading ~ with the user's home directory.
-func expandHome(path string) string {
-	if path == "" {
-		return ""
-	}
-	if strings.HasPrefix(path, "~/") || path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[1:])
-		}
-	}
-	return path
-}
+var mlxProfile = config.ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
 
 // serverInstance tracks a running managed-server process.
 type serverInstance struct {
-	config    ServerModelConfig
+	config    config.ServerModelConfig
 	port      int
 	cmd       *exec.Cmd
 	exited    atomic.Bool
@@ -185,12 +75,12 @@ type ServerInstanceInfo struct {
 }
 
 // ServerManager launches and manages managed-server processes (llama-server,
-// mlx-serve, …). It is parameterized by a ServerProfile that controls the
+// mlx-serve, …). It is parameterized by a config.ServerProfile that controls the
 // binary name, CLI flag conventions, port range, and log prefix.
 type ServerManager struct {
-	profile    ServerProfile
+	profile    config.ServerProfile
 	mu         sync.Mutex
-	config     *ServerConfig
+	config     *config.ServerConfig
 	binaryPath string
 	nextPort   int
 	instances  map[string]*serverInstance // alias → instance
@@ -238,7 +128,7 @@ const idleReapInterval = 30 * time.Second
 // NewServerManager creates a manager. binaryPathOverride takes priority over
 // the config's BinaryPath, which in turn takes priority over profile.DefaultBinary
 // (PATH lookup).
-func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverride string) *ServerManager {
+func NewServerManager(profile config.ServerProfile, cfg *config.ServerConfig, binaryPathOverride string) *ServerManager {
 	bin := profile.DefaultBinary
 	if cfg.BinaryPath != "" {
 		bin = cfg.BinaryPath
@@ -249,7 +139,7 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 	// The docs advertise "~/..." paths (e.g. ~/.local/mlx-serve/mlx-serve);
 	// exec.LookPath does no tilde expansion, so expand here. A bare binary
 	// name (no ~ prefix) passes through unchanged for PATH lookup.
-	bin = expandHome(bin)
+	bin = config.ExpandHome(bin)
 
 	basePort := cfg.BasePort
 	if basePort == 0 {
@@ -295,11 +185,11 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 	return m
 }
 
-// GetOrLaunch returns an OpenAIEndpoint for the given model alias, holding no
+// GetOrLaunch returns a config.OpenAIEndpoint for the given model alias, holding no
 // lease: the instance may be evicted the moment this returns. Callers that
 // will actually send traffic should use Acquire and hold the lease for the
 // duration of the work.
-func (m *ServerManager) GetOrLaunch(ctx context.Context, alias string) (*OpenAIEndpoint, error) {
+func (m *ServerManager) GetOrLaunch(ctx context.Context, alias string) (*config.OpenAIEndpoint, error) {
 	endpoint, release, err := m.Acquire(ctx, alias)
 	if err != nil {
 		return nil, err
@@ -327,7 +217,7 @@ func (m *ServerManager) GetOrLaunch(ctx context.Context, alias string) (*OpenAIE
 // process, this goroutine rides out the health check to completion
 // regardless of ctx (see the comment at the awaitReady call below for why
 // that one is not cancellable).
-func (m *ServerManager) Acquire(ctx context.Context, alias string) (*OpenAIEndpoint, func(), error) {
+func (m *ServerManager) Acquire(ctx context.Context, alias string) (*config.OpenAIEndpoint, func(), error) {
 	if m.config.FindByAlias(alias) == nil {
 		return nil, nil, fmt.Errorf("%s: unknown model alias %q", m.profile.Kind, alias)
 	}
@@ -943,7 +833,7 @@ func (m *ServerManager) portFromArgs(args map[string]any) int {
 // profile.FixedArgs are injected right after --port/--host, before the
 // sorted map flags. Keys "port" and "host" in the map are consumed here
 // rather than duplicated.
-func buildServerArgs(profile ServerProfile, args map[string]any, port int) []string {
+func buildServerArgs(profile config.ServerProfile, args map[string]any, port int) []string {
 	host := "127.0.0.1"
 	if h, ok := args["host"].(string); ok {
 		host = h
@@ -1167,8 +1057,8 @@ func waitForHealth(port int, timeout time.Duration) error {
 	return fmt.Errorf("server at port %d did not become healthy within %s", port, timeout)
 }
 
-func endpointForPort(profile ServerProfile, port int) *OpenAIEndpoint {
-	return &OpenAIEndpoint{
+func endpointForPort(profile config.ServerProfile, port int) *config.OpenAIEndpoint {
+	return &config.OpenAIEndpoint{
 		Name:    profile.Kind,
 		BaseURL: fmt.Sprintf("http://127.0.0.1:%d/v1", port),
 		Group:   profile.Group,

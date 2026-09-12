@@ -7,16 +7,6 @@ import (
 	"strings"
 )
 
-// AutoRegen* are the "always | skipIfExists | never" mode values used by
-// PiProjectOverlay.Mode (config.go / provider_pi_overlay.go). relayLLM does not
-// regenerate skills — relay owns skill generation (relay ADR-004), and the
-// ResolvePtyEnv bridge call no longer carries a regen field. Empty == never.
-const (
-	AutoRegenAlways       = "always"
-	AutoRegenSkipIfExists = "skipIfExists"
-	AutoRegenNever        = "never"
-)
-
 // applyEnvPassthrough copies each key in keys from os.Environ() into env
 // (using setEnv to avoid duplicates). Shared by the PTY launcher and the
 // LLM-pi provider so the same env_passthrough semantics apply to both.

@@ -104,9 +104,9 @@ func TestPiTranslate_TextLifecycle_EmitsStartDeltaStop(t *testing.T) {
 	h.provider.translate("message_update", piMsgUpdate("text_end", 0, ""))
 
 	types := pickContentBlockKinds(h.captured.snapshot())
-	wantStart := slices.Contains(types,"text:start")
-	wantDelta := slices.Contains(types,"text:delta")
-	wantStop := slices.Contains(types,"text:stop")
+	wantStart := slices.Contains(types, "text:start")
+	wantDelta := slices.Contains(types, "text:delta")
+	wantStop := slices.Contains(types, "text:stop")
 	if !wantStart || !wantDelta || !wantStop {
 		t.Errorf("text lifecycle missing events; saw %v", types)
 	}
@@ -123,7 +123,7 @@ func TestPiTranslate_ThinkingLifecycle_EmitsStartDeltaStop(t *testing.T) {
 	h.provider.translate("message_update", piMsgUpdate("thinking_end", 0, ""))
 
 	types := pickContentBlockKinds(h.captured.snapshot())
-	if !slices.Contains(types,"thinking:start") || !slices.Contains(types,"thinking:delta") || !slices.Contains(types,"thinking:stop") {
+	if !slices.Contains(types, "thinking:start") || !slices.Contains(types, "thinking:delta") || !slices.Contains(types, "thinking:stop") {
 		t.Errorf("thinking lifecycle missing events; saw %v", types)
 	}
 }
@@ -475,9 +475,9 @@ func pickEventHas(rows []piEventRow, substr string) bool {
 
 // assistantBlockShape decodes an assistant envelope's relevant subfields.
 type assistantBlockShape struct {
-	Type             string `json:"type"`             // always "assistant" for matches
-	Index            int    `json:"index"`
-	ContentBlock     *struct {
+	Type         string `json:"type"` // always "assistant" for matches
+	Index        int    `json:"index"`
+	ContentBlock *struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -592,4 +592,3 @@ func collectBlockStartIndices(rows []piEventRow) []int {
 	}
 	return out
 }
-

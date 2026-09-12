@@ -32,9 +32,9 @@ import (
 //
 // All public methods are safe for concurrent use.
 type FakeClock struct {
-	mu       sync.Mutex
-	now      time.Time
-	waiters  []*fakeWaiter
+	mu      sync.Mutex
+	now     time.Time
+	waiters []*fakeWaiter
 }
 
 type fakeWaiter struct {
@@ -115,10 +115,10 @@ func (c *FakeClock) Advance(d time.Duration) {
 // tool definitions and a handler for each tool name; the chat tool loop calls
 // CallTool exactly as it would against a real MCPManager.
 type FakeMCPClient struct {
-	mu       sync.Mutex
-	tools    []FakeTool
-	calls    []FakeMCPCall
-	started  bool
+	mu      sync.Mutex
+	tools   []FakeTool
+	calls   []FakeMCPCall
+	started bool
 }
 
 // FakeTool is a single scripted tool entry.
@@ -323,9 +323,9 @@ func (p *FakeProvider) ScriptText(text string) {
 		"v":    2,
 	})
 	p.ScriptEvent(HandlerLLMEvent, map[string]interface{}{
-		"type":  "content_block_start",
-		"v":     2,
-		"index": 0,
+		"type":          "content_block_start",
+		"v":             2,
+		"index":         0,
 		"content_block": map[string]interface{}{"type": "text", "text": ""},
 	})
 	p.ScriptEvent(HandlerLLMEvent, map[string]interface{}{

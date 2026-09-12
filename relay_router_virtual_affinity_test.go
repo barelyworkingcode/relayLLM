@@ -7,6 +7,7 @@ package main
 // relay_router_test.go alongside the rest of the virtual-model routing tests.
 
 import (
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +27,8 @@ func TestApplyAffinity_NoPinLeavesOrderUnchanged(t *testing.T) {
 
 func TestApplyAffinity_MovesPinnedTargetToFront(t *testing.T) {
 	candidates := []resolvedVirtualTarget{
-		{endpoint: OpenAIEndpoint{Name: "x"}, upstreamID: "m"},
-		{endpoint: OpenAIEndpoint{Name: "y"}, upstreamID: "m"},
+		{endpoint: config.OpenAIEndpoint{Name: "x"}, upstreamID: "m"},
+		{endpoint: config.OpenAIEndpoint{Name: "y"}, upstreamID: "m"},
 		{alias: "z", manager: &ServerManager{}},
 	}
 	got := applyAffinity(candidates, "alias:z")
@@ -63,7 +64,7 @@ func TestApplyAffinity_AlreadyFirstIsNoop(t *testing.T) {
 // alias of the same name — the two namespaces must never collide inside the
 // affinity store any more than they do anywhere else in the router.
 func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing.T) {
-	endpointTarget := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "shared"}, upstreamID: "m"}
+	endpointTarget := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "shared"}, upstreamID: "m"}
 	aliasTarget := resolvedVirtualTarget{alias: "shared", manager: &ServerManager{}}
 	if endpointTarget.identity() == aliasTarget.identity() {
 		t.Errorf("endpoint and alias with the same name must have distinct identities, both got %q", endpointTarget.identity())
@@ -77,8 +78,8 @@ func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing
 // candidates, permanently re-pinning a conversation that was actually served
 // by the small model onto the big one next turn.
 func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *testing.T) {
-	big := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
-	small := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	big := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
 	if big.identity() == small.identity() {
 		t.Errorf("same-endpoint targets with different models must have distinct identities, both got %q", big.identity())
 	}
@@ -88,8 +89,8 @@ func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *test
 // (endpoint, model) pairs collide by shifting where the "/" falls — escaping
 // is what prevents that.
 func TestResolvedVirtualTarget_IdentityEscapesJoinAmbiguity(t *testing.T) {
-	a := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "a"}, upstreamID: "b/c"}
-	b := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "a/b"}, upstreamID: "c"}
+	a := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a"}, upstreamID: "b/c"}
+	b := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a/b"}, upstreamID: "c"}
 	if a.identity() == b.identity() {
 		t.Errorf("endpoint %q model %q and endpoint %q model %q must not collide, both got %q",
 			"a", "b/c", "a/b", "c", a.identity())
@@ -99,8 +100,8 @@ func TestResolvedVirtualTarget_IdentityEscapesJoinAmbiguity(t *testing.T) {
 // label() must also name the upstream model — a 503's per-target failure
 // list is useless for distinguishing two same-endpoint targets otherwise.
 func TestResolvedVirtualTarget_LabelIncludesUpstreamModel(t *testing.T) {
-	big := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
-	small := resolvedVirtualTarget{endpoint: OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	big := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
 	if big.label() == small.label() {
 		t.Errorf("same-endpoint targets with different models must have distinct labels, both got %q", big.label())
 	}

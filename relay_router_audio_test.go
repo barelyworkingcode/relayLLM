@@ -22,6 +22,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 )
@@ -111,8 +112,8 @@ func newTranscriptionUpstream(t *testing.T, advertise string) *transcriptionUpst
 
 func newAudioRouter(t *testing.T, upstreamURL, key string) *httptest.Server {
 	t.Helper()
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstreamURL + "/v1", APIKey: key}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstreamURL + "/v1", APIKey: key}},
 	})
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)

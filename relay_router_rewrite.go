@@ -47,7 +47,7 @@ func rewriteProxyBody(body []byte, model string, effortMap map[string]string, te
 	// Capture the client's ORIGINAL reasoning_effort value before
 	// applyReasoningEffortMap gets a chance to rewrite or remove it. Both
 	// reasoning_effort rewrites key off this same original value — see
-	// RouterConfig.ReasoningEffortTemplateKwargs for why matching after the
+	// config.RouterConfig.ReasoningEffortTemplateKwargs for why matching after the
 	// value-map swap would be wrong: {"minimal":"none"} (effortMap) and
 	// {"minimal":{"enable_thinking":false}} (templateKwargsMap) describe two
 	// independent reactions to ONE client value, "minimal". Reading the
@@ -82,7 +82,7 @@ func reasoningEffortValue(raw map[string]json.RawMessage) (string, bool) {
 }
 
 // applyReasoningEffortMap rewrites, or removes, a top-level string
-// "reasoning_effort" field in raw per effortMap — see RouterConfig for why
+// "reasoning_effort" field in raw per effortMap — see config.RouterConfig for why
 // this exists. Mutates raw in place; a no-op effortMap or a body with
 // nothing to rewrite leaves raw untouched.
 //
@@ -105,7 +105,7 @@ func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[strin
 	}
 	if mapped == "" {
 		// Some backends reject an empty string outright; "omit the field" is
-		// a distinct, useful outcome from "set it to none" — see RouterConfig.
+		// a distinct, useful outcome from "set it to none" — see config.RouterConfig.
 		delete(raw, "reasoning_effort")
 		slog.Debug("relay router: removed reasoning_effort", "from", effort)
 		return
@@ -122,14 +122,14 @@ func applyReasoningEffortMap(raw map[string]json.RawMessage, effortMap map[strin
 // top-level "chat_template_kwargs" object, creating it if absent. effort is
 // the client's ORIGINAL "reasoning_effort" value — the caller (
 // rewriteProxyBody) captures it before applyReasoningEffortMap runs, per
-// RouterConfig.ReasoningEffortTemplateKwargs's doc comment. Mutates raw in
+// config.RouterConfig.ReasoningEffortTemplateKwargs's doc comment. Mutates raw in
 // place; a no-op kwargsMap, a non-matching effort, or an empty configured
 // object leave raw untouched.
 //
 // A key the merge would set is left alone if raw's existing
 // chat_template_kwargs already defines it — mirroring oMLX's own
 // merged.setdefault(...) server-side, so a client's explicit choice always
-// wins over ours (see RouterConfig).
+// wins over ours (see config.RouterConfig).
 func applyReasoningEffortTemplateKwargs(raw map[string]json.RawMessage, kwargsMap map[string]map[string]any, effort string) {
 	if len(kwargsMap) == 0 {
 		return

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"relayllm/internal/config"
 	"testing"
 	"time"
 )
@@ -22,16 +23,16 @@ import (
 // newAnthropicRouter builds a *RelayRouter with router.anthropic configured
 // against upstream (standing in for api.anthropic.com), plus whatever
 // managers/registry/virtual config the caller passes for the redirect path.
-func newAnthropicRouter(t *testing.T, cfg *AnthropicRouterConfig, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
+func newAnthropicRouter(t *testing.T, cfg *config.AnthropicRouterConfig, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
 	t.Helper()
 	r := NewRelayRouter(":0", managers, registry, virtual)
 	r.setAnthropic(cfg)
 	return r
 }
 
-func anthropicUpstreamCfg(t *testing.T, upstreamURL string, modelMap map[string]string) *AnthropicRouterConfig {
+func anthropicUpstreamCfg(t *testing.T, upstreamURL string, modelMap map[string]string) *config.AnthropicRouterConfig {
 	t.Helper()
-	return &AnthropicRouterConfig{
+	return &config.AnthropicRouterConfig{
 		Upstream:            upstreamURL,
 		ModelMap:            modelMap,
 		PingIntervalSeconds: 3600, // effectively off for tests that don't exercise it
@@ -178,8 +179,8 @@ func TestAnthropic_Passthrough_APIPrefixReachesUpstream(t *testing.T) {
 func anthropicRedirectFixture(t *testing.T, alias string, upstream *httptest.Server, modelMap map[string]string) *RelayRouter {
 	t.Helper()
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	inst := &serverInstance{ready: make(chan struct{})}
 	inst.port = port
@@ -409,8 +410,8 @@ func TestAnthropic_Redirect_BackendDown_MapsToOverloadedError(t *testing.T) {
 	deadPort := closedListener.Addr().(*net.TCPAddr).Port
 	closedListener.Close()
 
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "dead-model", Args: map[string]any{"model": "/fake"}}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "dead-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	inst := &serverInstance{ready: make(chan struct{})}
 	inst.port = deadPort
@@ -569,8 +570,8 @@ func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
 	defer upstream.Close()
 
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "slow-model", Args: map[string]any{"model": "/fake"}}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "slow-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	inst := &serverInstance{ready: make(chan struct{})}
 	inst.port = port
@@ -580,7 +581,7 @@ func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
 	mgr.mu.Unlock()
 
 	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
-	r.setAnthropic(&AnthropicRouterConfig{
+	r.setAnthropic(&config.AnthropicRouterConfig{
 		Upstream:            "https://unused.invalid",
 		ModelMap:            map[string]string{"claude-haiku-4-5": "slow-model"},
 		PingIntervalSeconds: 0, // 0 -> default (15s)... overridden below via direct state mutation
@@ -705,8 +706,8 @@ func TestAnthropic_Redirect_StillLabeledViaAnthropicNotPassthrough(t *testing.T)
 	}))
 	defer upstream.Close()
 
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "local-model"}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "local-model"}},
 	}, "")
 	injectHealthyManagedInstance(t, mgr, "local-model", upstream)
 

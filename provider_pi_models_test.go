@@ -1,6 +1,7 @@
 package main
 
 import (
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 )
@@ -84,13 +85,13 @@ func TestParsePiListModels_Empty(t *testing.T) {
 
 func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayRouter(t *testing.T) {
 	raw := parsePiListModels([]byte(piListSample))
-	overlay := PiProjectOverlay{
-		Mode:             AutoRegenAlways,
+	overlay := config.PiProjectOverlay{
+		Mode:             config.AutoRegenAlways,
 		ExcludeProviders: []string{"llama-cpp"},
 	}
 	inputs := PiOverlayInputs{
 		RouterPort: "8180",
-		ServerModels: []ServerModelConfig{
+		ServerModels: []config.ServerModelConfig{
 			{Alias: "Qwen3.6 MoE 35"},
 			{Alias: "Qwen3.6 27B Q4"},
 		},
@@ -117,7 +118,7 @@ func TestApplyPiOverlayToModelList_ExcludesAndAddsRelayRouter(t *testing.T) {
 
 func TestApplyPiOverlayToModelList_NoOpWhenNoExclusionsAndNoProxy(t *testing.T) {
 	raw := parsePiListModels([]byte(piListSample))
-	got := applyPiOverlayToModelList(raw, PiProjectOverlay{Mode: AutoRegenAlways}, PiOverlayInputs{})
+	got := applyPiOverlayToModelList(raw, config.PiProjectOverlay{Mode: config.AutoRegenAlways}, PiOverlayInputs{})
 	if len(got) != len(raw) {
 		t.Fatalf("expected pass-through, got %d entries (want %d)", len(got), len(raw))
 	}

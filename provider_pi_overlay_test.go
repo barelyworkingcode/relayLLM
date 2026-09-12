@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"relayllm/internal/config"
 	"testing"
 )
 
@@ -31,16 +32,16 @@ func TestPiOverlayMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &PiConfig{
-		ProjectOverlay: PiProjectOverlay{
-			Mode:            AutoRegenAlways,
+	cfg := &config.PiConfig{
+		ProjectOverlay: config.PiProjectOverlay{
+			Mode:            config.AutoRegenAlways,
 			DefaultProvider: piRelayRouterProvider,
 			DefaultModel:    "qwen3-8b",
 			DefaultThinking: "medium",
 		},
 	}
 	inputs := PiOverlayInputs{
-		ServerModels: []ServerModelConfig{
+		ServerModels: []config.ServerModelConfig{
 			{Alias: "qwen3-8b"},
 			{Alias: "deepseek-r1"},
 		},
@@ -121,7 +122,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 	}
 
 	// Disabled overlay must be a no-op even if everything else is set.
-	disabled := &PiConfig{}
+	disabled := &config.PiConfig{}
 	if dir, err := MaterializePiOverlay(projectDir, disabled, inputs); err != nil || dir != "" {
 		t.Errorf("disabled overlay: dir=%q err=%v", dir, err)
 	}
@@ -138,7 +139,7 @@ func TestPiOverlayMissingAuthErrors(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &PiConfig{ProjectOverlay: PiProjectOverlay{Mode: AutoRegenAlways}}
+	cfg := &config.PiConfig{ProjectOverlay: config.PiProjectOverlay{Mode: config.AutoRegenAlways}}
 
 	if _, err := MaterializePiOverlay(projectDir, cfg, PiOverlayInputs{}); err == nil {
 		t.Error("expected error when global auth.json missing, got nil")
@@ -175,9 +176,9 @@ func mustReadJSON(t *testing.T, path string, v any) {
 // the managed server was launched with an mmproj and can see fine.
 func TestPiOverlay_ModelsCarryInputModalities(t *testing.T) {
 	projectDir := t.TempDir()
-	cfg := &PiConfig{
-		ProjectOverlay: PiProjectOverlay{
-			Mode:                 AutoRegenAlways,
+	cfg := &config.PiConfig{
+		ProjectOverlay: config.PiProjectOverlay{
+			Mode:                 config.AutoRegenAlways,
 			ExcludeUserProviders: true,
 			ExcludeUserSettings:  true,
 			AuthStrategy:         "none",

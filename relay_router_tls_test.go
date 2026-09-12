@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +62,8 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 	upstream.StartTLS()
 	defer upstream.Close()
 
-	cfg := &OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{
+	cfg := &config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
 			{
 				Name:      "fakeep",
 				BaseURL:   upstream.URL + "/v1",
@@ -72,7 +73,7 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 			},
 		},
 	}
-	if err := prepareEndpointTransports(&cfg.Endpoints[0], false); err != nil {
+	if err := config.PrepareEndpointTransports(&cfg.Endpoints[0], false); err != nil {
 		t.Fatalf("prepareEndpointTransports: %v", err)
 	}
 	registry := NewProxyRegistry(cfg)
@@ -91,7 +92,7 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 	}
 
 	cfg.Endpoints[0].PinSHA256 = []string{strings.Repeat("00", 32)}
-	if err := prepareEndpointTransports(&cfg.Endpoints[0], false); err != nil {
+	if err := config.PrepareEndpointTransports(&cfg.Endpoints[0], false); err != nil {
 		t.Fatalf("prepareEndpointTransports (mismatched pin): %v", err)
 	}
 
@@ -149,8 +150,8 @@ func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
 	certPath, keyPath := leaf.writeFiles(t)
 
 	addr := freeTCPAddr(t)
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "a"}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
 	router, err := StartRelayRouter([]string{addr}, []*ServerManager{mgr}, nil, nil, nil, certPath, keyPath)
 	if err != nil {
