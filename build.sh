@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 
-go build -o relayllm .
+go build -o relayllm ./cmd/relayllm
 echo "Built relayllm binary."
 
 (cd cmd/hook && go build -o hook .)
