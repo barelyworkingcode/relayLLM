@@ -63,7 +63,7 @@ func newTestCA(t *testing.T) *testCA {
 }
 
 // writeCAFile persists the CA's PEM bundle to a temp file and returns its
-// path, ready to use as an OpenAIEndpoint.CAFile.
+// path, ready to use as an config.OpenAIEndpoint.CAFile.
 func (ca *testCA) writeCAFile(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ca.pem")

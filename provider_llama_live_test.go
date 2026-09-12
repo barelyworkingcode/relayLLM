@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -47,14 +48,14 @@ func TestMain(m *testing.M) {
 }
 
 // loadLiveLlamaConfig reads the user's relayLLM settings.json and returns the
-// ServerConfig if the required alias is present, else nil.
-func loadLiveLlamaConfig() *ServerConfig {
+// config.ServerConfig if the required alias is present, else nil.
+func loadLiveLlamaConfig() *config.ServerConfig {
 	settingsPath := liveSettingsPath()
 	if settingsPath == "" {
 		return nil
 	}
 	dataDir := filepath.Dir(settingsPath)
-	cfg, err := LoadConfig(dataDir, "")
+	cfg, err := config.LoadConfig(dataDir, "")
 	if err != nil || cfg == nil {
 		return nil
 	}

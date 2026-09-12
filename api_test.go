@@ -331,4 +331,3 @@ func TestAPI_PostPermission_AutoDeniesByPolicy(t *testing.T) {
 		t.Errorf("expected deny, got %+v", decision)
 	}
 }
-

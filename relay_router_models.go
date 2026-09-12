@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"relayllm/internal/config"
 	"sort"
 	"strings"
 )
@@ -202,7 +203,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 // handleModelLoad starts loading a managed model and returns immediately —
 // see ServerManager.StartLoad for why this must not block.
 
-func (p *RelayRouter) virtualCatalogRow(virtual *VirtualLLM, statuses []EndpointStatus) map[string]any {
+func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []EndpointStatus) map[string]any {
 	candidates, freshCount := candidatesForVirtual(virtual, statuses, p.managers)
 
 	modalities := []string{"text"}
@@ -325,7 +326,7 @@ func resolveContextLength(candidates ...int64) (int64, bool) {
 // describes reachability (offline endpoints, missing aliases) — config
 // mistakes (bad target shape, unknown endpoint/alias names) are
 // warnVirtualModelConfig's job at startup, not a per-request runtime message.
-func virtualUnavailableReason(virtual *VirtualLLM, statuses []EndpointStatus) string {
+func virtualUnavailableReason(virtual *config.VirtualLLM, statuses []EndpointStatus) string {
 	configured := make(map[string]bool, len(statuses))
 	for _, status := range statuses {
 		configured[status.Endpoint.Name] = true

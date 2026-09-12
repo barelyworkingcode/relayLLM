@@ -20,6 +20,7 @@ import (
 	"embed"
 	"net/http"
 	clk "relayllm/internal/clock"
+	"relayllm/internal/config"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +48,7 @@ type DetailedStatusDeps struct {
 	WSHub     *WSHub
 	Managers  []*ServerManager // dispatch priority order: llama, then mlx
 	Registry  *ProxyRegistry   // may be nil
-	Virtual   *VirtualLLMConfig
+	Virtual   *config.VirtualLLMConfig
 	Router    *RelayRouter // may be nil (--router-port unset)
 	StartTime time.Time
 	Clock     clk.Clock
@@ -472,7 +473,7 @@ func detailedManagedRows(managers []*ServerManager, activeByManagedTarget map[st
 // Virtual-model rows (models.virtual)
 // ---------------------------------------------------------------------------
 
-func detailedVirtualRows(virtual *VirtualLLMConfig, epStatuses []EndpointStatus, managers []*ServerManager, activeByVirtualName map[string]int, pinCounts map[string]map[string]int) []map[string]any {
+func detailedVirtualRows(virtual *config.VirtualLLMConfig, epStatuses []EndpointStatus, managers []*ServerManager, activeByVirtualName map[string]int, pinCounts map[string]map[string]int) []map[string]any {
 	rows := []map[string]any{}
 	if virtual == nil {
 		return rows
@@ -520,8 +521,8 @@ func detailedVirtualRows(virtual *VirtualLLMConfig, epStatuses []EndpointStatus,
 
 // detailedEndpointRows builds each row explicitly from EndpointStatus's
 // individual fields rather than marshaling EndpointStatus (or its embedded
-// OpenAIEndpoint) directly. This is a hard rule, not a style choice:
-// OpenAIEndpoint carries APIKey (and, for a TLS-pinned endpoint, CAFile/
+// config.OpenAIEndpoint) directly. This is a hard rule, not a style choice:
+// config.OpenAIEndpoint carries APIKey (and, for a TLS-pinned endpoint, CAFile/
 // PinSHA256) — a direct marshal would leak the credential into a page every
 // browser tab with access to this dashboard can read. Covered by
 // TestSec_DetailedStatus_NeverLeaksEndpointSecrets in

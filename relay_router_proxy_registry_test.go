@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,8 +51,8 @@ func TestProxyRegistry_LookupModel_ColdRegistryProbesAndResolves(t *testing.T) {
 	healthy.Store(true)
 	upstream := countingOpenAIUpstream(t, "CodeFast", healthy, &reqCount)
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "omlx", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "omlx", BaseURL: upstream.URL + "/v1"}},
 	})
 
 	ep, upstreamID, ok := registry.LookupModel(context.Background(), "omlx/CodeFast")
@@ -80,8 +81,8 @@ func TestProxyRegistry_LookupModel_UnconfiguredEndpoint_NeverProbes(t *testing.T
 	healthy.Store(true)
 	upstream := countingOpenAIUpstream(t, "m", healthy, &reqCount)
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "known", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "known", BaseURL: upstream.URL + "/v1"}},
 	})
 
 	_, _, ok := registry.LookupModel(context.Background(), "unknown/model")
@@ -102,8 +103,8 @@ func TestProxyRegistry_LookupModel_OfflineWithinTTL_NotReprobed(t *testing.T) {
 	healthy.Store(false) // upstream starts unhealthy
 	upstream := countingOpenAIUpstream(t, "m", healthy, &reqCount)
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 
 	if _, _, ok := registry.LookupModel(context.Background(), "ep/m"); ok {
@@ -135,8 +136,8 @@ func TestProxyRegistry_LookupModel_ReprobesAfterTTLExpiry(t *testing.T) {
 	healthy.Store(false)
 	upstream := countingOpenAIUpstream(t, "m", healthy, &reqCount)
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 
 	if _, _, ok := registry.LookupModel(context.Background(), "ep/m"); ok {
@@ -172,8 +173,8 @@ func TestProxyRegistry_LookupModel_ConcurrentCallsSingleFlight(t *testing.T) {
 	healthy.Store(true)
 	upstream := countingOpenAIUpstream(t, "m", healthy, &reqCount)
 
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 
 	const n = 20

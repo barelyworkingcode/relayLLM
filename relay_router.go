@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"relayllm/internal/config"
 	"relayllm/internal/netutil"
 )
 
@@ -31,7 +32,7 @@ import (
 type RelayRouter struct {
 	managers []*ServerManager
 	registry *ProxyRegistry
-	virtual  *VirtualLLMConfig
+	virtual  *config.VirtualLLMConfig
 	affinity *virtualAffinityStore
 	server   *http.Server
 
@@ -50,10 +51,10 @@ type RelayRouter struct {
 	metrics *ProxyMetrics
 
 	// reasoningEffortMap rewrites a top-level "reasoning_effort" string field
-	// on every proxied body before it reaches a backend — see RouterConfig
+	// on every proxied body before it reaches a backend — see config.RouterConfig
 	// and rewriteProxyBody. nil/empty (the zero value, and what every
 	// constructor leaves it at) means no rewriting at all; wired in from
-	// settings.json via StartRelayRouter's trailing *RouterConfig parameter
+	// settings.json via StartRelayRouter's trailing *config.RouterConfig parameter
 	// (see setReasoningEffortMap), applied before the serving goroutine is
 	// spawned rather than a NewRelayRouter constructor parameter, to keep
 	// this opt-in feature from touching NewRelayRouter's much larger set of
@@ -61,7 +62,7 @@ type RelayRouter struct {
 	reasoningEffortMap map[string]string
 
 	// reasoningEffortTemplateKwargs merges an object into the proxied body's
-	// top-level "chat_template_kwargs" field — see RouterConfig for the
+	// top-level "chat_template_kwargs" field — see config.RouterConfig for the
 	// oMLX/llama.cpp measurements this exists to satisfy, and
 	// rewriteProxyBody / applyReasoningEffortTemplateKwargs for the merge
 	// semantics. Same nil/empty-means-off shape, wired in the same way
@@ -87,104 +88,6 @@ type RelayRouter struct {
 	// mux is kept so setPassthrough can mount its configured /<name>/ routes
 	// after construction, before Serve.
 	mux *http.ServeMux
-}
-
-// RouterConfig holds relay-router behavior that doesn't belong to any one
-// backend — the reasoning-effort rewrite table and its sibling
-// chat_template_kwargs merge table. Maps to settings.json's optional
-// top-level "router" section.
-type RouterConfig struct {
-	// ReasoningEffortMap rewrites (or, mapped to "", removes) a top-level
-	// string "reasoning_effort" field on every proxied request body. Absent
-	// or empty disables rewriting entirely — the default, so behavior is
-	// byte-identical to a settings.json with no "router" section at all.
-	//
-	// Keys and values are free-form strings on purpose, not a fixed
-	// vocabulary: backends disagree about what they accept. Measured against
-	// a real llama.cpp server (Qwen3.8-27B): "none" is accepted and turns
-	// reasoning off; "low"/"medium"/"high"/"xhigh" are accepted and produce
-	// reasoning; "minimal" 500s ("Unexpected reasoning effort minimal.
-	// Supported types are xhigh (default), medium, and low."). Oh My Pi has
-	// no wire value that means "off" — its `--thinking off` clamps to the
-	// lowest entry in the model's configured `efforts` list and sends that
-	// verbatim, so "minimal" is the lowest value such a client can be made
-	// to send. Mapping {"minimal": "none"} turns that into the off signal
-	// the backend actually understands. See CLAUDE.md's Relay-router section
-	// for the full story.
-	ReasoningEffortMap map[string]string `json:"reasoningEffortMap,omitempty"`
-
-	// ReasoningEffortTemplateKwargs merges an object into a proxied body's
-	// top-level "chat_template_kwargs" field when the request's ORIGINAL
-	// "reasoning_effort" string value — matched the same way, and BEFORE,
-	// ReasoningEffortMap rewrites it (see rewriteProxyBody) — matches a
-	// configured key. Absent or empty disables this entirely, the default,
-	// so behavior is unchanged from before this field existed.
-	//
-	// ReasoningEffortMap's value swap only fixes backends that interpret
-	// reasoning_effort server-side (llama.cpp does). It does not fix oMLX:
-	// measured at omlx/server.py:3594, oMLX merges request.reasoning_effort
-	// verbatim into chat_template_kwargs and hands it to the model's Jinja
-	// template — there is no server-side meaning to rewrite. The MLX build
-	// of the measured model (CodeFast) uses the older Qwen convention
-	// (enable_thinking), not reasoning_effort, so no VALUE swap of
-	// reasoning_effort can reach it — the template never reads that field at
-	// all. It needs a field-SHAPE rewrite: inject a different field.
-	// Measured reasoning output length against oMLX CodeFast:
-	//
-	//	request                                            reasoning returned
-	//	baseline                                            101 chars
-	//	reasoning_effort: "none"                             94 chars — no effect
-	//	chat_template_kwargs: {"enable_thinking": false}      0 chars — off
-	//
-	// The same chat_template_kwargs also turns reasoning off against
-	// llama.cpp (0 chars, measured on "europa"), so each backend tolerates
-	// the other's mechanism harmlessly — llama.cpp ignores an
-	// unrecognized chat_template_kwargs key, oMLX ignores reasoning_effort
-	// once nothing reads it. Configuring both knobs together (this field and
-	// ReasoningEffortMap) is what makes "turn reasoning off" portable across
-	// both backends from one client-side value.
-	//
-	// Matched against the value BEFORE ReasoningEffortMap's rewrite, not
-	// after, because the two knobs describe ONE inbound client value
-	// triggering TWO independent rewrites: configuring
-	// {"minimal": "none"} (ReasoningEffortMap) alongside
-	// {"minimal": {"enable_thinking": false}} (this field) must both fire
-	// off the client's original "minimal". Matching post-rewrite would
-	// require this field's keys to track whatever ReasoningEffortMap
-	// happens to rewrite "minimal" INTO ("none") rather than what the client
-	// actually sent — coupling the two maps together for no reason, and
-	// breaking silently if either is reconfigured independently.
-	//
-	// Values are arbitrary JSON (bool, string, number, …), not just bools:
-	// oMLX forwards chat_template_kwargs to the Jinja template verbatim, so
-	// this passes values through untyped exactly like ReasoningEffortMap's
-	// free-form string values do.
-	//
-	// The merge never overwrites a key the client's own body already sets
-	// under chat_template_kwargs — mirroring oMLX's own
-	// merged.setdefault(...) server-side, so the client's explicit choice
-	// always wins over ours. See applyReasoningEffortTemplateKwargs.
-	ReasoningEffortTemplateKwargs map[string]map[string]any `json:"reasoningEffortTemplateKwargs,omitempty"`
-
-	// Anthropic enables Anthropic Messages API compatibility (/v1/messages,
-	// /v1/messages/count_tokens, and an /api/ passthrough) on this same
-	// listener — see relay_router_anthropic.go. Absent (nil, the default)
-	// means those routes 404; behavior is otherwise unchanged.
-	Anthropic *AnthropicRouterConfig `json:"anthropic,omitempty"`
-
-	// Passthrough mounts /<name>/ routes that forward byte-for-byte, client
-	// credential included, to a fixed upstream (ChatGPT's Codex backend,
-	// api.openai.com). See relay_router_passthrough.go. Absent or empty mounts
-	// nothing.
-	Passthrough map[string]PassthroughConfig `json:"passthrough,omitempty"`
-}
-
-// forwardsClientCredentials reports whether any route forwards the client's
-// own credential upstream (router.anthropic or router.passthrough). main
-// uses it to refuse a plaintext non-loopback bind. StartRelayRouter uses it
-// to start a router that has no local backends. Nil-safe.
-func (c *RouterConfig) forwardsClientCredentials() bool {
-	return c != nil && (c.Anthropic != nil || len(c.Passthrough) > 0)
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -239,7 +142,7 @@ func (p *RelayRouter) setTLS(cert, key string) {
 // endpoint branch; virtual may be nil to disable the virtual-model branch. A
 // router with no live backends 400s every request — StartRelayRouter guards
 // against starting one.
-func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig) *RelayRouter {
+func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
 	live := make([]*ServerManager, 0, len(managers))
 	for _, m := range managers {
 		if m != nil {
@@ -604,7 +507,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 
 	// No model swap needed here — the client already sent the bare alias the
 	// managed server expects — but the reasoning_effort rewrite still applies
-	// (see RouterConfig): a client hitting a managed alias has exactly the
+	// (see config.RouterConfig): a client hitting a managed alias has exactly the
 	// same backend-vocabulary problem as one hitting an endpoint.
 	rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
@@ -630,7 +533,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
-func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
+func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep config.OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
 	conn.setTarget("endpoint", ep.Name+"/"+upstreamID)
 	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
@@ -740,7 +643,7 @@ func upstreamPath(basePath, inbound string) string {
 // one didn't) is not an error here at all — listenAll already logged the
 // failure and Serve simply runs on whichever listeners exist.
 //
-// router (may be nil) carries RouterConfig-level behavior — the
+// router (may be nil) carries config.RouterConfig-level behavior — the
 // reasoning_effort rewrite map and its sibling chat_template_kwargs merge
 // table — and both are applied via their setters before any of Serve's
 // per-listener goroutines are spawned, not after StartRelayRouter returns.
@@ -761,7 +664,7 @@ func upstreamPath(basePath, inbound string) string {
 // reasoningEffort* fields. One cert/key pair covers every bound address —
 // there's no per-bind TLS config — so the cert must be valid for all of
 // them if more than one is configured.
-func StartRelayRouter(addrs []string, managers []*ServerManager, registry *ProxyRegistry, virtual *VirtualLLMConfig, router *RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
+func StartRelayRouter(addrs []string, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}
@@ -774,7 +677,7 @@ func StartRelayRouter(addrs []string, managers []*ServerManager, registry *Proxy
 	// router at all: /v1/messages, the /api/* bootstrap passthrough,
 	// everything 404'd with no indication why. router.passthrough upstreams
 	// are real destinations the same way.
-	hasPassthrough := router.forwardsClientCredentials()
+	hasPassthrough := router.ForwardsClientCredentials()
 	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
 		return nil, nil
 	}

@@ -409,10 +409,10 @@ func parseSidechainFile(path string) (messages []map[string]any, agentID, person
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	type entry struct {
-		Type             string          `json:"type"`
-		AgentID          string          `json:"agentId"`
-		AttributionAgent string          `json:"attributionAgent"`
-		IsSidechain      bool            `json:"isSidechain"`
+		Type             string `json:"type"`
+		AgentID          string `json:"agentId"`
+		AttributionAgent string `json:"attributionAgent"`
+		IsSidechain      bool   `json:"isSidechain"`
 		Message          struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`

@@ -21,32 +21,9 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"relayllm/internal/config"
 )
-
-// AnthropicRouterConfig is settings.json's optional router.anthropic
-// section. Absent entirely -> the /v1/messages routes 404 (RelayRouter.anthropic
-// stays nil) — zero behavior change from before this feature existed, the
-// same off-by-default shape as RouterConfig.ReasoningEffortMap.
-type AnthropicRouterConfig struct {
-	// Upstream is the real Anthropic API base URL passthrough forwards to.
-	// Defaults to "https://api.anthropic.com" when empty.
-	Upstream string `json:"upstream,omitempty"`
-
-	// ModelMap redirects specific Anthropic model ids (exact, case-sensitive
-	// match against the request body's top-level "model" field — same
-	// free-form-string convention as RouterConfig.ReasoningEffortMap) to a
-	// router-dispatchable target: a managed-server alias, a configured
-	// virtual model name, or an "endpoint/model" id. A key absent from this
-	// map (the common case, and the only case when ModelMap is empty or
-	// absent) passes straight through to Upstream untouched.
-	ModelMap map[string]string `json:"modelMap,omitempty"`
-
-	// PingIntervalSeconds sets how often a "ping" SSE event is sent during a
-	// redirected streaming response to keep Claude Code's byte-idle watchdog
-	// from firing while a local model is still processing a long prompt.
-	// Defaults to 15 when zero or negative.
-	PingIntervalSeconds int `json:"pingIntervalSeconds,omitempty"`
-}
 
 const (
 	defaultAnthropicUpstream                  = "https://api.anthropic.com"
@@ -55,7 +32,7 @@ const (
 )
 
 // anthropicRouterState is the validated, ready-to-use form of
-// AnthropicRouterConfig, built once by setAnthropic.
+// config.AnthropicRouterConfig, built once by setAnthropic.
 type anthropicRouterState struct {
 	upstream     *url.URL
 	modelMap     map[string]string
@@ -70,7 +47,7 @@ type anthropicRouterState struct {
 // invalid upstream URL disables the feature with a startup log rather than
 // failing the whole process, matching this codebase's "additive feature,
 // fails safe" convention for router config.
-func (p *RelayRouter) setAnthropic(cfg *AnthropicRouterConfig) {
+func (p *RelayRouter) setAnthropic(cfg *config.AnthropicRouterConfig) {
 	if cfg == nil {
 		return
 	}

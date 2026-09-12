@@ -7,13 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func newPassthroughRouter(t *testing.T, cfg map[string]PassthroughConfig) *httptest.Server {
+func newPassthroughRouter(t *testing.T, cfg map[string]config.PassthroughConfig) *httptest.Server {
 	t.Helper()
 	r := NewRelayRouter(":0", nil, nil, nil)
 	r.setPassthrough(cfg)
@@ -38,7 +39,7 @@ func TestNewPassthroughProxy_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := newPassthroughProxy(tc.entry, PassthroughConfig{Upstream: tc.upstream})
+			_, _, err := newPassthroughProxy(tc.entry, config.PassthroughConfig{Upstream: tc.upstream})
 			if (err == nil) != tc.ok {
 				t.Errorf("newPassthroughProxy(%q, %q) err = %v, want ok=%v", tc.entry, tc.upstream, err, tc.ok)
 			}
@@ -64,7 +65,7 @@ func TestPassthrough_ForwardsCredentialUnderUpstreamBasePath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newPassthroughRouter(t, map[string]PassthroughConfig{
+	srv := newPassthroughRouter(t, map[string]config.PassthroughConfig{
 		"chatgpt": {Upstream: upstream.URL + "/backend-api"},
 	})
 
@@ -109,7 +110,7 @@ func TestPassthrough_LocalRoutesNeverReachUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newPassthroughRouter(t, map[string]PassthroughConfig{"openai": {Upstream: upstream.URL}})
+	srv := newPassthroughRouter(t, map[string]config.PassthroughConfig{"openai": {Upstream: upstream.URL}})
 
 	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"gpt-5.5"}`))
 	resp.Body.Close()
@@ -130,7 +131,7 @@ func TestPassthrough_InvalidEntriesSkippedValidOneMounted(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newPassthroughRouter(t, map[string]PassthroughConfig{
+	srv := newPassthroughRouter(t, map[string]config.PassthroughConfig{
 		"api":   {Upstream: upstream.URL},
 		"plain": {Upstream: "http://api.openai.com"},
 		"good":  {Upstream: upstream.URL},
@@ -180,7 +181,7 @@ func TestPassthrough_WebSocketUpgradeRelayedAndMetered(t *testing.T) {
 	defer upstream.Close()
 
 	r := NewRelayRouter(":0", nil, nil, nil)
-	r.setPassthrough(map[string]PassthroughConfig{"chatgpt": {Upstream: upstream.URL + "/backend-api"}})
+	r.setPassthrough(map[string]config.PassthroughConfig{"chatgpt": {Upstream: upstream.URL + "/backend-api"}})
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -237,8 +238,8 @@ func TestPassthrough_WebSocketUpgradeRelayedAndMetered(t *testing.T) {
 }
 
 func TestStartRelayRouter_PassthroughOnlyConfigStillStarts(t *testing.T) {
-	router, err := StartRelayRouter([]string{"127.0.0.1:0"}, nil, nil, nil, &RouterConfig{
-		Passthrough: map[string]PassthroughConfig{"chatgpt": {Upstream: "https://chatgpt.com/backend-api"}},
+	router, err := StartRelayRouter([]string{"127.0.0.1:0"}, nil, nil, nil, &config.RouterConfig{
+		Passthrough: map[string]config.PassthroughConfig{"chatgpt": {Upstream: "https://chatgpt.com/backend-api"}},
 	}, "", "")
 	if err != nil {
 		t.Fatalf("StartRelayRouter: %v", err)

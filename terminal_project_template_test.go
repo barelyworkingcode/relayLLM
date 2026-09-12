@@ -7,7 +7,7 @@ import (
 )
 
 // resolveRelayProjectTemplate maps relay's bridge ProjectTemplate response into a
-// TerminalTemplate and carries (projectID, templateID) on the request.
+// config.TerminalTemplate and carries (projectID, templateID) on the request.
 func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 	fb := NewFakeBridge(t)
 	data, _ := json.Marshal(RelayProjectTemplateResponse{

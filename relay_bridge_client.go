@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"relayllm/internal/config"
 	"relayllm/internal/types"
 )
 
@@ -221,28 +222,28 @@ func resolveRelayPtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 
 // resolveRelayProjectTemplate calls relay's bridge ResolveProjectTemplate to
 // fetch a project-scoped shell template definition by (projectID, templateID),
-// mapping the response into a TerminalTemplate so the existing launch path is
+// mapping the response into a config.TerminalTemplate so the existing launch path is
 // unchanged. Returns an error if relay is not running, the service token is
 // missing, or the project/template cannot be resolved — the caller fails closed
 // and never spawns a guessed command. The response carries no token; the
 // project token is injected separately by the existing ResolvePtyEnv path.
-func resolveRelayProjectTemplate(projectID, templateID string) (TerminalTemplate, error) {
+func resolveRelayProjectTemplate(projectID, templateID string) (config.TerminalTemplate, error) {
 	args, err := json.Marshal(RelayProjectTemplateRequest{ProjectID: projectID, TemplateID: templateID})
 	if err != nil {
-		return TerminalTemplate{}, fmt.Errorf("marshal request: %w", err)
+		return config.TerminalTemplate{}, fmt.Errorf("marshal request: %w", err)
 	}
 	resp, err := sendBridgeRequest(reqResolveProjectTemplate, args)
 	if err != nil {
-		return TerminalTemplate{}, err
+		return config.TerminalTemplate{}, err
 	}
 	if resp.Type != respProjectTemplate {
-		return TerminalTemplate{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
+		return config.TerminalTemplate{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
 	}
 	var out RelayProjectTemplateResponse
 	if err := json.Unmarshal(resp.Data, &out); err != nil {
-		return TerminalTemplate{}, fmt.Errorf("parse ProjectTemplate data: %w", err)
+		return config.TerminalTemplate{}, fmt.Errorf("parse ProjectTemplate data: %w", err)
 	}
-	return TerminalTemplate{
+	return config.TerminalTemplate{
 		ID:          out.ID,
 		Name:        out.Name,
 		Command:     out.Command,

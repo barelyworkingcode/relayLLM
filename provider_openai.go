@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"relayllm/internal/config"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,7 @@ type BackendAcquirer interface {
 // BackendResolver launches-or-reuses a managed server and returns the endpoint
 // to talk to plus a lease release. See ServerManager.Acquire — ctx bounds the
 // resolver's own admission wait, not a launch it ends up owning.
-type BackendResolver func(ctx context.Context) (OpenAIEndpoint, func(), error)
+type BackendResolver func(ctx context.Context) (config.OpenAIEndpoint, func(), error)
 
 // OpenAIChatTransport implements ChatTransport for any server that speaks
 // the OpenAI /v1/chat/completions protocol (OpenAI itself, LM Studio, Ollama's
@@ -40,7 +41,7 @@ type OpenAIChatTransport struct {
 	// goroutine than the SendMessage that resolved it, so this is not
 	// theoretical.
 	endpointMu sync.RWMutex
-	endpoint   OpenAIEndpoint
+	endpoint   config.OpenAIEndpoint
 
 	resolve  BackendResolver // nil for plain HTTP endpoints
 	model    string          // bare model id (after prefix stripping)
@@ -55,7 +56,7 @@ type OpenAIChatTransport struct {
 
 // NewOpenAIChatTransport constructs a transport for a configured endpoint.
 // The http.Client is injected so tests can hand in httptest.NewServer clients.
-func NewOpenAIChatTransport(endpoint OpenAIEndpoint, model string, settings json.RawMessage, client *http.Client) *OpenAIChatTransport {
+func NewOpenAIChatTransport(endpoint config.OpenAIEndpoint, model string, settings json.RawMessage, client *http.Client) *OpenAIChatTransport {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -72,13 +73,13 @@ func NewOpenAIChatTransport(endpoint OpenAIEndpoint, model string, settings json
 // construction, so the session survives the backing process being evicted and
 // relaunched on a different port.
 func NewManagedChatTransport(resolve BackendResolver, model string, settings json.RawMessage, client *http.Client) *OpenAIChatTransport {
-	t := NewOpenAIChatTransport(OpenAIEndpoint{}, model, settings, client)
+	t := NewOpenAIChatTransport(config.OpenAIEndpoint{}, model, settings, client)
 	t.resolve = resolve
 	return t
 }
 
 // ep returns a snapshot of the current endpoint.
-func (t *OpenAIChatTransport) ep() OpenAIEndpoint {
+func (t *OpenAIChatTransport) ep() config.OpenAIEndpoint {
 	t.endpointMu.RLock()
 	defer t.endpointMu.RUnlock()
 	return t.endpoint
@@ -623,7 +624,7 @@ const modelsFetchTimeout = 10 * time.Second
 // upstream models (IDs carry no endpoint prefix). The error return distinguishes
 // "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
 // ProxyRegistry can record online/offline state accurately.
-func FetchOpenAIModels(ctx context.Context, endpoint OpenAIEndpoint) ([]UpstreamModel, error) {
+func FetchOpenAIModels(ctx context.Context, endpoint config.OpenAIEndpoint) ([]UpstreamModel, error) {
 	client := &http.Client{Timeout: modelsFetchTimeout, Transport: endpoint.Transport()}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {

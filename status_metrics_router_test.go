@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"relayllm/internal/config"
 	"strconv"
 	"testing"
 )
@@ -32,7 +33,7 @@ func injectHealthyManagedInstance(t *testing.T, m *ServerManager, alias string, 
 		t.Fatalf("parse upstream port: %v", err)
 	}
 	inst := &serverInstance{
-		config:    ServerModelConfig{Alias: alias},
+		config:    config.ServerModelConfig{Alias: alias},
 		port:      port,
 		ready:     make(chan struct{}),
 		startTime: m.clock.Now(),
@@ -60,8 +61,8 @@ func TestProxyMetrics_ManagedRouteRecordsTarget(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "test-alias"}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "test-alias"}},
 	}, "")
 	injectHealthyManagedInstance(t, mgr, "test-alias", upstream)
 
@@ -105,7 +106,7 @@ func TestProxyMetrics_EndpointRouteRecordsTarget(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "fakeep", BaseURL: upstream.URL + "/v1"},
 	}})
 
@@ -166,15 +167,15 @@ func TestProxyMetrics_VirtualFailoverSingleEntry(t *testing.T) {
 	}))
 	defer live.Close()
 
-	primaryEP := OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
-	liveEP := OpenAIEndpoint{Name: "live", BaseURL: live.URL + "/v1"}
-	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{primaryEP, liveEP}})
+	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
+	liveEP := config.OpenAIEndpoint{Name: "live", BaseURL: live.URL + "/v1"}
+	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, liveEP}})
 	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "primary-model"})
 	seedEndpointStatus(registry, liveEP, true, UpstreamModel{ID: "live-model"})
 
-	router := NewRelayRouter(":0", nil, registry, &VirtualLLMConfig{Models: []VirtualLLM{{
+	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vFail",
-		Targets: []VirtualLLMTarget{
+		Targets: []config.VirtualLLMTarget{
 			{Endpoint: "primary", Model: "primary-model"},
 			{Endpoint: "live", Model: "live-model"},
 		},
@@ -227,12 +228,12 @@ func TestProxyMetrics_MidStreamAbortDeregisters(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{
+	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "flaky", BaseURL: upstream.URL + "/v1"},
 	}})
 	// Warm the endpoint so LookupModel resolves it directly (its /v1/models
 	// probe would otherwise 404 against this handler and read as offline).
-	seedEndpointStatus(registry, OpenAIEndpoint{Name: "flaky", BaseURL: upstream.URL + "/v1"}, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, config.OpenAIEndpoint{Name: "flaky", BaseURL: upstream.URL + "/v1"}, true, UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(router.server.Handler)

@@ -1,6 +1,6 @@
 package main
 
-// Coverage for the router-level reasoning_effort rewrite (RouterConfig /
+// Coverage for the router-level reasoning_effort rewrite (config.RouterConfig /
 // rewriteProxyBody in relay_router.go). See CLAUDE.md's Relay-router section
 // for why this exists: clients and backends disagree about what a
 // reasoning_effort value of "off" looks like on the wire, and at least one
@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"testing"
 )
 
@@ -28,8 +29,8 @@ func newManagedAliasRouter(t *testing.T, alias string, upstream *httptest.Server
 	t.Helper()
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
 
-	mgr := NewServerManager(llamaProfile, &ServerConfig{
-		Models: []ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	inst := &serverInstance{ready: make(chan struct{})}
 	inst.port = port
@@ -132,8 +133,8 @@ func TestReasoningEffort_ManagedAliasPath_EmptyMappedValueRemovesKey(t *testing.
 func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
 	r := NewRelayRouter(":0", nil, registry, nil)
@@ -167,8 +168,8 @@ func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
 	r := NewRelayRouter(":0", nil, registry, nil)
@@ -195,8 +196,8 @@ func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
 	r := NewRelayRouter(":0", nil, registry, nil)
@@ -226,8 +227,8 @@ func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
 	r := NewRelayRouter(":0", nil, registry, nil)
@@ -276,13 +277,13 @@ func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 func TestReasoningEffort_VirtualModelPath_RewritesMappedValue(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
-	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
+	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name:    "vCode",
-		Targets: []VirtualLLMTarget{{Endpoint: "fakeep", Model: "upstream-model"}},
+		Targets: []config.VirtualLLMTarget{{Endpoint: "fakeep", Model: "upstream-model"}},
 	}}}
 	r := NewRelayRouter(":0", nil, registry, virtual)
 	r.setReasoningEffortMap(map[string]string{"minimal": "none"})
@@ -314,12 +315,12 @@ func TestReasoningEffort_VirtualModelPath_RewritesMappedValue(t *testing.T) {
 // ---------------------------------------------------------------------------
 // reasoningEffortTemplateKwargs — chat_template_kwargs merge
 //
-// Coverage for RouterConfig.ReasoningEffortTemplateKwargs / applyReasoningEffortTemplateKwargs
+// Coverage for config.RouterConfig.ReasoningEffortTemplateKwargs / applyReasoningEffortTemplateKwargs
 // in relay_router.go. Fixes what the value-map rewrite above cannot: oMLX
 // forwards reasoning_effort verbatim into chat_template_kwargs and hands it
 // to the model's Jinja template instead of interpreting it server-side, so a
 // VALUE swap of reasoning_effort changes nothing for a template that reads
-// enable_thinking instead. See RouterConfig's doc comment for the measured
+// enable_thinking instead. See config.RouterConfig's doc comment for the measured
 // table (oMLX CodeFast: baseline 101 chars, reasoning_effort:"none" 94
 // chars/no effect, chat_template_kwargs:{"enable_thinking":false} 0
 // chars/off) and for why both rewrites match against the request's ORIGINAL
@@ -393,7 +394,7 @@ func TestReasoningEffortTemplateKwargs_ManagedAliasPath_MergesKwargs(t *testing.
 
 // Requirement 3: the client's own chat_template_kwargs.enable_thinking:true
 // survives untouched — the merge must not clobber a client-supplied key,
-// mirroring oMLX's own merged.setdefault(...) semantics (see RouterConfig).
+// mirroring oMLX's own merged.setdefault(...) semantics (see config.RouterConfig).
 func TestReasoningEffortTemplateKwargs_ClientValueSurvives(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
@@ -516,8 +517,8 @@ func TestReasoningEffortTemplateKwargs_NonMatchingLeavesBodyAlone(t *testing.T) 
 func TestReasoningEffortTemplateKwargs_EndpointPath_MergesKwargs(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
 	r := NewRelayRouter(":0", nil, registry, nil)
@@ -543,13 +544,13 @@ func TestReasoningEffortTemplateKwargs_EndpointPath_MergesKwargs(t *testing.T) {
 func TestReasoningEffortTemplateKwargs_VirtualModelPath_MergesKwargs(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
+	registry := NewProxyRegistry(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
-	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
+	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name:    "vCode",
-		Targets: []VirtualLLMTarget{{Endpoint: "fakeep", Model: "upstream-model"}},
+		Targets: []config.VirtualLLMTarget{{Endpoint: "fakeep", Model: "upstream-model"}},
 	}}}
 	r := NewRelayRouter(":0", nil, registry, virtual)
 	r.setReasoningEffortTemplateKwargs(map[string]map[string]any{"minimal": {"enable_thinking": false}})

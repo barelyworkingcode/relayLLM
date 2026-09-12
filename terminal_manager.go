@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"relayllm/internal/config"
 )
 
 // TerminalManager manages terminal session lifecycle.
@@ -25,7 +27,7 @@ type TerminalManager struct {
 	// terminal template whose command is `pi`. The PTY launcher consults
 	// these only when the template carries a RelayManagedSpec; non-pi or
 	// non-relay-managed templates spawn exactly as before.
-	piConfig        *PiConfig
+	piConfig        *config.PiConfig
 	overlayInputsFn func() PiOverlayInputs
 
 	onOutput func(terminalID string, data []byte)
@@ -52,7 +54,7 @@ func (m *TerminalManager) LogDir() string {
 // PTY templates that run `pi` against a relay-managed directory get the same
 // per-project models.json/settings.json/auth.json the LLM provider uses. Pass
 // (nil, nil) to disable the overlay for PTY sessions.
-func (m *TerminalManager) SetPiOverlay(cfg *PiConfig, inputsFn func() PiOverlayInputs) {
+func (m *TerminalManager) SetPiOverlay(cfg *config.PiConfig, inputsFn func() PiOverlayInputs) {
 	m.piConfig = cfg
 	m.overlayInputsFn = inputsFn
 }
@@ -259,7 +261,7 @@ func (m *TerminalManager) NotifyViewerChange(id string, viewers int) {
 }
 
 // ListTemplates returns all available terminal templates.
-func (m *TerminalManager) ListTemplates() []TerminalTemplate {
+func (m *TerminalManager) ListTemplates() []config.TerminalTemplate {
 	return m.templates.List()
 }
 

@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"testing"
 )
 
@@ -23,9 +24,9 @@ func TestEstimateModelMemory_AgainstInstalledModels(t *testing.T) {
 		t.Skipf("no settings.json in %s", dataDir)
 	}
 
-	cfg, err := LoadConfig(dataDir, "")
+	cfg, err := config.LoadConfig(dataDir, "")
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("config.LoadConfig: %v", err)
 	}
 	if cfg.Llama == nil || len(cfg.Llama.Models) == 0 {
 		t.Skip("no llama-server models configured")

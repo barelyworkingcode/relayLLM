@@ -1,4 +1,4 @@
-package main
+package config
 
 import "net/http"
 
@@ -49,14 +49,14 @@ func (ep OpenAIEndpoint) Transport() http.RoundTripper {
 }
 
 // VirtualTransport is Transport's counterpart for the virtual-model retry
-// path (see virtualDialTransport): same TLS pinning, but built from a
+// path (see VirtualDialTransport): same TLS pinning, but built from a
 // transport with a short dial timeout so a black-holed candidate still fails
 // over promptly even when pinned.
 func (ep OpenAIEndpoint) VirtualTransport() http.RoundTripper {
 	if ep.virtualTransport != nil {
 		return ep.virtualTransport
 	}
-	return virtualDialTransport
+	return VirtualDialTransport
 }
 
 // OpenAIConfig is the top-level config file structure.

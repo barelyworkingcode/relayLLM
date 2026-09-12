@@ -4,10 +4,10 @@ package main
 // managed-server subprocess. Specifically:
 //
 //   - buildServerArgs: CLI flag translation (bool, number, string) + profile FixedArgs injection
-//   - parseServerRawModels: alias extraction + modelDir path resolution
-//   - ServerConfig.FindByAlias / ServerManager.HasAlias: lookups
+//   - config.ParseServerRawModels: alias extraction + modelDir path resolution
+//   - config.ServerConfig.FindByAlias / ServerManager.HasAlias: lookups
 //   - allocatePort: returns a port that bind() will accept
-//   - expandHome: tilde substitution
+//   - config.ExpandHome: tilde substitution
 //
 // Process-lifecycle tests live in provider_llama_live_test.go (//go:build llm)
 // because they require a real model.
@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"relayllm/internal/config"
 	"slices"
 	"strconv"
 	"strings"
@@ -152,7 +153,7 @@ func TestBuildServerArgs_LlamaProfile_NoServeFlag(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseServerRawModels_ExtractsAliasAndArgs(t *testing.T) {
-	cfg := &ServerConfig{
+	cfg := &config.ServerConfig{
 		RawModels: []map[string]any{
 			{
 				"alias":    "qwen-8b",
@@ -162,7 +163,7 @@ func TestParseServerRawModels_ExtractsAliasAndArgs(t *testing.T) {
 			},
 		},
 	}
-	if err := parseServerRawModels(cfg, "test"); err != nil {
+	if err := config.ParseServerRawModels(cfg, "test"); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(cfg.Models) != 1 {
@@ -181,22 +182,22 @@ func TestParseServerRawModels_ExtractsAliasAndArgs(t *testing.T) {
 }
 
 func TestParseServerRawModels_RejectsMissingAlias(t *testing.T) {
-	cfg := &ServerConfig{
+	cfg := &config.ServerConfig{
 		RawModels: []map[string]any{{"model": "/x.gguf"}}, // no alias
 	}
-	if err := parseServerRawModels(cfg, "test"); err == nil {
+	if err := config.ParseServerRawModels(cfg, "test"); err == nil {
 		t.Error("expected error for missing alias, got nil")
 	}
 }
 
 func TestParseServerRawModels_ResolvesRelativeModelPathAgainstModelDir(t *testing.T) {
-	cfg := &ServerConfig{
+	cfg := &config.ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "x", "model": "unsloth/Qwen3-8B.gguf"},
 		},
 	}
-	if err := parseServerRawModels(cfg, "test"); err != nil {
+	if err := config.ParseServerRawModels(cfg, "test"); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	got := cfg.Models[0].Args["model"]
@@ -207,26 +208,26 @@ func TestParseServerRawModels_ResolvesRelativeModelPathAgainstModelDir(t *testin
 }
 
 func TestParseServerRawModels_AbsolutePathLeftAlone(t *testing.T) {
-	cfg := &ServerConfig{
+	cfg := &config.ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "x", "model": "/elsewhere/model.gguf"},
 		},
 	}
-	_ = parseServerRawModels(cfg, "test")
+	_ = config.ParseServerRawModels(cfg, "test")
 	if cfg.Models[0].Args["model"] != "/elsewhere/model.gguf" {
 		t.Errorf("absolute path should not be reanchored: %v", cfg.Models[0].Args["model"])
 	}
 }
 
 func TestParseServerRawModels_MmprojResolvedToo(t *testing.T) {
-	cfg := &ServerConfig{
+	cfg := &config.ServerConfig{
 		ModelDir: "/opt/models",
 		RawModels: []map[string]any{
 			{"alias": "vision", "model": "v/m.gguf", "mmproj": "v/mm.gguf"},
 		},
 	}
-	_ = parseServerRawModels(cfg, "test")
+	_ = config.ParseServerRawModels(cfg, "test")
 	if cfg.Models[0].Args["mmproj"] != "/opt/models/v/mm.gguf" {
 		t.Errorf("mmproj not resolved: %v", cfg.Models[0].Args["mmproj"])
 	}
@@ -237,15 +238,15 @@ func TestParseServerRawModels_MmprojResolvedToo(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServerConfig_FindByAlias_NilConfigSafe(t *testing.T) {
-	var cfg *ServerConfig
+	var cfg *config.ServerConfig
 	if cfg.FindByAlias("anything") != nil {
 		t.Error("nil-receiver FindByAlias should return nil, not panic")
 	}
 }
 
 func TestServerConfig_FindByAlias_HitAndMiss(t *testing.T) {
-	cfg := &ServerConfig{
-		Models: []ServerModelConfig{
+	cfg := &config.ServerConfig{
+		Models: []config.ServerModelConfig{
 			{Alias: "a"}, {Alias: "b"}, {Alias: "c"},
 		},
 	}
@@ -263,8 +264,8 @@ func TestServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
 		t.Error("nil-receiver HasAlias should return false")
 	}
 
-	cfg := &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
+	cfg := &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}
 	mgr := NewServerManager(llamaProfile, cfg, "")
 	if !mgr.HasAlias("qwen-8b") {
@@ -276,8 +277,8 @@ func TestServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
 }
 
 func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
-	cfg := &ServerConfig{
-		Models: []ServerModelConfig{{Alias: "m1"}, {Alias: "m2"}},
+	cfg := &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "m1"}, {Alias: "m2"}},
 	}
 	mgr := NewServerManager(llamaProfile, cfg, "")
 	got := mgr.Aliases()
@@ -291,7 +292,7 @@ func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 18000}, "")
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 18000}, "")
 	port, err := mgr.allocatePort()
 	if err != nil {
 		t.Fatalf("allocatePort: %v", err)
@@ -311,7 +312,7 @@ func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
 }
 
 func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 18100}, "")
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 18100}, "")
 	// Pre-bind 18100 to force the allocator to skip it.
 	blocker, err := net.Listen("tcp", "127.0.0.1:18100")
 	if err != nil {
@@ -334,7 +335,7 @@ func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
 // TestServerManager_AllocatePort_BoundedNotInfinite verifies a persistent
 // Listen failure returns an error instead of spinning forever holding m.mu.
 func TestServerManager_AllocatePort_BoundedNotInfinite(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &ServerConfig{BasePort: 70000}, "")
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 70000}, "")
 	done := make(chan struct{})
 	go func() {
 		_, _ = mgr.allocatePort()
@@ -452,127 +453,9 @@ func TestExpandHome(t *testing.T) {
 		"rel/path": "rel/path",
 	}
 	for in, want := range cases {
-		if got := expandHome(in); got != want {
-			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
+		if got := config.ExpandHome(in); got != want {
+			t.Errorf("config.ExpandHome(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// parseUnifiedConfig — mlx-serve section parsing
-// ---------------------------------------------------------------------------
-
-func TestParseUnifiedConfig_MlxServeSection(t *testing.T) {
-	data := []byte(`{
-		"mlx-serve": {
-			"modelDir": "/base",
-			"models": [
-				{"alias": "q4", "model": "sub/dir", "temp": 0.7}
-			]
-		}
-	}`)
-
-	cfg, err := parseUnifiedConfig(data, "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-
-	// Mlx section should be parsed.
-	if cfg.Mlx == nil {
-		t.Fatal("cfg.Mlx is nil")
-	}
-	if len(cfg.Mlx.Models) != 1 {
-		t.Fatalf("Mlx models count: got %d, want 1", len(cfg.Mlx.Models))
-	}
-	m := cfg.Mlx.Models[0]
-	if m.Alias != "q4" {
-		t.Errorf("alias: got %q, want q4", m.Alias)
-	}
-	// Relative model path should be resolved against modelDir.
-	if m.Args["model"] != "/base/sub/dir" {
-		t.Errorf("model: got %v, want /base/sub/dir", m.Args["model"])
-	}
-	// temp arg should be preserved as a float64 from JSON.
-	if v, ok := m.Args["temp"].(float64); !ok || v != 0.7 {
-		t.Errorf("temp: got %v, want 0.7", m.Args["temp"])
-	}
-
-	// Llama section absent → empty non-nil config.
-	if cfg.Llama == nil {
-		t.Fatal("cfg.Llama should be non-nil even when absent")
-	}
-	if len(cfg.Llama.Models) != 0 {
-		t.Errorf("Llama models count: got %d, want 0", len(cfg.Llama.Models))
-	}
-}
-
-func TestParseUnifiedConfig_VirtualLLMs(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{
-		"virtual-llms": {"models": [{
-			"name": "vCode",
-			"targets": [{"endpoint": "remote", "model": "code"}, {"alias": "local-code"}]
-		}]}
-	}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Virtual == nil || len(cfg.Virtual.Models) != 1 {
-		t.Fatalf("virtual models = %+v, want one", cfg.Virtual)
-	}
-	got := cfg.Virtual.Models[0]
-	if got.Name != "vCode" || len(got.Targets) != 2 || got.Targets[0].Endpoint != "remote" || got.Targets[1].Alias != "local-code" {
-		t.Errorf("virtual model = %+v, want vCode with ordered remote/local targets", got)
-	}
-}
-
-func TestParseUnifiedConfig_RouterSection(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{
-		"router": {"reasoningEffortMap": {"minimal": "none"}}
-	}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Router == nil {
-		t.Fatal("cfg.Router is nil")
-	}
-	if got := cfg.Router.ReasoningEffortMap["minimal"]; got != "none" {
-		t.Errorf("reasoningEffortMap[minimal] = %q, want %q", got, "none")
-	}
-}
-
-// Sibling of TestParseUnifiedConfig_RouterSection above, for the
-// chat_template_kwargs merge table — see RouterConfig.ReasoningEffortTemplateKwargs.
-func TestParseUnifiedConfig_RouterSection_ReasoningEffortTemplateKwargs(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{
-		"router": {"reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}}}
-	}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Router == nil {
-		t.Fatal("cfg.Router is nil")
-	}
-	got, ok := cfg.Router.ReasoningEffortTemplateKwargs["minimal"]["enable_thinking"]
-	if boolVal, isBool := got.(bool); !ok || !isBool || boolVal {
-		t.Errorf("reasoningEffortTemplateKwargs[minimal][enable_thinking] = %v (present=%v), want false", got, ok)
-	}
-}
-
-// Absent "router" section → empty, non-nil config, exactly like Virtual/Llama
-// above: callers dereference cfg.Router without a nil check.
-func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Router == nil {
-		t.Fatal("cfg.Router should be non-nil even when absent")
-	}
-	if len(cfg.Router.ReasoningEffortMap) != 0 {
-		t.Errorf("reasoningEffortMap = %v, want empty", cfg.Router.ReasoningEffortMap)
-	}
-	if len(cfg.Router.ReasoningEffortTemplateKwargs) != 0 {
-		t.Errorf("reasoningEffortTemplateKwargs = %v, want empty", cfg.Router.ReasoningEffortTemplateKwargs)
 	}
 }
 

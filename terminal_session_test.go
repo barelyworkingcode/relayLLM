@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"relayllm/internal/config"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ func TestTerminalSession_PTYExitAndLog(t *testing.T) {
 	logDir := filepath.Join(tmpDir, "terminal_logs")
 
 	store := NewTemplateStore(tmpDir)
-	if err := store.Load(map[string]TerminalTemplate{
+	if err := store.Load(map[string]config.TerminalTemplate{
 		"test-sh": {Name: "test-sh", Command: "/bin/sh"},
 	}); err != nil {
 		t.Fatalf("template load: %v", err)

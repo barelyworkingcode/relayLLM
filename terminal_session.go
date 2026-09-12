@@ -14,6 +14,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"relayllm/internal/config"
 	"relayllm/internal/sshhost"
 )
 
@@ -70,13 +71,13 @@ type TerminalSession struct {
 
 	// Pi project-overlay hooks (set by TerminalManager.SetPiOverlay). Only
 	// consulted when the template runs `pi`; non-pi templates ignore them.
-	piConfig        *PiConfig
+	piConfig        *config.PiConfig
 	overlayInputsFn func() PiOverlayInputs
 
 	// Idle timeout: kills terminal after no viewers for this duration.
 	idleTimeout time.Duration
 	idleCancel  chan struct{} // closed to cancel pending idle timer
-	idleOnce    sync.Once    // prevents double-close of idleCancel
+	idleOnce    sync.Once     // prevents double-close of idleCancel
 
 	onOutput func(terminalID string, data []byte)
 	onExit   func(terminalID string, exitCode int)
@@ -85,7 +86,7 @@ type TerminalSession struct {
 
 // Start spawns the PTY process for this terminal session, locally or (when
 // Host is set) over ssh on an SSH host (../relay/docs/ssh-hosts.md).
-func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
+func (s *TerminalSession) Start(tmpl config.TerminalTemplate) error {
 	var cmd *exec.Cmd
 	var err error
 	if s.Host != nil {
@@ -141,8 +142,8 @@ func (s *TerminalSession) Start(tmpl TerminalTemplate) error {
 
 // buildLocalCmd assembles the local exec.Cmd for a console (non-host)
 // terminal — the same construction Start always did before ssh hosts existed.
-func (s *TerminalSession) buildLocalCmd(tmpl TerminalTemplate) (*exec.Cmd, error) {
-	command := tmpl.ResolveCommand()
+func (s *TerminalSession) buildLocalCmd(tmpl config.TerminalTemplate) (*exec.Cmd, error) {
+	command := ResolveTemplateCommand(tmpl)
 
 	// Resolve relay-managed substitutions before building argv. If the
 	// template isn't relay-managed this is a no-op; if relay is unreachable
@@ -178,7 +179,7 @@ func (s *TerminalSession) buildLocalCmd(tmpl TerminalTemplate) (*exec.Cmd, error
 	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
 
 	// Pi project-overlay: when the template runs `pi` in a relay-managed
-	// project and the overlay is enabled in PiConfig, materialize
+	// project and the overlay is enabled in config.PiConfig, materialize
 	// <projectDir>/.pi/{models,settings,auth}.json and inject
 	// PI_CODING_AGENT_DIR. Same hook the LLM provider uses, so PTY and RPC
 	// pi sessions see the same models/skills inside the project.
@@ -196,7 +197,7 @@ func (s *TerminalSession) buildLocalCmd(tmpl TerminalTemplate) (*exec.Cmd, error
 // on a host terminal's SSH host under a local pty (../relay/docs/ssh-hosts.md).
 // No relay-managed substitution, project token, or pi overlay applies here —
 // v1 carries none of that onto a host (decision 6).
-func (s *TerminalSession) buildHostCmd(tmpl TerminalTemplate) (*exec.Cmd, error) {
+func (s *TerminalSession) buildHostCmd(tmpl config.TerminalTemplate) (*exec.Cmd, error) {
 	host := s.Host
 	if len(host.SSHArgv) == 0 {
 		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
@@ -495,10 +496,10 @@ func isPiCommand(command string) bool {
 }
 
 // resolveTemplateSubs is a thin adapter that builds a RelayManagedSpec from
-// a TerminalTemplate and delegates to the generic resolver. A non-empty
+// a config.TerminalTemplate and delegates to the generic resolver. A non-empty
 // projectID makes the terminal project-scoped (gets a token, regardless of the
 // template's UseRelayToken flag). See relay_spawn.go.
-func resolveTemplateSubs(tmpl TerminalTemplate, directory, projectID string) (SpawnSubs, error) {
+func resolveTemplateSubs(tmpl config.TerminalTemplate, directory, projectID string) (SpawnSubs, error) {
 	return RelayManagedSpec{
 		ProjectID:     projectID,
 		Directory:     directory,

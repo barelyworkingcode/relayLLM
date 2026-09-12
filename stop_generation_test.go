@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/config"
 	"strings"
 	"sync"
 	"testing"
@@ -14,7 +15,7 @@ import (
 // stopTestEndpoint is the OMLX server used for stop-generation tests.
 // The model is large enough to produce a slow, multi-chunk stream that
 // gives us a window to call StopGeneration mid-flight.
-var stopTestEndpoint = OpenAIEndpoint{
+var stopTestEndpoint = config.OpenAIEndpoint{
 	Name:    "omlx",
 	BaseURL: integOMLXURL,
 	APIKey:  integOMLXKey,
@@ -65,14 +66,14 @@ func skipIfOMLXUnavailable(t *testing.T) {
 type stopCapture struct {
 	mu sync.Mutex
 
-	text           strings.Builder
-	stats          SessionStats
-	gotComplete    chan struct{}
-	completeCount  int
-	gotError       string
-	stopped        bool   // set to true when StopGeneration is called
-	eventsAfterStopcnt int // events received after stop flag was set
-	textAfterStop  strings.Builder
+	text               strings.Builder
+	stats              SessionStats
+	gotComplete        chan struct{}
+	completeCount      int
+	gotError           string
+	stopped            bool // set to true when StopGeneration is called
+	eventsAfterStopcnt int  // events received after stop flag was set
+	textAfterStop      strings.Builder
 }
 
 func newStopCapture() *stopCapture {

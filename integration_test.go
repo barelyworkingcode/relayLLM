@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 )
@@ -28,8 +29,8 @@ func newTestServer(t *testing.T) *testServer {
 	sessionStore := NewSessionStore(dataDir + "/sessions")
 	perms := NewPermissionManager()
 	sessions := NewSessionManager(sessionStore, perms)
-	sessions.SetOpenAIConfig(&OpenAIConfig{
-		Endpoints: []OpenAIEndpoint{
+	sessions.SetOpenAIConfig(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
 			{Name: "omlx", BaseURL: integOMLXURL, APIKey: integOMLXKey},
 		},
 	})

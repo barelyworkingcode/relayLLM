@@ -53,8 +53,8 @@ func TestTerminalLogger_TailRotation(t *testing.T) {
 
 	// Fill head exactly, then write enough to the tail to force one rotation.
 	lg.Write(bytes.Repeat([]byte{'H'}, headCapBytes))
-	lg.Write(bytes.Repeat([]byte{'X'}, tailCapBytes))            // fills tail
-	lg.Write(bytes.Repeat([]byte{'Y'}, 1024))                    // triggers rotation
+	lg.Write(bytes.Repeat([]byte{'X'}, tailCapBytes)) // fills tail
+	lg.Write(bytes.Repeat([]byte{'Y'}, 1024))         // triggers rotation
 	lg.Close()
 
 	got, err := readTerminalLog(dir, id)
@@ -89,7 +89,7 @@ func TestReadTerminalLog_RejectsBadID(t *testing.T) {
 		"",
 		"../etc/passwd",
 		"not-a-uuid",
-		"11111111-2222-3333-4444-55555555555", // 35 chars
+		"11111111-2222-3333-4444-55555555555",  // 35 chars
 		"11111111x2222-3333-4444-555555555555", // wrong separator
 		"11111111-2222-3333-4444-5555555555gg", // non-hex
 	}

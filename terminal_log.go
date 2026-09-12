@@ -13,8 +13,8 @@ import (
 
 // terminalLogger writes a PTY's raw byte stream to two append-only files:
 //
-//   {dir}/{id}.head.log  — first 64KB, captured once and closed.
-//   {dir}/{id}.tail.log  — the rest, rotated when it exceeds tailCapBytes.
+//	{dir}/{id}.head.log  — first 64KB, captured once and closed.
+//	{dir}/{id}.tail.log  — the rest, rotated when it exceeds tailCapBytes.
 //
 // Rationale: ANSI streams establish state at the start (cursor home, screen
 // clear, SGR resets). Lopping bytes off the front would yield garbled colors
@@ -23,9 +23,9 @@ import (
 // When the tail rotates, a visible marker is written into the new file so a
 // reader can see that bytes were dropped.
 const (
-	headCapBytes      = 64 * 1024
-	tailCapBytes      = 1024*1024 - 64*1024 // ~960KB → ≤1MB total per session
-	truncationMarker  = "\r\n\x1b[2m[…log truncated…]\x1b[0m\r\n"
+	headCapBytes     = 64 * 1024
+	tailCapBytes     = 1024*1024 - 64*1024 // ~960KB → ≤1MB total per session
+	truncationMarker = "\r\n\x1b[2m[…log truncated…]\x1b[0m\r\n"
 )
 
 type terminalLogger struct {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"strings"
 	"sync"
 	"time"
@@ -36,11 +37,11 @@ type SessionManager struct {
 	hookSocket   string
 	hookToken    string
 	ollamaURL    string
-	openaiConfig *OpenAIConfig
+	openaiConfig *config.OpenAIConfig
 	llamaManager *ServerManager
 	mlxManager   *ServerManager
 	dataDir      string
-	piConfig     *PiConfig
+	piConfig     *config.PiConfig
 
 	routerPort    string
 	routerHosts   []string
@@ -111,7 +112,7 @@ func (m *SessionManager) SetOllamaURL(url string) {
 
 // SetOpenAIConfig injects the OpenAI-compatible endpoint config. Pass nil to
 // disable all OpenAI-compatible providers.
-func (m *SessionManager) SetOpenAIConfig(cfg *OpenAIConfig) {
+func (m *SessionManager) SetOpenAIConfig(cfg *config.OpenAIConfig) {
 	m.openaiConfig = cfg
 }
 
@@ -135,7 +136,7 @@ func (m *SessionManager) SetDataDir(dir string) {
 
 // SetPiConfig injects the pi.dev provider configuration (binary path,
 // extra args, …). Pass nil for defaults.
-func (m *SessionManager) SetPiConfig(cfg *PiConfig) {
+func (m *SessionManager) SetPiConfig(cfg *config.PiConfig) {
 	m.piConfig = cfg
 }
 
@@ -207,18 +208,18 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	return inputs
 }
 
-// llamaConfig returns the ServerConfig from the llama manager, or nil if no
+// llamaConfig returns the config.ServerConfig from the llama manager, or nil if no
 // manager is configured. Used by deriveProviderType for routing.
-func (m *SessionManager) llamaConfig() *ServerConfig {
+func (m *SessionManager) llamaConfig() *config.ServerConfig {
 	if m.llamaManager == nil {
 		return nil
 	}
 	return m.llamaManager.config
 }
 
-// mlxConfig returns the ServerConfig from the mlx manager, or nil if no
+// mlxConfig returns the config.ServerConfig from the mlx manager, or nil if no
 // manager is configured. Used by deriveProviderType for routing.
-func (m *SessionManager) mlxConfig() *ServerConfig {
+func (m *SessionManager) mlxConfig() *config.ServerConfig {
 	if m.mlxManager == nil {
 		return nil
 	}
@@ -338,7 +339,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 // provider. "llama/{alias}" and "mlx/{alias}" route to their respective
 // managed-server providers. Everything else falls through to Ollama's native
 // provider.
-func deriveProviderType(model string, openaiCfg *OpenAIConfig, llamaCfg, mlxCfg *ServerConfig) string {
+func deriveProviderType(model string, openaiCfg *config.OpenAIConfig, llamaCfg, mlxCfg *config.ServerConfig) string {
 	switch model {
 	case "haiku", "sonnet", "opus":
 		return "claude"
@@ -417,10 +418,10 @@ func (m *SessionManager) initProvider(session *Session) error {
 		// lease taken by each Acquire is what stops an eviction landing
 		// mid-generation. Launching eagerly at session start would also pin a
 		// model the user has not sent a message to yet.
-		resolve := func(ctx context.Context) (OpenAIEndpoint, func(), error) {
+		resolve := func(ctx context.Context) (config.OpenAIEndpoint, func(), error) {
 			endpoint, release, err := mgr.Acquire(ctx, modelID)
 			if err != nil {
-				return OpenAIEndpoint{}, nil, err
+				return config.OpenAIEndpoint{}, nil, err
 			}
 			return *endpoint, release, nil
 		}

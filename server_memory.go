@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"relayllm/internal/config"
 	"strings"
 )
 
@@ -41,7 +42,7 @@ const defaultMemoryHeadroomPercent = 10
 // Precedence: an explicit memoryGB in the model's config wins outright (and
 // skips headroom, since a hand-set number is taken at face value). Otherwise
 // the profile-specific estimator runs and headroom is applied.
-func estimateModelMemory(profile ServerProfile, cfg ServerModelConfig, headroomPercent int) int64 {
+func estimateModelMemory(profile config.ServerProfile, cfg config.ServerModelConfig, headroomPercent int) int64 {
 	if gb, ok := numericArg(cfg.Args, "memoryGB"); ok && gb > 0 {
 		return int64(gb * bytesPerGB)
 	}
@@ -76,7 +77,7 @@ func estimateModelMemory(profile ServerProfile, cfg ServerModelConfig, headroomP
 
 // estimateLlamaMemory sizes a GGUF model: the file itself plus its KV cache at
 // the configured ctx-size and cache quantization.
-func estimateLlamaMemory(modelPath string, cfg ServerModelConfig) (weights, kv int64, err error) {
+func estimateLlamaMemory(modelPath string, cfg config.ServerModelConfig) (weights, kv int64, err error) {
 	info, err := os.Stat(modelPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("stat model: %w", err)
@@ -155,7 +156,7 @@ type mlxConfig struct {
 
 // estimateMLXMemory sizes an MLX model directory: the sum of its weight shards
 // plus a KV cache derived from config.json. MLX serves at f16 KV.
-func estimateMLXMemory(modelDir string, cfg ServerModelConfig) (weights, kv int64, err error) {
+func estimateMLXMemory(modelDir string, cfg config.ServerModelConfig) (weights, kv int64, err error) {
 	info, err := os.Stat(modelDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("stat model dir: %w", err)
@@ -231,7 +232,7 @@ func estimateMLXMemory(modelDir string, cfg ServerModelConfig) (weights, kv int6
 //
 // Returns 0 when the metadata cannot be read; callers omit the field rather
 // than substituting a guess.
-func modelTrainedContext(profile ServerProfile, cfg ServerModelConfig) int64 {
+func modelTrainedContext(profile config.ServerProfile, cfg config.ServerModelConfig) int64 {
 	modelPath, _ := cfg.Args["model"].(string)
 	if modelPath == "" {
 		return 0

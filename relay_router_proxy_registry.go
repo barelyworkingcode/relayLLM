@@ -1,6 +1,7 @@
 package main
 
 import (
+	"relayllm/internal/config"
 	"relayllm/internal/types"
 
 	"context"
@@ -20,7 +21,7 @@ const proxyRegistryTTL = 15 * time.Second
 // upstream models (IDs carry no endpoint prefix); the router prefixes them
 // when emitting the aggregated /v1/models list.
 type EndpointStatus struct {
-	Endpoint    OpenAIEndpoint
+	Endpoint    config.OpenAIEndpoint
 	Online      bool
 	Models      []UpstreamModel
 	LastChecked time.Time
@@ -32,7 +33,7 @@ type EndpointStatus struct {
 // The first Snapshot() call after expiry triggers parallel probes; per-endpoint
 // single-flight keeps concurrent misses from stampeding the upstream.
 type ProxyRegistry struct {
-	cfg *OpenAIConfig
+	cfg *config.OpenAIConfig
 	ttl time.Duration
 
 	mu       sync.Mutex
@@ -43,7 +44,7 @@ type ProxyRegistry struct {
 // NewProxyRegistry returns a registry seeded with the given endpoint config.
 // Nil cfg or empty Endpoints yields a registry whose Snapshot returns nil and
 // LookupModel always misses — safe to instantiate unconditionally.
-func NewProxyRegistry(cfg *OpenAIConfig) *ProxyRegistry {
+func NewProxyRegistry(cfg *config.OpenAIConfig) *ProxyRegistry {
 	return &ProxyRegistry{
 		cfg:      cfg,
 		ttl:      proxyRegistryTTL,
@@ -67,7 +68,7 @@ func (r *ProxyRegistry) Snapshot(ctx context.Context) []EndpointStatus {
 			continue
 		}
 		wg.Add(1)
-		go func(ep OpenAIEndpoint) {
+		go func(ep config.OpenAIEndpoint) {
 			defer wg.Done()
 			r.probe(ctx, ep)
 		}(ep)
@@ -124,17 +125,17 @@ func (r *ProxyRegistry) SnapshotModels(ctx context.Context) []types.ModelInfo {
 // forwarded into a known-down upstream, and the TTL bounds how long that
 // lasts. Reuses the same single-flighted probe as Snapshot, so concurrent
 // callers for the same cold endpoint share one network round trip.
-func (r *ProxyRegistry) LookupModel(ctx context.Context, modelID string) (OpenAIEndpoint, string, bool) {
+func (r *ProxyRegistry) LookupModel(ctx context.Context, modelID string) (config.OpenAIEndpoint, string, bool) {
 	if r == nil {
-		return OpenAIEndpoint{}, "", false
+		return config.OpenAIEndpoint{}, "", false
 	}
 	name, upstreamID, ok := strings.Cut(modelID, "/")
 	if !ok || name == "" || upstreamID == "" {
-		return OpenAIEndpoint{}, "", false
+		return config.OpenAIEndpoint{}, "", false
 	}
 	ep := r.cfg.Find(name)
 	if ep == nil {
-		return OpenAIEndpoint{}, "", false
+		return config.OpenAIEndpoint{}, "", false
 	}
 	if !r.isFresh(name) {
 		r.probe(ctx, *ep)
@@ -143,7 +144,7 @@ func (r *ProxyRegistry) LookupModel(ctx context.Context, modelID string) (OpenAI
 	s, known := r.status[name]
 	r.mu.Unlock()
 	if !known || !s.Online {
-		return OpenAIEndpoint{}, "", false
+		return config.OpenAIEndpoint{}, "", false
 	}
 	return *ep, upstreamID, true
 }
@@ -160,7 +161,7 @@ func (r *ProxyRegistry) isFresh(name string) bool {
 
 // probe runs (or waits for) a single network probe of one endpoint and
 // writes the result back into the registry. Single-flight per endpoint.
-func (r *ProxyRegistry) probe(ctx context.Context, ep OpenAIEndpoint) {
+func (r *ProxyRegistry) probe(ctx context.Context, ep config.OpenAIEndpoint) {
 	r.mu.Lock()
 	if ch, ok := r.inflight[ep.Name]; ok {
 		r.mu.Unlock()

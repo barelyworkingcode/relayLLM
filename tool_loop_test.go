@@ -67,8 +67,8 @@ func (f *FakeChatTransport) QueueToolCallTurn(id, name string, args string) {
 	})
 }
 
-func (f *FakeChatTransport) Name() string                           { return "fake" }
-func (f *FakeChatTransport) Ping(ctx context.Context) error         { return nil }
+func (f *FakeChatTransport) Name() string                   { return "fake" }
+func (f *FakeChatTransport) Ping(ctx context.Context) error { return nil }
 func (f *FakeChatTransport) BuildMessages(_ string, msgs []Message) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
@@ -382,4 +382,3 @@ func TestToolLoop_MCPErrorPropagatesAsErrorResult(t *testing.T) {
 		t.Errorf("no tool_result event found for failed tool; events=%v", h.events.types())
 	}
 }
-

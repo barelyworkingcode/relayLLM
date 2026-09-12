@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"relayllm/internal/config"
 	"relayllm/internal/types"
 )
 
@@ -161,7 +162,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 // --- Models Route ---
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRegistry, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *PiConfig, piOverlay func() PiOverlayInputs) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRegistry, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *config.PiConfig, piOverlay func() PiOverlayInputs) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []types.ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},

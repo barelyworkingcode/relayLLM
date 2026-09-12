@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -117,15 +118,15 @@ func TestDetailedStatus_Shape(t *testing.T) {
 // and a recorded affinity pin must surface as pinnedConversations on the
 // pinned candidate — never on the other one.
 func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
-	onlineEP := OpenAIEndpoint{Name: "online", BaseURL: "http://127.0.0.1:1/v1"}
-	offlineEP := OpenAIEndpoint{Name: "offline", BaseURL: "http://127.0.0.1:1/v1"}
-	registry := NewProxyRegistry(&OpenAIConfig{Endpoints: []OpenAIEndpoint{onlineEP, offlineEP}})
+	onlineEP := config.OpenAIEndpoint{Name: "online", BaseURL: "http://127.0.0.1:1/v1"}
+	offlineEP := config.OpenAIEndpoint{Name: "offline", BaseURL: "http://127.0.0.1:1/v1"}
+	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{onlineEP, offlineEP}})
 	seedEndpointStatus(registry, onlineEP, true, UpstreamModel{ID: "m"})
 	seedEndpointStatus(registry, offlineEP, false)
 
-	virtual := &VirtualLLMConfig{Models: []VirtualLLM{{
+	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vMixed",
-		Targets: []VirtualLLMTarget{
+		Targets: []config.VirtualLLMTarget{
 			{Endpoint: "offline", Model: "m"},
 			{Endpoint: "online", Model: "m"},
 		},

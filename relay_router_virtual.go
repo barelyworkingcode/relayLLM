@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"time"
+
+	"relayllm/internal/config"
 )
 
 type resolvedVirtualTarget struct {
-	endpoint   OpenAIEndpoint
+	endpoint   config.OpenAIEndpoint
 	upstreamID string
 	manager    *ServerManager
 	alias      string
@@ -106,9 +106,9 @@ func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []reso
 // freshCount reports how many of the returned candidates came from pass one
 // — handleModels reports a virtual as "loaded" only when this is > 0, since
 // the remainder are last-resort attempts the router isn't confident about.
-func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, managers []*ServerManager) (candidates []resolvedVirtualTarget, freshCount int) {
-	online := make(map[string]OpenAIEndpoint)
-	configured := make(map[string]OpenAIEndpoint)
+func candidatesForVirtual(virtual *config.VirtualLLM, statuses []EndpointStatus, managers []*ServerManager) (candidates []resolvedVirtualTarget, freshCount int) {
+	online := make(map[string]config.OpenAIEndpoint)
+	configured := make(map[string]config.OpenAIEndpoint)
 	for _, status := range statuses {
 		configured[status.Endpoint.Name] = status.Endpoint
 		if status.Online {
@@ -143,7 +143,7 @@ func candidatesForVirtual(virtual *VirtualLLM, statuses []EndpointStatus, manage
 }
 
 // virtualTargetShape is what classifyVirtualTarget resolves a configured
-// VirtualLLMTarget to.
+// config.VirtualLLMTarget to.
 type virtualTargetShape int
 
 const (
@@ -165,7 +165,7 @@ const (
 // both are set, then alias. Anything else (endpoint without model and no
 // alias, model without endpoint or alias, nothing set at all) is
 // virtualTargetInvalid.
-func classifyVirtualTarget(target VirtualLLMTarget) virtualTargetShape {
+func classifyVirtualTarget(target config.VirtualLLMTarget) virtualTargetShape {
 	switch {
 	case target.Endpoint != "" && target.Model != "":
 		return virtualTargetEndpoint
@@ -366,7 +366,7 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVi
 			return nil, nil, fmt.Errorf("invalid managed server endpoint: %w", err)
 		}
 		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
-		proxy.Transport = virtualDialTransport
+		proxy.Transport = config.VirtualDialTransport
 		return proxy, rel, nil
 	}
 
@@ -427,17 +427,3 @@ func (v *virtualResponseRecorder) Flush() {
 // this and the outer meteredResponseWriter (status_metrics.go) it nests
 // inside during a proxied request.
 func (v *virtualResponseRecorder) Unwrap() http.ResponseWriter { return v.ResponseWriter }
-
-// virtualDialTransport is used only by the virtual-model retry path. A
-// target host that black-holes packets (rather than actively refusing the
-// connection — the real case this fixes, an unreachable LAN host) would
-// otherwise eat http.DefaultTransport's ~30s dial timeout per candidate
-// before failover even started trying the next one. ResponseHeaderTimeout is
-// deliberately left unset: generation can legitimately take a long time, and
-// a slow-but-alive backend must not be mistaken for a dead one. Direct
-// (non-virtual) routes keep plain http.DefaultTransport behavior.
-var virtualDialTransport http.RoundTripper = func() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.DialContext = (&net.Dialer{Timeout: 3 * time.Second}).DialContext
-	return t
-}()

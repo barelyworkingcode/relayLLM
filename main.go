@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"relayllm/internal/config"
 	"relayllm/internal/netutil"
 )
 
@@ -99,7 +100,7 @@ func main() {
 
 	// Load provider + pty config up front. Terminal subsystem needs the pty
 	// map to seed defaults before serving requests.
-	cfg, err := LoadConfig(*dataDir, *openaiConfigPath)
+	cfg, err := config.LoadConfig(*dataDir, *openaiConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
@@ -112,7 +113,7 @@ func main() {
 	// listener, it's a credential leaving the box in plaintext to anyone who
 	// can reach the port. Same fail-closed shape as the router-TLS-pair guard
 	// above.
-	if cfg.Router.forwardsClientCredentials() && *routerTLSCert == "" {
+	if cfg.Router.ForwardsClientCredentials() && *routerTLSCert == "" {
 		if host, ok := netutil.FirstNonLoopbackBind(routerBinds); ok {
 			slog.Error("relay router: router.anthropic or router.passthrough is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real credential on every request)",
 				"router-bind", host)
@@ -394,7 +395,7 @@ func main() {
 // are only addressable as "{endpoint}/{id}", so an endpoint name equal to a
 // bare alias collides with nothing — only an alias that itself contains "/"
 // can intercept an endpoint model id.
-func warnAliasShadowing(managers []*ServerManager, endpoints []OpenAIEndpoint) {
+func warnAliasShadowing(managers []*ServerManager, endpoints []config.OpenAIEndpoint) {
 	for i, mgr := range managers {
 		for _, alias := range mgr.Aliases() {
 			for _, earlier := range managers[:i] {
@@ -420,7 +421,7 @@ func warnAliasShadowing(managers []*ServerManager, endpoints []OpenAIEndpoint) {
 // misconfiguration that would otherwise only surface later as a confusing
 // runtime 503 (or, worse, silently route to the wrong place). Mirrors
 // warnAliasShadowing's dead-config detection, one layer up.
-func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager, endpoints []OpenAIEndpoint) {
+func warnVirtualModelConfig(virtual *config.VirtualLLMConfig, managers []*ServerManager, endpoints []config.OpenAIEndpoint) {
 	if virtual == nil {
 		return
 	}
@@ -510,7 +511,7 @@ func warnVirtualModelConfig(virtual *VirtualLLMConfig, managers []*ServerManager
 // endpoint-prefixed id silently shadows it on every route — not just
 // /v1/messages — which is worth flagging here rather than as a confusing
 // runtime surprise.
-func warnAnthropicModelMap(anthropic *AnthropicRouterConfig, managers []*ServerManager, endpoints []OpenAIEndpoint, virtual *VirtualLLMConfig) {
+func warnAnthropicModelMap(anthropic *config.AnthropicRouterConfig, managers []*ServerManager, endpoints []config.OpenAIEndpoint, virtual *config.VirtualLLMConfig) {
 	if anthropic == nil || len(anthropic.ModelMap) == 0 {
 		return
 	}

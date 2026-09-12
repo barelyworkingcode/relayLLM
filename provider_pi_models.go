@@ -1,6 +1,7 @@
 package main
 
 import (
+	"relayllm/internal/config"
 	"relayllm/internal/types"
 
 	"bufio"
@@ -42,7 +43,7 @@ var piModels piModelsCache
 //
 // If pi is not on PATH, returns nil — the /api/models endpoint silently
 // drops the pi section.
-func FetchPiModels(ctx context.Context, piCfg *PiConfig, inputs PiOverlayInputs) []types.ModelInfo {
+func FetchPiModels(ctx context.Context, piCfg *config.PiConfig, inputs PiOverlayInputs) []types.ModelInfo {
 	var configuredPath string
 	if piCfg != nil {
 		configuredPath = piCfg.BinaryPath
@@ -101,7 +102,7 @@ func fetchPiListModelsCached(ctx context.Context, configuredPath string) []types
 // applyPiOverlayToModelList drops providers the overlay excludes and appends
 // overlay-added providers (currently: relay-router proxy entries). Keeps
 // ordering stable so the UI picker stays predictable.
-func applyPiOverlayToModelList(raw []types.ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []types.ModelInfo {
+func applyPiOverlayToModelList(raw []types.ModelInfo, overlay config.PiProjectOverlay, inputs PiOverlayInputs) []types.ModelInfo {
 	excluded := make(map[string]struct{}, len(overlay.ExcludeProviders))
 	for _, name := range overlay.ExcludeProviders {
 		excluded[name] = struct{}{}

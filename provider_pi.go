@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"relayllm/internal/config"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,10 +31,10 @@ type PiProvider struct {
 	session *Session
 	handler EventHandler
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	mu     sync.Mutex // serializes writes to stdin
-	alive  atomic.Bool
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	mu    sync.Mutex // serializes writes to stdin
+	alive atomic.Bool
 
 	piSessionID   string // pi's own session UUID — persisted across restarts
 	provider      string // e.g., "anthropic"
@@ -55,7 +56,7 @@ type PiProvider struct {
 	// curated providers into the overlay's models.json. When overlay is
 	// disabled (Mode == "never" or unset) Start() skips materialization
 	// and pi falls back to its global ~/.pi/agent/ config as before.
-	piConfig      *PiConfig
+	piConfig      *config.PiConfig
 	overlayInputs PiOverlayInputs
 
 	// RPC request/response correlation. pi commands carry an optional `id`
@@ -103,7 +104,7 @@ type PiProvider struct {
 	firstTokenNano atomic.Int64
 }
 
-func NewPiProvider(session *Session, handler EventHandler, provider, modelID, dataDir string, cfg *PiConfig, overlayInputs PiOverlayInputs) *PiProvider {
+func NewPiProvider(session *Session, handler EventHandler, provider, modelID, dataDir string, cfg *config.PiConfig, overlayInputs PiOverlayInputs) *PiProvider {
 	p := &PiProvider{
 		session:       session,
 		handler:       handler,
@@ -494,8 +495,16 @@ func (p *PiProvider) endBlock(idx int) bool {
 	return true
 }
 
-func (p *PiProvider) appendText(s string)     { p.streamMu.Lock(); p.openText.WriteString(s); p.streamMu.Unlock() }
-func (p *PiProvider) appendToolArgs(s string) { p.streamMu.Lock(); p.openToolArgs.WriteString(s); p.streamMu.Unlock() }
+func (p *PiProvider) appendText(s string) {
+	p.streamMu.Lock()
+	p.openText.WriteString(s)
+	p.streamMu.Unlock()
+}
+func (p *PiProvider) appendToolArgs(s string) {
+	p.streamMu.Lock()
+	p.openToolArgs.WriteString(s)
+	p.streamMu.Unlock()
+}
 func (p *PiProvider) setOpenTool(id, name string) {
 	p.streamMu.Lock()
 	p.openToolID = id
@@ -854,10 +863,10 @@ func extractUsageFromAgentEnd(raw json.RawMessage) SessionStats {
 		Messages []struct {
 			Role  string `json:"role"`
 			Usage struct {
-				Input      int     `json:"input"`
-				Output     int     `json:"output"`
-				CacheRead  int     `json:"cacheRead"`
-				CacheWrite int     `json:"cacheWrite"`
+				Input      int `json:"input"`
+				Output     int `json:"output"`
+				CacheRead  int `json:"cacheRead"`
+				CacheWrite int `json:"cacheWrite"`
 				Cost       struct {
 					Total float64 `json:"total"`
 				} `json:"cost"`
@@ -1180,7 +1189,7 @@ func (p *PiProvider) RestoreState(state json.RawMessage) {
 
 // resolvePiPath finds the pi binary. Priority:
 //
-//  1. configured path (from PiConfig.BinaryPath), expanded for ~
+//  1. configured path (from config.PiConfig.BinaryPath), expanded for ~
 //  2. well-known install locations (~/.local/bin, npm globals, brew, /usr/local)
 //  3. PATH lookup
 //  4. literal "pi" — exec.LookPath defers the error to spawn time

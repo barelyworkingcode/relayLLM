@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/config"
 	"strings"
 	"sync"
 	"testing"
@@ -84,7 +85,7 @@ func (c *capturingHandler) handle(eventType string, data json.RawMessage) {
 // It pings /models to decide whether the server is available, picks a model
 // (preferring names matching modelFilter), and drives a short chat turn
 // through BaseChatProvider end-to-end.
-func runChatRoundtrip(t *testing.T, endpoint OpenAIEndpoint, modelFilter string) {
+func runChatRoundtrip(t *testing.T, endpoint config.OpenAIEndpoint, modelFilter string) {
 	t.Helper()
 
 	// Pick a model from /v1/models, using a short timeout so an offline
@@ -194,7 +195,7 @@ func TestIntegrationOpenAI_Ollama(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
-	runChatRoundtrip(t, OpenAIEndpoint{
+	runChatRoundtrip(t, config.OpenAIEndpoint{
 		Name:    "ollama-oai",
 		BaseURL: integOllamaURL,
 	}, "qwen")
@@ -204,7 +205,7 @@ func TestIntegrationOpenAI_LMStudio(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
-	runChatRoundtrip(t, OpenAIEndpoint{
+	runChatRoundtrip(t, config.OpenAIEndpoint{
 		Name:    "lmstudio",
 		BaseURL: integLMStudioURL,
 		APIKey:  integLMStudioKey,
@@ -215,7 +216,7 @@ func TestIntegrationOpenAI_OMLX(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
-	runChatRoundtrip(t, OpenAIEndpoint{
+	runChatRoundtrip(t, config.OpenAIEndpoint{
 		Name:    "omlx",
 		BaseURL: integOMLXURL,
 		APIKey:  integOMLXKey,
