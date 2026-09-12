@@ -15,8 +15,8 @@ func (s *SessionStore) Save(session *Session) error {
 		return err
 	}
 
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	session.Lock()
+	defer session.Unlock()
 
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {

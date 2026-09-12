@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	clk "relayllm/internal/clock"
+	"relayllm/internal/types"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +23,7 @@ import (
 
 // ServerProfile parameterizes ServerManager for a specific managed-server
 // binary. Kind doubles as the model routing prefix ("{kind}/{alias}"), the
-// ModelInfo.Provider string, and the log/error prefix.
+// types.ModelInfo.Provider string, and the log/error prefix.
 type ServerProfile struct {
 	Kind            string   // "llama" | "mlx"
 	DefaultBinary   string   // PATH fallback when config/flag give no path
@@ -745,15 +746,15 @@ func (m *ServerManager) ReapIdle() {
 	}
 }
 
-// ListModels returns ModelInfo entries for all configured models.
+// ListModels returns types.ModelInfo entries for all configured models.
 // Attachment support is per-model: present only when the user configured
 // an mmproj (multimodal projector) for the underlying server.
-func (m *ServerManager) ListModels() []ModelInfo {
-	models := make([]ModelInfo, len(m.config.Models))
+func (m *ServerManager) ListModels() []types.ModelInfo {
+	models := make([]types.ModelInfo, len(m.config.Models))
 	for i, cfg := range m.config.Models {
 		value := m.profile.Kind + "/" + cfg.Alias
 		_, hasMmproj := cfg.Args["mmproj"]
-		models[i] = ModelInfo{
+		models[i] = types.ModelInfo{
 			Label:               value,
 			Value:               value,
 			Group:               m.profile.Group,

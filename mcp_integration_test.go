@@ -106,7 +106,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 	}
 
 	// Verify tool messages exist in session history.
-	session.mu.Lock()
+	session.Lock()
 	msgCount := len(session.Messages)
 	hasToolMsg := false
 	hasToolCallAssistant := false
@@ -118,7 +118,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 			hasToolCallAssistant = true
 		}
 	}
-	session.mu.Unlock()
+	session.Unlock()
 
 	t.Logf("Messages in history: %d (hasToolMsg=%v hasToolCallAssistant=%v)", msgCount, hasToolMsg, hasToolCallAssistant)
 

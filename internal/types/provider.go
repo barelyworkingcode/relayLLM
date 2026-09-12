@@ -1,4 +1,4 @@
-package main
+package types
 
 import (
 	"encoding/json"
@@ -70,7 +70,7 @@ type SessionStats struct {
 // extractTextContent extracts plain text from a Message's JSON content.
 // User messages may be stored as a JSON string or raw text.
 // Assistant messages are stored as [{type: "text", text: "..."}] blocks.
-func extractTextContent(msg Message) string {
+func ExtractTextContent(msg Message) string {
 	if msg.Role == "user" || msg.Role == "tool" {
 		var text string
 		if json.Unmarshal(msg.Content, &text) == nil {
@@ -78,7 +78,7 @@ func extractTextContent(msg Message) string {
 		}
 		return string(msg.Content)
 	}
-	return flattenTextBlocks(msg.Content)
+	return FlattenTextBlocks(msg.Content)
 }
 
 // flattenTextBlocks reduces polymorphic content (a JSON string OR an array of
@@ -88,7 +88,7 @@ func extractTextContent(msg Message) string {
 // Empty input returns "". Input that decodes as neither a string nor the
 // block array falls back to the raw bytes — preserves diagnostics for
 // inputs the translator didn't anticipate.
-func flattenTextBlocks(raw json.RawMessage) string {
+func FlattenTextBlocks(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}

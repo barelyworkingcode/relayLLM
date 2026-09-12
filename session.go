@@ -16,90 +16,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Session represents an active LLM conversation.
-type Session struct {
-	ID            string          `json:"sessionId"`
-	ProjectID     string          `json:"projectId"`
-	Name          string          `json:"name"`
-	Folder        string          `json:"folder,omitempty"` // UI-only grouping label within a project; empty = ungrouped
-	Directory     string          `json:"directory"`
-	Model         string          `json:"model"`
-	ProviderType  string          `json:"providerType"`
-	Settings      json.RawMessage `json:"settings,omitempty"`
-	CreatedAt     string          `json:"createdAt"`
-	Messages      []Message       `json:"messages"`
-	Stats         SessionStats    `json:"stats"`
-	ProviderState json.RawMessage `json:"providerState,omitempty"`
-
-	SystemPrompt  string `json:"systemPrompt,omitempty"`
-	Headless      bool   `json:"headless,omitempty"`
-	ThinkingLevel string `json:"thinkingLevel,omitempty"` // pi-only: off/minimal/low/medium/high/xhigh
-	// Project-scoped MCP tokens are NOT stored on the session. Relay is the
-	// sole token authority: providers resolve the token just-in-time from
-	// relay's bridge by ProjectID at spawn time (see resolveProjectToken).
-
-	// Per-session Claude permission policy (parsed from Settings at create
-	// time). PermissionMode is the live mode — may be mutated by
-	// SetPermissionMode for mid-session toggle. Policy is the per-project
-	// allow/deny rule set forwarded by Eve.
-	PermissionMode string            `json:"permissionMode,omitempty"`
-	Policy         *PermissionPolicy `json:"policy,omitempty"`
-
-	// Host is non-nil when this session's project lives on an SSH host
-	// (../relay/docs/ssh-hosts.md) rather than the console. Resolved via
-	// relay's bridge at create time and re-resolved at each provider spawn;
-	// the stored value is the fallback when the bridge is unavailable, so a
-	// persisted host session survives a relayLLM restart.
-	Host *HostSpec `json:"host,omitempty"`
-
-	provider   Provider
-	processing bool
-	mu         sync.Mutex
-}
-
-// IsProcessing reports whether this session currently has a generation in
-// flight. Used by GET /api/status/detailed to render a chat row's state
-// (processing/idle) — see CLAUDE.md's Relay-router section, judgment call J2,
-// for why this is the only signal a session row gets: there is no
-// per-session last-event timestamp, so a session can never be flagged
-// "stalled" the way a proxy connection can.
-func (s *Session) IsProcessing() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.processing
-}
-
-// getHost returns Host, safe for concurrent use (Host is refreshed from a
-// provider's spawn goroutine while other goroutines — WS join, ListSessions —
-// may read it concurrently).
-func (s *Session) getHost() *HostSpec {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Host
-}
-
-// setHost sets Host, safe for concurrent use.
-func (s *Session) setHost(h *HostSpec) {
-	s.mu.Lock()
-	s.Host = h
-	s.mu.Unlock()
-}
-
-// getProvider returns the current provider, safe for concurrent use.
-func (s *Session) getProvider() Provider {
-	s.mu.Lock()
-	p := s.provider
-	s.mu.Unlock()
-	return p
-}
-
-// setProvider sets the provider, safe for concurrent use.
-func (s *Session) setProvider(p Provider) {
-	s.mu.Lock()
-	s.provider = p
-	s.mu.Unlock()
-}
-
 // SessionStore handles session persistence to disk.
 type SessionStore struct {
 	dir string
@@ -107,11 +23,6 @@ type SessionStore struct {
 
 func NewSessionStore(dir string) *SessionStore {
 	return &SessionStore{dir: dir}
-}
-
-// EventSink receives events from sessions and routes them to clients.
-type EventSink interface {
-	SendToSession(sessionID string, msg map[string]interface{})
 }
 
 // SessionManager manages all active sessions.
@@ -460,7 +371,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if err != nil {
 			return err
 		}
-		session.setProvider(provider)
+		session.SetProvider(provider)
 		return provider.Start()
 	}
 
@@ -544,7 +455,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		// control_request stream instead — see provider_claude.go) and its
 		// directory lives on another machine, so writing .claude/settings.local.json
 		// here would both be pointless and create a bogus local directory tree.
-		if session.getHost() == nil {
+		if session.GetHost() == nil {
 			if err := m.ensureHookConfig(session.Directory); err != nil {
 				slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 			}
@@ -564,7 +475,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 		}
 	}
 
-	session.setProvider(provider)
+	session.SetProvider(provider)
 	return provider.Start()
 }
 
@@ -658,7 +569,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		if err := json.Unmarshal(data, &stats); err != nil {
 			return
 		}
-		session.mu.Lock()
+		session.Lock()
 		session.Stats.InputTokens = stats.InputTokens
 		session.Stats.OutputTokens = stats.OutputTokens
 		session.Stats.CacheReadTokens = stats.CacheReadTokens
@@ -670,7 +581,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.Stats.EvalDurationMs = stats.EvalDurationMs
 		session.Stats.PromptEvalDurationMs = stats.PromptEvalDurationMs
 		currentStats := session.Stats
-		session.mu.Unlock()
+		session.Unlock()
 
 		msg = map[string]interface{}{
 			"type":      HandlerStatsUpdate,
@@ -679,9 +590,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		}
 
 	case HandlerMessageComplete:
-		session.mu.Lock()
-		session.processing = false
-		session.mu.Unlock()
+		session.SetProcessing(false)
 
 		// Contract: all providers persist their own assistant turns (chat-base
 		// via turnStreamState.blocks, pi via allBlocks, Claude via its CLI's
@@ -695,9 +604,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		m.saveSession(session)
 
 	case "process_exited":
-		session.mu.Lock()
-		session.processing = false
-		session.mu.Unlock()
+		session.SetProcessing(false)
 
 		msg = map[string]interface{}{
 			"type":      WSMsgProcessExited,
@@ -714,9 +621,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		}
 
 	case "error":
-		session.mu.Lock()
-		session.processing = false
-		session.mu.Unlock()
+		session.SetProcessing(false)
 
 		msg = map[string]interface{}{
 			"type":      WSMsgError,
@@ -747,34 +652,28 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	session.mu.Lock()
-	if session.processing {
-		session.mu.Unlock()
+	if !session.TryStartProcessing() {
 		return fmt.Errorf("session is already processing a message")
 	}
-	session.processing = true
-	session.mu.Unlock()
 
-	provider := session.getProvider()
+	provider := session.Provider()
 	if provider == nil || !provider.Alive() {
 		if err := m.initProvider(session); err != nil {
-			session.mu.Lock()
-			session.processing = false
-			session.mu.Unlock()
+			session.SetProcessing(false)
 			return fmt.Errorf("failed to restart provider: %w", err)
 		}
-		provider = session.getProvider()
+		provider = session.Provider()
 	}
 
 	contentJSON, _ := json.Marshal(text)
-	session.mu.Lock()
+	session.Lock()
 	session.Messages = append(session.Messages, Message{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Role:      "user",
 		Content:   contentJSON,
 		Files:     files,
 	})
-	session.mu.Unlock()
+	session.Unlock()
 
 	// Broadcast user message to all viewers so passive windows can render it
 	// and transition to the "generating" UI state before the first LLM token.
@@ -787,17 +686,17 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	}
 
 	if err := provider.SendMessage(text, files); err != nil {
-		session.mu.Lock()
-		session.processing = false
+		session.SetProcessing(false)
 		// Roll back the just-appended user message when it carried attachments
 		// and the provider rejected it synchronously — otherwise a rejected
 		// image stays in history and poisons every subsequent request.
 		if len(files) > 0 {
+			session.Lock()
 			if n := len(session.Messages); n > 0 && session.Messages[n-1].Role == "user" {
 				session.Messages = session.Messages[:n-1]
 			}
+			session.Unlock()
 		}
-		session.mu.Unlock()
 		return err
 	}
 	return nil
@@ -813,7 +712,7 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if provider := session.getProvider(); provider != nil {
+	if provider := session.Provider(); provider != nil {
 		provider.StopGeneration()
 	}
 
@@ -903,18 +802,18 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 		if s.Headless {
 			continue
 		}
-		provider := s.getProvider()
+		provider := s.Provider()
 
 		// Messages is mutated concurrently by the provider's tool loop
 		// (see copyHistory in provider_chat_base.go), so it must only be
 		// read under the session lock.
-		s.mu.Lock()
+		s.Lock()
 		createdAt := s.CreatedAt
 		messageCount := len(s.Messages)
 		lastMsgAt := lastMessageAt(s.Messages)
 		preview := sessionPreview(s.Messages)
 		host := s.Host
-		s.mu.Unlock()
+		s.Unlock()
 
 		list = append(list, map[string]interface{}{
 			"id":            s.ID,
@@ -1010,7 +909,7 @@ func (m *SessionManager) EndSession(id string) {
 	delete(m.sessions, id)
 	m.mu.Unlock()
 
-	if provider := session.getProvider(); provider != nil {
+	if provider := session.Provider(); provider != nil {
 		provider.Kill()
 	}
 
@@ -1028,7 +927,7 @@ func (m *SessionManager) DeleteSession(id string) {
 	m.mu.Unlock()
 
 	if ok {
-		if provider := session.getProvider(); provider != nil {
+		if provider := session.Provider(); provider != nil {
 			if err := provider.DeleteSession(); err != nil {
 				slog.Warn("failed to delete provider session data", "id", id, "error", err)
 			}
@@ -1055,14 +954,13 @@ func (m *SessionManager) ClearSession(id string) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	session.mu.Lock()
-	provider := session.provider
-	session.provider = nil
+	provider := session.SwapProvider(nil)
+	session.Lock()
 	session.Messages = []Message{}
 	session.Stats = SessionStats{}
 	session.ProviderState = nil
-	session.processing = false
-	session.mu.Unlock()
+	session.Unlock()
+	session.SetProcessing(false)
 
 	if provider != nil {
 		provider.Kill()
@@ -1106,7 +1004,7 @@ func (m *SessionManager) SetPiModel(id, upstreamProvider, modelID string) error 
 	if session.ProviderType != "pi" {
 		return fmt.Errorf("model switch is only supported for pi sessions")
 	}
-	pi, ok := session.getProvider().(*PiProvider)
+	pi, ok := session.Provider().(*PiProvider)
 	if !ok {
 		return fmt.Errorf("session has no live pi provider")
 	}
@@ -1133,7 +1031,7 @@ func (m *SessionManager) SetPiThinkingLevel(id, level string) error {
 	if session.ProviderType != "pi" {
 		return fmt.Errorf("thinking level is only supported for pi sessions")
 	}
-	pi, ok := session.getProvider().(*PiProvider)
+	pi, ok := session.Provider().(*PiProvider)
 	if !ok {
 		return fmt.Errorf("session has no live pi provider")
 	}
@@ -1161,9 +1059,9 @@ func (m *SessionManager) RenameSession(id, name string) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	session.mu.Lock()
+	session.Lock()
 	session.Name = name
-	session.mu.Unlock()
+	session.Unlock()
 
 	m.saveSession(session)
 
@@ -1189,9 +1087,9 @@ func (m *SessionManager) SetSessionFolder(id, folder string) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	session.mu.Lock()
+	session.Lock()
 	session.Folder = folder
-	session.mu.Unlock()
+	session.Unlock()
 
 	m.saveSession(session)
 
@@ -1216,7 +1114,7 @@ func (m *SessionManager) StopAll() {
 	m.mu.Unlock()
 
 	for _, s := range sessions {
-		if provider := s.getProvider(); provider != nil {
+		if provider := s.Provider(); provider != nil {
 			provider.Kill()
 		}
 		m.saveSession(s)
@@ -1224,11 +1122,12 @@ func (m *SessionManager) StopAll() {
 }
 
 func (m *SessionManager) saveSession(session *Session) {
-	session.mu.Lock()
-	if session.provider != nil {
-		session.ProviderState = session.provider.GetState()
+	if provider := session.Provider(); provider != nil {
+		state := provider.GetState()
+		session.Lock()
+		session.ProviderState = state
+		session.Unlock()
 	}
-	session.mu.Unlock()
 
 	if err := m.sessionStore.Save(session); err != nil {
 		slog.Error("failed to save session", "id", session.ID, "error", err)

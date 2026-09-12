@@ -126,8 +126,8 @@ func TestWS_RenameSession_UpdatesName(t *testing.T) {
 		}
 		// RenameSession mutates Name under session.mu on the WS handler
 		// goroutine; read it under the same lock so -race stays clean.
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
+		sess.Lock()
+		defer sess.Unlock()
 		return sess.Name == "renamed"
 	})
 }
@@ -171,16 +171,16 @@ func TestWS_ClearSession_WipesHistory(t *testing.T) {
 
 	// Manually inject a message to clear.
 	sess, _ := srv.Sessions.GetSession(sessionID)
-	sess.mu.Lock()
+	sess.Lock()
 	sess.Messages = []Message{{Role: "user", Content: json.RawMessage(`"hi"`)}}
-	sess.mu.Unlock()
+	sess.Unlock()
 
 	conn := srv.DialWS()
 	WSSend(t, conn, map[string]interface{}{"type": "clear_session", "sessionId": sessionID})
 
 	waitFor(t, 1*time.Second, func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
+		sess.Lock()
+		defer sess.Unlock()
 		return len(sess.Messages) == 0
 	})
 }

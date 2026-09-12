@@ -1,6 +1,8 @@
 package main
 
 import (
+	"relayllm/internal/types"
+
 	"bufio"
 	"bytes"
 	"context"
@@ -16,7 +18,7 @@ const piModelsCacheTTL = 5 * time.Minute
 
 type piModelsCache struct {
 	mu        sync.Mutex
-	models    []ModelInfo
+	models    []types.ModelInfo
 	expiresAt time.Time
 	binPath   string
 }
@@ -24,7 +26,7 @@ type piModelsCache struct {
 var piModels piModelsCache
 
 // FetchPiModels returns the list of models offered by the pi provider,
-// wrapped as relayLLM ModelInfo entries with the `pi/<provider>/<modelId>`
+// wrapped as relayLLM types.ModelInfo entries with the `pi/<provider>/<modelId>`
 // value convention.
 //
 // When the project overlay is enabled, the listing reflects what pi will
@@ -40,7 +42,7 @@ var piModels piModelsCache
 //
 // If pi is not on PATH, returns nil — the /api/models endpoint silently
 // drops the pi section.
-func FetchPiModels(ctx context.Context, piCfg *PiConfig, inputs PiOverlayInputs) []ModelInfo {
+func FetchPiModels(ctx context.Context, piCfg *PiConfig, inputs PiOverlayInputs) []types.ModelInfo {
 	var configuredPath string
 	if piCfg != nil {
 		configuredPath = piCfg.BinaryPath
@@ -54,9 +56,9 @@ func FetchPiModels(ctx context.Context, piCfg *PiConfig, inputs PiOverlayInputs)
 }
 
 // fetchPiListModelsCached runs `pi --list-models` (with TTL caching) and
-// parses the output into ModelInfo entries. Returns nil if pi is missing or
+// parses the output into types.ModelInfo entries. Returns nil if pi is missing or
 // the exec fails — callers degrade gracefully.
-func fetchPiListModelsCached(ctx context.Context, configuredPath string) []ModelInfo {
+func fetchPiListModelsCached(ctx context.Context, configuredPath string) []types.ModelInfo {
 	piPath := resolvePiPath(configuredPath)
 
 	piModels.mu.Lock()
@@ -99,13 +101,13 @@ func fetchPiListModelsCached(ctx context.Context, configuredPath string) []Model
 // applyPiOverlayToModelList drops providers the overlay excludes and appends
 // overlay-added providers (currently: relay-router proxy entries). Keeps
 // ordering stable so the UI picker stays predictable.
-func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []ModelInfo {
+func applyPiOverlayToModelList(raw []types.ModelInfo, overlay PiProjectOverlay, inputs PiOverlayInputs) []types.ModelInfo {
 	excluded := make(map[string]struct{}, len(overlay.ExcludeProviders))
 	for _, name := range overlay.ExcludeProviders {
 		excluded[name] = struct{}{}
 	}
 
-	out := make([]ModelInfo, 0, len(raw)+len(inputs.ServerModels))
+	out := make([]types.ModelInfo, 0, len(raw)+len(inputs.ServerModels))
 	for _, m := range raw {
 		if provider := piProviderFromValue(m.Value); provider != "" {
 			if _, drop := excluded[provider]; drop {
@@ -122,7 +124,7 @@ func applyPiOverlayToModelList(raw []ModelInfo, overlay PiProjectOverlay, inputs
 	if inputs.RouterPort != "" {
 		for _, sm := range inputs.ServerModels {
 			value := piModelString(piRelayRouterProvider, sm.Alias)
-			out = append(out, ModelInfo{
+			out = append(out, types.ModelInfo{
 				Label:    value,
 				Value:    value,
 				Group:    "Pi · " + piRelayRouterProvider,
@@ -159,9 +161,9 @@ func piProviderFromValue(value string) string {
 // name, not three. Instead we read the header row, locate the byte offsets
 // of `provider`, `model`, and `context`, and slice each subsequent row
 // against those offsets.
-func parsePiListModels(raw []byte) []ModelInfo {
+func parsePiListModels(raw []byte) []types.ModelInfo {
 	seen := make(map[string]bool)
-	var models []ModelInfo
+	var models []types.ModelInfo
 
 	var providerStart, modelStart, modelEnd int
 	headerParsed := false
@@ -204,7 +206,7 @@ func parsePiListModels(raw []byte) []ModelInfo {
 			continue
 		}
 		seen[value] = true
-		models = append(models, ModelInfo{
+		models = append(models, types.ModelInfo{
 			Label:    value,
 			Value:    value,
 			Group:    "Pi · " + provider,

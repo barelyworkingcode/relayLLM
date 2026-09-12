@@ -279,11 +279,11 @@ func TestStopGeneration_NoBleed(t *testing.T) {
 	prompt1 := "Write a very long essay about elephants. " +
 		"Mention the word ELEPHANT in every sentence. Make it at least 2000 words."
 	userContent1, _ := json.Marshal(prompt1)
-	session.mu.Lock()
+	session.Lock()
 	session.Messages = append(session.Messages, Message{
 		Timestamp: timeNow(), Role: "user", Content: userContent1,
 	})
-	session.mu.Unlock()
+	session.Unlock()
 
 	if err := provider.SendMessage(prompt1, nil); err != nil {
 		t.Fatalf("send turn 1: %v", err)
@@ -322,11 +322,11 @@ gotTurn1:
 
 	prompt2 := "What is 2 + 2? Reply with ONLY the number, nothing else."
 	userContent2, _ := json.Marshal(prompt2)
-	session.mu.Lock()
+	session.Lock()
 	session.Messages = append(session.Messages, Message{
 		Timestamp: timeNow(), Role: "user", Content: userContent2,
 	})
-	session.mu.Unlock()
+	session.Unlock()
 
 	if err := provider.SendMessage(prompt2, nil); err != nil {
 		t.Fatalf("send turn 2: %v", err)

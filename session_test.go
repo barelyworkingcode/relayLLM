@@ -49,9 +49,9 @@ func TestSession_PersistsToDiskOnEnd(t *testing.T) {
 	sess := mustCreateSession(t, mgr, "to-persist")
 
 	// Inject one message so we can prove it survives the round-trip.
-	sess.mu.Lock()
+	sess.Lock()
 	sess.Messages = []Message{{Role: "user", Content: json.RawMessage(`"hello"`)}}
-	sess.mu.Unlock()
+	sess.Unlock()
 
 	mgr.EndSession(sess.ID)
 
@@ -114,18 +114,18 @@ func TestSession_DeleteSession_RemovesFromMemoryAndDisk(t *testing.T) {
 func TestSession_ClearSession_WipesHistory_KeepsSession(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	sess := mustCreateSession(t, mgr, "to-clear")
-	sess.mu.Lock()
+	sess.Lock()
 	sess.Messages = []Message{
 		{Role: "user", Content: json.RawMessage(`"a"`)},
 		{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"b"}]`)},
 	}
-	sess.mu.Unlock()
+	sess.Unlock()
 
 	if err := mgr.ClearSession(sess.ID); err != nil {
 		t.Fatalf("ClearSession: %v", err)
 	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
+	sess.Lock()
+	defer sess.Unlock()
 	if len(sess.Messages) != 0 {
 		t.Errorf("Messages: got %d, want 0", len(sess.Messages))
 	}
@@ -216,9 +216,9 @@ func TestSession_ListSessions_ExcludesHeadless(t *testing.T) {
 
 	visible := mustCreateSession(t, mgr, "visible")
 	headless := mustCreateSession(t, mgr, "headless")
-	headless.mu.Lock()
+	headless.Lock()
 	headless.Headless = true
-	headless.mu.Unlock()
+	headless.Unlock()
 
 	list := mgr.ListSessions()
 	foundVisible, foundHeadless := false, false
@@ -572,9 +572,9 @@ func TestSendMessageSync_TimeoutStopsGeneration(t *testing.T) {
 		t.Fatal("expected a timeout error")
 	}
 
-	fake, ok := sess.getProvider().(*FakeProvider)
+	fake, ok := sess.Provider().(*FakeProvider)
 	if !ok {
-		t.Fatalf("provider = %T, want *FakeProvider", sess.getProvider())
+		t.Fatalf("provider = %T, want *FakeProvider", sess.Provider())
 	}
 	if !fake.Stopped() {
 		t.Error("SendMessageSync timeout must call StopGeneration so the lease and session.processing don't leak forever")

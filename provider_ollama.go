@@ -1,6 +1,8 @@
 package main
 
 import (
+	"relayllm/internal/types"
+
 	"bufio"
 	"bytes"
 	"context"
@@ -392,8 +394,8 @@ func (t *OllamaChatTransport) fetchModelContextLength(ctx context.Context) int {
 }
 
 // fetchOllamaModels queries Ollama's /api/tags endpoint and returns available
-// models in ModelInfo form for the /api/models aggregation route.
-func fetchOllamaModels(baseURL string) []ModelInfo {
+// models in types.ModelInfo form for the /api/models aggregation route.
+func fetchOllamaModels(baseURL string) []types.ModelInfo {
 	client := &http.Client{Timeout: 3 * time.Second}
 
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/tags", nil)
@@ -422,9 +424,9 @@ func fetchOllamaModels(baseURL string) []ModelInfo {
 		return nil
 	}
 
-	models := make([]ModelInfo, 0, len(result.Models))
+	models := make([]types.ModelInfo, 0, len(result.Models))
 	for _, m := range result.Models {
-		models = append(models, ModelInfo{
+		models = append(models, types.ModelInfo{
 			Label:    m.Name,
 			Value:    m.Name,
 			Group:    "Ollama",

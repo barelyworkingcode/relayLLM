@@ -413,7 +413,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		claudeSessionID = ps.ClaudeSessionID
 	}
 	if claudeSessionID != "" {
-		if h, err := readClaudeHistory(session.Directory, session.getHost(), claudeSessionID); err == nil && len(h) > 0 {
+		if h, err := readClaudeHistory(session.Directory, session.GetHost(), claudeSessionID); err == nil && len(h) > 0 {
 			history = h
 		} else if err != nil {
 			slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
@@ -421,14 +421,14 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	}
 	// Fall back to session.Messages if Claude history unavailable.
 	if history == nil {
-		session.mu.Lock()
+		session.Lock()
 		history = make([]Message, len(session.Messages))
 		copy(history, session.Messages)
-		session.mu.Unlock()
+		session.Unlock()
 	}
-	session.mu.Lock()
+	session.Lock()
 	stats := session.Stats
-	session.mu.Unlock()
+	session.Unlock()
 
 	sendJSON(wc, map[string]interface{}{
 		"type":            WSMsgSessionJoined,
@@ -442,7 +442,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		"stats":           stats,
 		"headless":        session.Headless,
 		"protocolVersion": ProtocolVersion,
-		"host":            session.getHost(),
+		"host":            session.GetHost(),
 	})
 }
 
@@ -607,7 +607,7 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 		sendWSError(wc, "permission mode toggle not supported for this provider")
 		return
 	}
-	claude, ok := sess.getProvider().(*ClaudeProvider)
+	claude, ok := sess.Provider().(*ClaudeProvider)
 	if !ok {
 		sendWSError(wc, "permission mode toggle not supported for this provider")
 		return
@@ -618,9 +618,9 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 		return
 	}
 
-	sess.mu.Lock()
+	sess.Lock()
 	mode := sess.PermissionMode
-	sess.mu.Unlock()
+	sess.Unlock()
 	h.SendToSession(req.SessionID, map[string]interface{}{
 		"type":      WSMsgModeChanged,
 		"sessionId": req.SessionID,

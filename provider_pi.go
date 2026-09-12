@@ -832,13 +832,13 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 	p.streamMu.Unlock()
 	if len(blocks) > 0 {
 		contentJSON, _ := json.Marshal(blocks)
-		p.session.mu.Lock()
+		p.session.Lock()
 		p.session.Messages = append(p.session.Messages, Message{
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Role:      "assistant",
 			Content:   contentJSON,
 		})
-		p.session.mu.Unlock()
+		p.session.Unlock()
 	}
 
 	// nil data → session layer skips its fallback text-only save (we just
@@ -1045,12 +1045,9 @@ func (p *PiProvider) SetModel(provider, modelID string) error {
 		return fmt.Errorf("provider and modelId are required")
 	}
 
-	p.session.mu.Lock()
-	if p.session.processing {
-		p.session.mu.Unlock()
+	if p.session.IsProcessing() {
 		return fmt.Errorf("cannot change model while session is generating; stop the response first")
 	}
-	p.session.mu.Unlock()
 
 	resp, err := p.sendRPC(map[string]interface{}{
 		"type":     "set_model",
@@ -1076,9 +1073,9 @@ func (p *PiProvider) SetModel(provider, modelID string) error {
 	p.modelID = modelID
 	p.mu.Unlock()
 
-	p.session.mu.Lock()
+	p.session.Lock()
 	p.session.Model = piModelString(provider, modelID)
-	p.session.mu.Unlock()
+	p.session.Unlock()
 	return nil
 }
 
@@ -1114,9 +1111,9 @@ func (p *PiProvider) SetThinkingLevel(level string) error {
 	p.thinkingLevel = level
 	p.mu.Unlock()
 
-	p.session.mu.Lock()
+	p.session.Lock()
 	p.session.ThinkingLevel = level
-	p.session.mu.Unlock()
+	p.session.Unlock()
 	return nil
 }
 
