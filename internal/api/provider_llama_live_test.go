@@ -1,6 +1,6 @@
 //go:build llm
 
-package main
+package api
 
 // Live tests against a real local llama-server process. Validates exactly the
 // surface fake-provider tests can't reach:

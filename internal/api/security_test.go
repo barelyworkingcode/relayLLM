@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"context"
@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/permission"
+	"relayllm/internal/registry"
+	"relayllm/internal/session"
 )
 
 // Security regression suite. One file = one audit surface. Every test here
@@ -45,7 +48,7 @@ func secAuthResponse(t *testing.T, configuredToken, authHeader string) int {
 		req.Header.Set("Authorization", authHeader)
 	}
 	rec := httptest.NewRecorder()
-	bearerAuth(configuredToken, inner).ServeHTTP(rec, req)
+	BearerAuth(configuredToken, inner).ServeHTTP(rec, req)
 	return rec.Code
 }
 
@@ -116,7 +119,7 @@ func TestSec_BearerAuth_CookieAndQueryParamAreNoLongerCredentials(t *testing.T) 
 	req := httptest.NewRequest(http.MethodGet, "/status?token="+secTestToken, nil)
 	req.AddCookie(&http.Cookie{Name: "relayllm_auth", Value: secTestToken})
 	rec := httptest.NewRecorder()
-	bearerAuth(secTestToken, inner).ServeHTTP(rec, req)
+	BearerAuth(secTestToken, inner).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("valid cookie + valid ?token=, no Authorization header: status %d; want 401", rec.Code)
 	}
@@ -127,8 +130,8 @@ func TestSec_BearerAuth_CookieAndQueryParamAreNoLongerCredentials(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestSec_GeneratedBearerToken_Is256BitHexAndUnique(t *testing.T) {
-	a := generateBearerToken()
-	b := generateBearerToken()
+	a := GenerateBearerToken()
+	b := GenerateBearerToken()
 	if len(a) != 64 { // 32 bytes -> 64 hex chars
 		t.Errorf("token length = %d; want 64 hex chars (256-bit)", len(a))
 	}
@@ -154,13 +157,13 @@ func TestSec_GeneratedBearerToken_Is256BitHexAndUnique(t *testing.T) {
 func TestSec_DetailedStatus_NeverLeaksEndpointSecrets(t *testing.T) {
 	const secretKey = "sk-super-secret-do-not-leak-1234567890"
 	ep := config.OpenAIEndpoint{Name: "leaky", BaseURL: "http://127.0.0.1:1/v1", APIKey: secretKey}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
-	registry.SetStatusForTest(ep, true, UpstreamModel{ID: "m"})
+	reg := registry.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	reg.SetStatusForTest(ep, true, registry.UpstreamModel{ID: "m"})
 
-	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
+	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
 	deps := DetailedStatusDeps{
 		Sessions:  sessions,
-		Registry:  registry,
+		Registry:  reg,
 		StartTime: time.Now(),
 	}
 	got := buildDetailedStatus(context.Background(), deps)

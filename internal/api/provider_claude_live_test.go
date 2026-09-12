@@ -1,6 +1,6 @@
 //go:build llm
 
-package main
+package api
 
 // Live tests against a real `claude` CLI binary. Uses Haiku to keep cost
 // down. Validates the persistent-process lifecycle and session resume that

@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"crypto/rand"
@@ -12,7 +12,7 @@ import (
 // generateBearerToken returns a 64-char (32-byte) random hex token. Used
 // when relayLLM auto-provisions its own listener auth (standalone, no
 // flag/env override). Same shape as relay's own service tokens.
-func generateBearerToken() string {
+func GenerateBearerToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand failed: " + err.Error())
@@ -40,7 +40,7 @@ func generateBearerToken() string {
 //
 // Token comparison uses crypto/subtle.ConstantTimeCompare to prevent timing
 // attacks.
-func bearerAuth(token string, next http.Handler) http.Handler {
+func BearerAuth(token string, next http.Handler) http.Handler {
 	if token == "" {
 		return next
 	}

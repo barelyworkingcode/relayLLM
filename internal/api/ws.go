@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/base64"
@@ -6,6 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	clk "relayllm/internal/clock"
+	"relayllm/internal/events"
+	"relayllm/internal/permission"
+	"relayllm/internal/provider"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
+	"relayllm/internal/types"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -24,9 +30,9 @@ type WSHub struct {
 	conns     map[string]map[*wsConn]bool // sessionID → set of viewer connections
 	termConns map[string]map[*wsConn]bool // terminalID → set of viewer connections
 	allConns  map[*wsConn]bool            // all connected clients (for broadcast)
-	sessions  *SessionManager
-	perms     *PermissionManager
-	terminals *TerminalManager
+	sessions  *session.SessionManager
+	perms     *permission.PermissionManager
+	terminals *terminal.TerminalManager
 
 	// clock times each connection's activity for GET /api/status/detailed.
 	// Defaults to DefaultClock; SetClock is a setter (mirroring
@@ -160,7 +166,7 @@ func (wc *wsConn) snapshot(sessions, terminals []string) WSConnInfo {
 	}
 }
 
-func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *TerminalManager) *WSHub {
+func NewWSHub(sessions *session.SessionManager, perms *permission.PermissionManager, terminals *terminal.TerminalManager) *WSHub {
 	return &WSHub{
 		conns:     make(map[string]map[*wsConn]bool),
 		termConns: make(map[string]map[*wsConn]bool),
@@ -336,45 +342,45 @@ func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch msg.Type {
-		case WSMsgJoinSession:
+		case events.WSMsgJoinSession:
 			h.handleJoinSession(wc, msgBytes, boundSessions)
-		case WSMsgSendMessage:
+		case events.WSMsgSendMessage:
 			h.handleSendMessage(wc, msgBytes)
-		case WSMsgEndSession:
+		case events.WSMsgEndSession:
 			h.handleEndSession(wc, msgBytes)
-		case WSMsgRenameSession:
+		case events.WSMsgRenameSession:
 			h.handleRenameSession(wc, msgBytes)
-		case WSMsgSetSessionFolder:
+		case events.WSMsgSetSessionFolder:
 			h.handleSetSessionFolder(wc, msgBytes)
-		case WSMsgDeleteSession:
+		case events.WSMsgDeleteSession:
 			h.handleDeleteSession(wc, msgBytes, boundSessions)
-		case WSMsgLeaveSession:
+		case events.WSMsgLeaveSession:
 			h.handleLeaveSession(wc, msgBytes, boundSessions)
-		case WSMsgStopGeneration:
+		case events.WSMsgStopGeneration:
 			h.handleStopGeneration(wc, msgBytes)
-		case WSMsgClearSession:
+		case events.WSMsgClearSession:
 			h.handleClearSession(wc, msgBytes)
-		case WSMsgPermissionResponse:
+		case events.WSMsgPermissionResponse:
 			h.handlePermissionResponse(msgBytes)
-		case WSMsgSetPermissionMode:
+		case events.WSMsgSetPermissionMode:
 			h.handleSetPermissionMode(wc, msgBytes)
-		case WSMsgTerminalCreate:
+		case events.WSMsgTerminalCreate:
 			h.handleTerminalCreate(wc, msgBytes, boundTerminals)
-		case WSMsgJoinTerminal:
+		case events.WSMsgJoinTerminal:
 			h.handleJoinTerminal(wc, msgBytes, boundTerminals)
-		case WSMsgLeaveTerminal:
+		case events.WSMsgLeaveTerminal:
 			h.handleLeaveTerminal(wc, msgBytes, boundTerminals)
-		case WSMsgTerminalInput:
+		case events.WSMsgTerminalInput:
 			h.handleTerminalInput(wc, msgBytes)
-		case WSMsgTerminalResize:
+		case events.WSMsgTerminalResize:
 			h.handleTerminalResize(wc, msgBytes)
-		case WSMsgTerminalClose:
+		case events.WSMsgTerminalClose:
 			h.handleTerminalClose(msgBytes, boundTerminals)
-		case WSMsgTerminalList:
+		case events.WSMsgTerminalList:
 			h.handleTerminalList(wc)
-		case WSMsgTerminalReconnect:
+		case events.WSMsgTerminalReconnect:
 			h.handleTerminalReconnect(wc, msgBytes, boundTerminals)
-		case WSMsgTerminalTemplates:
+		case events.WSMsgTerminalTemplates:
 			h.handleTerminalTemplates(wc)
 		}
 	}
@@ -403,7 +409,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	h.mu.Unlock()
 
 	// Try reading from Claude CLI's JSONL session file first (has both user + assistant).
-	var history []Message
+	var history []types.Message
 	var claudeSessionID string
 	if session.ProviderState != nil {
 		var ps struct {
@@ -413,7 +419,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		claudeSessionID = ps.ClaudeSessionID
 	}
 	if claudeSessionID != "" {
-		if h, err := ReadClaudeHistory(session.Directory, session.GetHost(), claudeSessionID); err == nil && len(h) > 0 {
+		if h, err := provider.ReadClaudeHistory(session.Directory, session.GetHost(), claudeSessionID); err == nil && len(h) > 0 {
 			history = h
 		} else if err != nil {
 			slog.Debug("claude history unavailable, using session messages", "session", req.SessionID, "error", err)
@@ -422,7 +428,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	// Fall back to session.Messages if Claude history unavailable.
 	if history == nil {
 		session.Lock()
-		history = make([]Message, len(session.Messages))
+		history = make([]types.Message, len(session.Messages))
 		copy(history, session.Messages)
 		session.Unlock()
 	}
@@ -431,7 +437,7 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 	session.Unlock()
 
 	sendJSON(wc, map[string]interface{}{
-		"type":            WSMsgSessionJoined,
+		"type":            events.WSMsgSessionJoined,
 		"sessionId":       session.ID,
 		"projectId":       session.ProjectID,
 		"directory":       session.Directory,
@@ -441,16 +447,16 @@ func (h *WSHub) handleJoinSession(wc *wsConn, msgBytes []byte, boundSessions map
 		"history":         history,
 		"stats":           stats,
 		"headless":        session.Headless,
-		"protocolVersion": ProtocolVersion,
+		"protocolVersion": events.ProtocolVersion,
 		"host":            session.GetHost(),
 	})
 }
 
 func (h *WSHub) handleSendMessage(wc *wsConn, msgBytes []byte) {
 	var req struct {
-		SessionID string           `json:"sessionId"`
-		Text      string           `json:"text"`
-		Files     []FileAttachment `json:"files"`
+		SessionID string                 `json:"sessionId"`
+		Text      string                 `json:"text"`
+		Files     []types.FileAttachment `json:"files"`
 	}
 	json.Unmarshal(msgBytes, &req)
 
@@ -529,11 +535,11 @@ func (h *WSHub) handleDeleteSession(wc *wsConn, msgBytes []byte, boundSessions m
 
 	// Notify all remaining viewers that the session was deleted.
 	h.SendToSession(req.SessionID, map[string]interface{}{
-		"type":      WSMsgSessionEnded,
+		"type":      events.WSMsgSessionEnded,
 		"sessionId": req.SessionID,
 	})
 	sendJSON(wc, map[string]interface{}{
-		"type":      WSMsgSessionEnded,
+		"type":      events.WSMsgSessionEnded,
 		"sessionId": req.SessionID,
 	})
 }
@@ -603,11 +609,11 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 		return
 	}
 
-	if !CapabilitiesForProvider(sess.ProviderType).SupportsPermissions {
+	if !types.CapabilitiesForProvider(sess.ProviderType).SupportsPermissions {
 		sendWSError(wc, "permission mode toggle not supported for this provider")
 		return
 	}
-	claude, ok := sess.Provider().(*ClaudeProvider)
+	claude, ok := sess.Provider().(*provider.ClaudeProvider)
 	if !ok {
 		sendWSError(wc, "permission mode toggle not supported for this provider")
 		return
@@ -622,7 +628,7 @@ func (h *WSHub) handleSetPermissionMode(wc *wsConn, msgBytes []byte) {
 	mode := sess.PermissionMode
 	sess.Unlock()
 	h.SendToSession(req.SessionID, map[string]interface{}{
-		"type":      WSMsgModeChanged,
+		"type":      events.WSMsgModeChanged,
 		"sessionId": req.SessionID,
 		"mode":      mode,
 	})
@@ -640,7 +646,7 @@ func (h *WSHub) handlePermissionResponse(msgBytes []byte) {
 	if req.Approved {
 		decision = "allow"
 	}
-	h.perms.Resolve(req.PermissionID, PermissionDecision{
+	h.perms.Resolve(req.PermissionID, permission.PermissionDecision{
 		Decision: decision,
 		Reason:   req.Reason,
 	})
@@ -674,7 +680,7 @@ func (h *WSHub) handleTerminalCreate(wc *wsConn, msgBytes []byte, boundTerminals
 	h.joinTerminalConn(wc, session, boundTerminals)
 
 	sendJSON(wc, map[string]interface{}{
-		"type":       WSMsgTerminalCreated,
+		"type":       events.WSMsgTerminalCreated,
 		"terminalId": session.ID,
 		"templateId": session.TemplateID,
 		"name":       session.Name,
@@ -773,14 +779,14 @@ func (h *WSHub) handleTerminalClose(msgBytes []byte, boundTerminals map[string]b
 	delete(boundTerminals, req.TerminalID)
 
 	h.Broadcast(map[string]interface{}{
-		"type":       WSMsgTerminalClosed,
+		"type":       events.WSMsgTerminalClosed,
 		"terminalId": req.TerminalID,
 	})
 }
 
 func (h *WSHub) handleTerminalList(wc *wsConn) {
 	sendJSON(wc, map[string]interface{}{
-		"type":      WSMsgTerminalList,
+		"type":      events.WSMsgTerminalList,
 		"terminals": h.terminals.List(),
 	})
 }
@@ -822,7 +828,7 @@ func (h *WSHub) handleTerminalReconnect(wc *wsConn, msgBytes []byte, boundTermin
 
 func (h *WSHub) handleTerminalTemplates(wc *wsConn) {
 	sendJSON(wc, map[string]interface{}{
-		"type":      WSMsgTerminalTemplates,
+		"type":      events.WSMsgTerminalTemplates,
 		"templates": h.terminals.ListTemplates(),
 	})
 }
@@ -846,7 +852,7 @@ func (h *WSHub) Broadcast(msg map[string]interface{}) {
 }
 
 // joinTerminalConn binds a WS connection to a terminal and sends the join response with scrollback.
-func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerminals map[string]bool) {
+func (h *WSHub) joinTerminalConn(wc *wsConn, session *terminal.TerminalSession, boundTerminals map[string]bool) {
 	tid := session.ID
 	boundTerminals[tid] = true
 	h.mu.Lock()
@@ -861,7 +867,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 	state, exitCode := session.Snapshot()
 	cols, rows := session.Size()
 	sendJSON(wc, map[string]interface{}{
-		"type":       WSMsgTerminalJoined,
+		"type":       events.WSMsgTerminalJoined,
 		"terminalId": tid,
 		"templateId": session.TemplateID,
 		"name":       session.Name,
@@ -875,7 +881,7 @@ func (h *WSHub) joinTerminalConn(wc *wsConn, session *TerminalSession, boundTerm
 
 	if state == "stopped" {
 		sendJSON(wc, map[string]interface{}{
-			"type":       WSMsgTerminalExit,
+			"type":       events.WSMsgTerminalExit,
 			"terminalId": tid,
 			"exitCode":   exitCode,
 		})
@@ -913,7 +919,7 @@ func sendJSON(wc *wsConn, msg map[string]interface{}) {
 
 func sendWSError(wc *wsConn, msg string) {
 	sendJSON(wc, map[string]interface{}{
-		"type":    WSMsgError,
+		"type":    events.WSMsgError,
 		"message": msg,
 	})
 }

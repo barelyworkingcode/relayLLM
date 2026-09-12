@@ -1,4 +1,4 @@
-package main
+package api
 
 // WebSocket protocol coverage. Each subtest exercises one inbound message
 // type and asserts the resulting server-side state changes + outbound events.
@@ -8,7 +8,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"relayllm/internal/events"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"slices"
 	"strings"
 	"testing"
@@ -62,7 +64,7 @@ func TestWS_SendMessage_StreamsScriptedEvents(t *testing.T) {
 	sessionID := srv.CreateSession(nil)
 
 	fp.ScriptText("hello back")
-	fp.ScriptResult("end_turn", SessionStats{InputTokens: 4, OutputTokens: 2})
+	fp.ScriptResult("end_turn", types.SessionStats{InputTokens: 4, OutputTokens: 2})
 
 	conn := srv.DialWS()
 	WSSend(t, conn, map[string]interface{}{"type": "join_session", "sessionId": sessionID})
@@ -76,11 +78,11 @@ func TestWS_SendMessage_StreamsScriptedEvents(t *testing.T) {
 	for time.Now().Before(deadline) {
 		msg := ReadWSEvent(t, conn)
 		seenTypes = append(seenTypes, strOf(msg["type"]))
-		if msg["type"] == HandlerMessageComplete {
+		if msg["type"] == events.HandlerMessageComplete {
 			break
 		}
 	}
-	if !slices.Contains(seenTypes, HandlerLLMEvent) || !slices.Contains(seenTypes, HandlerMessageComplete) {
+	if !slices.Contains(seenTypes, events.HandlerLLMEvent) || !slices.Contains(seenTypes, events.HandlerMessageComplete) {
 		t.Errorf("expected at least one llm_event + message_complete, got %v", seenTypes)
 	}
 	if sent := fp.Sent(); len(sent) != 1 || sent[0].Text != "hello" {
@@ -173,7 +175,7 @@ func TestWS_ClearSession_WipesHistory(t *testing.T) {
 	// Manually inject a message to clear.
 	sess, _ := srv.Sessions.GetSession(sessionID)
 	sess.Lock()
-	sess.Messages = []Message{{Role: "user", Content: json.RawMessage(`"hi"`)}}
+	sess.Messages = []types.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}}
 	sess.Unlock()
 
 	conn := srv.DialWS()

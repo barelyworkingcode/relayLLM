@@ -1,4 +1,4 @@
-package main
+package api
 
 // TestServer composes the full relayLLM HTTP+WS stack against an httptest
 // listener, using the fakes from support_test.go for the LLM provider and
@@ -18,7 +18,12 @@ import (
 	"github.com/gorilla/websocket"
 
 	clk "relayllm/internal/clock"
+	"relayllm/internal/mcp"
+	"relayllm/internal/permission"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 )
 
 const supportBearerToken = "test-bearer-token"
@@ -30,9 +35,9 @@ type TestServer struct {
 	t            *testing.T
 	HTTP         *httptest.Server
 	DataDir      string
-	Sessions     *SessionManager
-	Perms        *PermissionManager
-	Terminals    *TerminalManager
+	Sessions     *session.SessionManager
+	Perms        *permission.PermissionManager
+	Terminals    *terminal.TerminalManager
 	WSHub        *WSHub
 	Token        string
 	FakeProvider *testutil.FakeProvider // set if ProviderFromFake is used
@@ -45,10 +50,10 @@ type TestServerOptions struct {
 	// ProviderFactory injected into SessionManager. If non-nil, replaces the
 	// real switch on session.ProviderType. Default: nil (i.e. real providers,
 	// which most tests will not want).
-	ProviderFactory func(*Session, EventHandler) (Provider, error)
-	// MCP is the MCPClient that scripted providers should reference. Tests
+	ProviderFactory func(*types.Session, types.EventHandler) (types.Provider, error)
+	// MCP is the mcp.MCPClient that scripted providers should reference. Tests
 	// that don't need tool calling can leave this nil.
-	MCP MCPClient
+	MCP mcp.MCPClient
 }
 
 // NewTestServer spins up a minimal relayLLM HTTP+WS stack. Defaults are
@@ -68,17 +73,17 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 
 	dataDir := t.TempDir()
 
-	sessionStore := NewSessionStore(dataDir + "/sessions")
-	perms := NewPermissionManager()
+	sessionStore := session.NewSessionStore(dataDir + "/sessions")
+	perms := permission.NewPermissionManager()
 	perms.SetClock(opts.Clock)
-	sessions := NewSessionManager(sessionStore, perms)
+	sessions := session.NewSessionManager(sessionStore, perms)
 	sessions.SetDataDir(dataDir)
 
-	templateStore := NewTemplateStore(dataDir + "/terminals/templates.json")
+	templateStore := terminal.NewTemplateStore(dataDir + "/terminals/templates.json")
 	if err := templateStore.Load(nil); err != nil {
 		t.Fatalf("template store load: %v", err)
 	}
-	terminals := NewTerminalManager(templateStore, dataDir+"/terminal_logs")
+	terminals := terminal.NewTerminalManager(templateStore, dataDir+"/terminal_logs")
 	wsHub := NewWSHub(sessions, perms, terminals)
 	wsHub.SetClock(opts.Clock)
 	sessions.SetEventSink(wsHub)
@@ -122,7 +127,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	})
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
-	handler := bearerAuth(supportBearerToken, recoverMiddleware(mux))
+	handler := BearerAuth(supportBearerToken, RecoverMiddleware(mux))
 	srv := httptest.NewServer(handler)
 
 	t.Cleanup(func() {
@@ -148,7 +153,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 func (s *TestServer) SetFakeProvider() *testutil.FakeProvider {
 	s.t.Helper()
 	fp := testutil.NewFakeProvider(nil)
-	s.Sessions.SetProviderFactory(func(_ *Session, h EventHandler) (Provider, error) {
+	s.Sessions.SetProviderFactory(func(_ *types.Session, h types.EventHandler) (types.Provider, error) {
 		fp.SetHandler(h)
 		return fp, nil
 	})

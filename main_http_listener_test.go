@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"relayllm/internal/api"
 	"relayllm/internal/testutil"
 	"strings"
 	"testing"
@@ -121,7 +122,7 @@ func startTestFront(t *testing.T, certFile, keyFile string, handler http.Handler
 // Authorization header, no cookie, nothing. Reachability is the only gate,
 // via --http-bind.
 func TestMainTCPListener_ServesWithoutAnyCredentials(t *testing.T) {
-	_, base := startTestFront(t, "", "", recoverMiddleware(echoMux()))
+	_, base := startTestFront(t, "", "", api.RecoverMiddleware(echoMux()))
 
 	cases := []struct {
 		name   string
@@ -156,7 +157,7 @@ func TestMainTCPListener_ServesWithoutAnyCredentials(t *testing.T) {
 // the identical route table (mux) the Unix socket serves, but the socket
 // keeps requiring the bearer token while the TCP front never does.
 func TestMainTCPListener_SameRoutesAsSocket_DifferentAuth(t *testing.T) {
-	recovered := recoverMiddleware(echoMux())
+	recovered := api.RecoverMiddleware(echoMux())
 
 	// /tmp rather than t.TempDir(): a sockaddr_un path is capped near 104
 	// bytes and the per-test temp path overflows it (same reason
@@ -171,7 +172,7 @@ func TestMainTCPListener_SameRoutesAsSocket_DifferentAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
 	}
-	sockServer := &http.Server{Handler: bearerAuth(httpFrontToken, recovered)}
+	sockServer := &http.Server{Handler: api.BearerAuth(httpFrontToken, recovered)}
 	go func() { _ = sockServer.Serve(ln) }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -226,7 +227,7 @@ func TestMainTCPListener_TLS(t *testing.T) {
 	leaf := ca.IssueLeaf(t, 20)
 	certFile, keyFile := leaf.WriteFiles(t)
 
-	_, base := startTestFront(t, certFile, keyFile, recoverMiddleware(echoMux()))
+	_, base := startTestFront(t, certFile, keyFile, api.RecoverMiddleware(echoMux()))
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca.PEM) {
@@ -287,7 +288,7 @@ func TestMainTCPListener_MultipleBinds(t *testing.T) {
 	addr1 := freeTCPAddr(t)
 	addr2 := freeTCPAddr(t)
 
-	srv, err := startMainTCPListener([]string{addr1, addr2}, "", "", recoverMiddleware(echoMux()))
+	srv, err := startMainTCPListener([]string{addr1, addr2}, "", "", api.RecoverMiddleware(echoMux()))
 	if err != nil {
 		t.Fatalf("startMainTCPListener: %v", err)
 	}

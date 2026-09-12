@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/json"
@@ -13,6 +13,14 @@ import (
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/events"
+	"relayllm/internal/permission"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/provider"
+	"relayllm/internal/registry"
+	"relayllm/internal/servermanager"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"relayllm/internal/types"
 )
 
@@ -32,7 +40,7 @@ func readJSON(r *http.Request, v interface{}) error {
 
 // recoverMiddleware catches panics in HTTP handlers and returns 500
 // instead of crashing the server.
-func recoverMiddleware(next http.Handler) http.Handler {
+func RecoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
@@ -46,7 +54,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 
 // --- Session Routes ---
 
-func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
+func RegisterSessionRoutes(mux *http.ServeMux, sessions *session.SessionManager) {
 	mux.HandleFunc("GET /api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, sessions.ListSessions())
 	})
@@ -83,8 +91,8 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 	mux.HandleFunc("POST /api/sessions/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Text  string           `json:"text"`
-			Files []FileAttachment `json:"files"`
+			Text  string                 `json:"text"`
+			Files []types.FileAttachment `json:"files"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
@@ -162,7 +170,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 // --- Models Route ---
 
-func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRegistry, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *config.PiConfig, piOverlay func() PiOverlayInputs) {
+func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, reg *registry.ProxyRegistry, llamaMgr *servermanager.ServerManager, mlxMgr *servermanager.ServerManager, piCfg *config.PiConfig, piOverlay func() pioverlay.PiOverlayInputs) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
 		claude := []types.ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
@@ -184,11 +192,11 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ollama = FetchOllamaModels(ollamaURL)
+				ollama = provider.FetchOllamaModels(ollamaURL)
 			}()
 		}
 
-		if registry != nil {
+		if reg != nil {
 			ctx := r.Context()
 			wg.Add(1)
 			go func() {
@@ -197,18 +205,18 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 				// reverse proxy uses, rather than a live /models fetch per call,
 				// so a polling model picker no longer bypasses the throttle.
 				// Offline endpoints are dropped, matching /v1/models.
-				openai = registry.SnapshotModels(ctx)
+				openai = reg.SnapshotModels(ctx)
 			}()
 		}
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var overlay PiOverlayInputs
+			var overlay pioverlay.PiOverlayInputs
 			if piOverlay != nil {
 				overlay = piOverlay()
 			}
-			pi = FetchPiModels(r.Context(), piCfg, overlay)
+			pi = provider.FetchPiModels(r.Context(), piCfg, overlay)
 		}()
 
 		wg.Wait()
@@ -226,21 +234,21 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 		// Stamp provider-default capabilities, OR-ing with any per-source
 		// values (e.g. llama uses per-model mmproj detection).
 		for i := range models {
-			caps := CapabilitiesForProvider(models[i].Provider)
+			caps := types.CapabilitiesForProvider(models[i].Provider)
 			models[i].SupportsPermissions = models[i].SupportsPermissions || caps.SupportsPermissions
 			models[i].SupportsAttachments = models[i].SupportsAttachments || caps.SupportsAttachments
 		}
 
 		writeJSON(w, 200, map[string]interface{}{
 			"models":           models,
-			"providerSettings": ProviderSettings(),
+			"providerSettings": provider.ProviderSettings(),
 		})
 	})
 }
 
 // --- Terminal Routes ---
 
-func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, terminals *TerminalManager) {
+func RegisterTerminalRoutes(mux *http.ServeMux, templates *terminal.TemplateStore, terminals *terminal.TerminalManager) {
 	// Template reads only. Mutation happens in relay's config editor, which
 	// edits settings.json's `pty` section directly and restarts relayLLM.
 	mux.HandleFunc("GET /api/terminal/templates", func(w http.ResponseWriter, r *http.Request) {
@@ -306,9 +314,9 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			http.Error(w, "log persistence disabled", http.StatusNotFound)
 			return
 		}
-		head, tail, err := OpenTerminalLogReaders(dir, id)
+		head, tail, err := terminal.OpenTerminalLogReaders(dir, id)
 		if err != nil {
-			if errors.Is(err, ErrTerminalLogNotFound) {
+			if errors.Is(err, terminal.ErrTerminalLogNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
@@ -331,7 +339,7 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 
 // --- Permission Routes ---
 
-func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sessions *SessionManager) {
+func RegisterPermissionRoutes(mux *http.ServeMux, perms *permission.PermissionManager, sessions *session.SessionManager) {
 	mux.HandleFunc("POST /api/permission", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			SessionID string `json:"sessionId"`
@@ -349,14 +357,14 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 		// Short-circuit if the session's policy matches a deny/allow rule.
 		// Deny is checked first so it wins on overlap.
 		if sess, ok := sessions.GetSession(body.SessionID); ok && sess.Policy != nil {
-			if MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.DeniedTools) {
+			if permission.MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.DeniedTools) {
 				slog.Info("permission auto-denied by rule", "session", body.SessionID, "tool", body.ToolName)
-				writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "denied by project policy"})
+				writeJSON(w, 200, permission.PermissionDecision{Decision: "deny", Reason: "denied by project policy"})
 				return
 			}
-			if MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.AllowedTools) {
+			if permission.MatchToolRule(body.ToolName, body.ToolInput, sess.Policy.AllowedTools) {
 				slog.Info("permission auto-allowed by rule", "session", body.SessionID, "tool", body.ToolName)
-				writeJSON(w, 200, PermissionDecision{Decision: "allow", Reason: "allowed by project policy"})
+				writeJSON(w, 200, permission.PermissionDecision{Decision: "allow", Reason: "allowed by project policy"})
 				return
 			}
 		}
@@ -364,7 +372,7 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 		req, ch := perms.CreateRequest(body.SessionID, body.ToolName, body.ToolInput, body.ToolUseID)
 
 		perms.NotifySession(body.SessionID, map[string]interface{}{
-			"type":         WSMsgPermissionRequest,
+			"type":         events.WSMsgPermissionRequest,
 			"sessionId":    body.SessionID,
 			"permissionId": req.ID,
 			"toolName":     body.ToolName,
@@ -377,7 +385,7 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 			writeJSON(w, 200, decision)
 		case <-perms.Clock().After(60 * time.Second):
 			perms.Cleanup(req.ID)
-			writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "timeout"})
+			writeJSON(w, 200, permission.PermissionDecision{Decision: "deny", Reason: "timeout"})
 		}
 	})
 }
