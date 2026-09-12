@@ -352,9 +352,10 @@ func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]i
 
 	rows = make([]map[string]any, 0, len(list))
 	for _, s := range list {
-		provider := s.getProvider()
+		provider := s.Provider()
+		processing := s.IsProcessing()
 
-		s.mu.Lock()
+		s.Lock()
 		id := s.ID
 		name := s.Name
 		projectID := s.ProjectID
@@ -365,8 +366,7 @@ func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]i
 		messageCount := len(s.Messages)
 		lastMsgAt := lastMessageAt(s.Messages)
 		stats := s.Stats
-		processing := s.processing
-		s.mu.Unlock()
+		s.Unlock()
 
 		state := connStateIdle
 		if processing {

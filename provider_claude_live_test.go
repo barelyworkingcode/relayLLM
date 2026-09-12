@@ -56,9 +56,9 @@ func TestClaudeLive_HTTPMessage_RoundTripsThroughCLI(t *testing.T) {
 	// after creation since CreateSession doesn't accept it.
 	sessionID := srv.CreateSession(body)
 	sess, _ := srv.Sessions.GetSession(sessionID)
-	sess.mu.Lock()
+	sess.Lock()
 	sess.Headless = true
-	sess.mu.Unlock()
+	sess.Unlock()
 
 	var resp struct {
 		Response string       `json:"response"`
@@ -95,9 +95,9 @@ func TestClaudeLive_SessionResume_RemembersContext(t *testing.T) {
 		"appendClaudeMd": false,
 	})
 	sess, _ := srv.Sessions.GetSession(sessionID)
-	sess.mu.Lock()
+	sess.Lock()
 	sess.Headless = true
-	sess.mu.Unlock()
+	sess.Unlock()
 
 	// Turn 1: plant a code word.
 	var first struct {

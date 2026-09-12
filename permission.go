@@ -8,17 +8,8 @@ import (
 	"github.com/google/uuid"
 
 	clk "relayllm/internal/clock"
+	"relayllm/internal/types"
 )
-
-// PermissionPolicy is the per-session Claude permission policy. Sourced from
-// session.Settings.permissionPolicy at session creation. relayLLM uses it for
-// (a) Claude CLI flags at spawn time and (b) short-circuit evaluation in
-// RegisterPermissionRoutes (matched rules skip the WS roundtrip to Eve).
-type PermissionPolicy struct {
-	DefaultMode  string   `json:"defaultMode,omitempty"`
-	AllowedTools []string `json:"allowedTools,omitempty"`
-	DeniedTools  []string `json:"deniedTools,omitempty"`
-}
 
 // MatchToolRule reports whether toolName/toolInput matches any of the given
 // patterns. A bare pattern like "Read" matches any use of Read. A pattern
@@ -82,7 +73,7 @@ type pendingPermission struct {
 type PermissionManager struct {
 	mu      sync.Mutex
 	pending map[string]pendingPermission
-	sink    EventSink
+	sink    types.EventSink
 	clock   clk.Clock
 }
 
@@ -99,7 +90,7 @@ func (m *PermissionManager) SetClock(c clk.Clock) {
 	m.clock = c
 }
 
-func (m *PermissionManager) SetEventSink(sink EventSink) {
+func (m *PermissionManager) SetEventSink(sink types.EventSink) {
 	m.sink = sink
 }
 

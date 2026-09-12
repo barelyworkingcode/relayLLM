@@ -1,4 +1,4 @@
-package main
+package types
 
 // ProviderCapabilities reports static feature support per provider type.
 // Surfaced in the model catalog so clients can gate UI features without

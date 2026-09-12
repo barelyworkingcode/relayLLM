@@ -143,7 +143,7 @@ func (p *ClaudeProvider) refreshHostSpec() {
 		slog.Warn("resolve host at spawn failed, using stored value", "session", p.session.ID, "error", err)
 		return
 	}
-	p.session.setHost(resp.Host)
+	p.session.SetHost(resp.Host)
 }
 
 func (p *ClaudeProvider) touchActivity() {
@@ -286,7 +286,7 @@ func (p *ClaudeProvider) Start() error {
 	p.refreshHostSpec()
 
 	var cmd *exec.Cmd
-	if host := p.session.getHost(); host != nil {
+	if host := p.session.GetHost(); host != nil {
 		if host.ClaudePath == "" {
 			return fmt.Errorf("host %q has no claude: run a probe", host.Name)
 		}
@@ -1092,14 +1092,13 @@ func (p *ClaudeProvider) SetPermissionMode(mode string) error {
 		mode = "default"
 	}
 
-	p.session.mu.Lock()
-	if p.session.processing {
-		p.session.mu.Unlock()
+	ok := p.session.WithLockIfNotProcessing(func() {
+		p.session.PermissionMode = mode
+		p.session.Headless = (mode == "bypassPermissions")
+	})
+	if !ok {
 		return fmt.Errorf("cannot change permission mode while session is generating; stop the response first")
 	}
-	p.session.PermissionMode = mode
-	p.session.Headless = (mode == "bypassPermissions")
-	p.session.mu.Unlock()
 
 	if p.Alive() {
 		p.Kill()
@@ -1115,7 +1114,7 @@ func (p *ClaudeProvider) DeleteSession() error {
 		return nil
 	}
 
-	if host := p.session.getHost(); host != nil {
+	if host := p.session.GetHost(); host != nil {
 		return deleteClaudeHistoryOverSSH(host, p.directory, sid)
 	}
 

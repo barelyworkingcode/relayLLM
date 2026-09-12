@@ -331,8 +331,8 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 // Transports must not reach into session.Messages directly — they receive a
 // copy via BuildMessages so the tool loop can mutate its working set safely.
 func (p *BaseChatProvider) copyHistory() []Message {
-	p.session.mu.Lock()
-	defer p.session.mu.Unlock()
+	p.session.Lock()
+	defer p.session.Unlock()
 	msgs := make([]Message, len(p.session.Messages))
 	copy(msgs, p.session.Messages)
 	return msgs
@@ -473,9 +473,9 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 				})
 			}
 			if len(toolMessages) > 0 {
-				p.session.mu.Lock()
+				p.session.Lock()
 				p.session.Messages = append(p.session.Messages, toolMessages...)
-				p.session.mu.Unlock()
+				p.session.Unlock()
 			}
 
 			// Nil payload tells session.go's handler to skip its fallback

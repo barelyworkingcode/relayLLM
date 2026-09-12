@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"relayllm/internal/types"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -74,7 +76,7 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 			"directory": session.Directory,
 			"model":     session.Model,
 			"name":      session.Name,
-			"host":      session.getHost(),
+			"host":      session.GetHost(),
 		})
 	})
 
@@ -159,18 +161,9 @@ func RegisterSessionRoutes(mux *http.ServeMux, sessions *SessionManager) {
 
 // --- Models Route ---
 
-type ModelInfo struct {
-	Label               string `json:"label"`
-	Value               string `json:"value"`
-	Group               string `json:"group"`
-	Provider            string `json:"provider"`
-	SupportsPermissions bool   `json:"supportsPermissions"`
-	SupportsAttachments bool   `json:"supportsAttachments"`
-}
-
 func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRegistry, llamaMgr *ServerManager, mlxMgr *ServerManager, piCfg *PiConfig, piOverlay func() PiOverlayInputs) {
 	mux.HandleFunc("GET /api/models", func(w http.ResponseWriter, r *http.Request) {
-		claude := []ModelInfo{
+		claude := []types.ModelInfo{
 			{Label: "Claude Haiku", Value: "haiku", Group: "Claude", Provider: "claude"},
 			{Label: "Claude Sonnet", Value: "sonnet", Group: "Claude", Provider: "claude"},
 			{Label: "Claude Opus", Value: "opus", Group: "Claude", Provider: "claude"},
@@ -181,9 +174,9 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 		// so wg.Wait() is sufficient synchronization.
 		var (
 			wg     sync.WaitGroup
-			ollama []ModelInfo
-			openai []ModelInfo
-			pi     []ModelInfo
+			ollama []types.ModelInfo
+			openai []types.ModelInfo
+			pi     []types.ModelInfo
 		)
 
 		if ollamaURL != "" {
