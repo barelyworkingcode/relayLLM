@@ -13,6 +13,8 @@ package main
 // deregisters with `defer p.metrics.end(conn)`.
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -81,11 +83,20 @@ const (
 // lastWriteNano are all read outside any lock by the caller (snapshot()) —
 // nanosecond timestamps read via atomic loads, which is why this takes them
 // as plain values rather than the ProxyConn itself.
-func proxyConnState(now, startedAt time.Time, headerNano, lastWriteNano int64, streaming bool) string {
+func proxyConnState(now, startedAt time.Time, headerNano, lastWriteNano int64, streaming, upgraded bool) string {
 	sinceHeader := headerNano != 0
 	var sinceLastByte time.Duration
 	if sinceHeader {
 		sinceLastByte = now.Sub(time.Unix(0, lastWriteNano))
+	}
+	if upgraded {
+		// An upgraded socket (a passthrough WebSocket) stays open between
+		// turns by design. OMP's codex transport reuses one for a whole
+		// session. Silence there is idle, never quiet or stalled.
+		if sinceLastByte < proxyQuietAfter {
+			return connStateActive
+		}
+		return connStateIdle
 	}
 	switch {
 	case sinceHeader && sinceLastByte >= proxyStallAfter:
@@ -188,6 +199,9 @@ type ProxyConn struct {
 	viaAnthropic bool   // arrived through /v1/messages (handleAnthropicRedirect)
 	bytesIn      int64  // request body length; known up front
 
+	upgraded        atomic.Bool  // hijacked for a 101 Switching Protocols (WebSocket)
+	upgradedBytesIn atomic.Int64 // client-to-upstream bytes after the upgrade
+
 	kind          atomic.Pointer[string] // "managed" | "virtual" | "endpoint" | "unknown"
 	target        atomic.Pointer[string] // resolved label: alias, or "endpoint/model"
 	attempts      atomic.Int32           // virtual-model candidates tried so far
@@ -255,6 +269,30 @@ func (c *ProxyConn) noteWrite(n int) {
 	c.metrics.totalBytesOut.Add(int64(n))
 }
 
+// noteUpgrade marks the connection as hijacked for a 101. ReverseProxy
+// writes the 101 straight to the hijacked conn, so it never reaches
+// WriteHeader. It is recorded here instead.
+func (c *ProxyConn) noteUpgrade() {
+	if c == nil {
+		return
+	}
+	c.upgraded.Store(true)
+	c.noteHeader(http.StatusSwitchingProtocols)
+}
+
+// noteRead counts client-to-upstream bytes on an upgraded connection. Traffic
+// in either direction counts as activity for the active/idle state.
+func (c *ProxyConn) noteRead(n int) {
+	if c == nil || n <= 0 {
+		return
+	}
+	now := c.metrics.clock.Now()
+	c.upgradedBytesIn.Add(int64(n))
+	c.lastWriteNano.Store(now.UnixNano())
+	c.metrics.inRate.add(now, int64(n))
+	c.metrics.totalBytesIn.Add(int64(n))
+}
+
 // snapshot builds this connection's ProxyConnInfo row as of now.
 func (c *ProxyConn) snapshot(now time.Time) ProxyConnInfo {
 	header := c.headerNano.Load()
@@ -276,7 +314,7 @@ func (c *ProxyConn) snapshot(now time.Time) ProxyConnInfo {
 		ViaAnthropic:   c.viaAnthropic,
 		Status:         c.statusCode.Load(),
 		StartedAt:      c.startedAt,
-		BytesIn:        c.bytesIn,
+		BytesIn:        c.bytesIn + c.upgradedBytesIn.Load(),
 		BytesOut:       c.bytesOut.Load(),
 		BytesOutPerSec: c.rate.rate(now),
 		AgeSeconds:     int(now.Sub(c.startedAt).Seconds()),
@@ -285,7 +323,7 @@ func (c *ProxyConn) snapshot(now time.Time) ProxyConnInfo {
 		info.LastByteAt = time.Unix(0, lastWrite)
 		info.SinceLastByteSeconds = int(now.Sub(info.LastByteAt).Seconds())
 	}
-	info.State = proxyConnState(now, c.startedAt, header, lastWrite, c.stream)
+	info.State = proxyConnState(now, c.startedAt, header, lastWrite, c.stream, c.upgraded.Load())
 	return info
 }
 
@@ -349,6 +387,11 @@ func (m *ProxyMetrics) begin(w http.ResponseWriter, r *http.Request, model strin
 	if m == nil {
 		return nil, w
 	}
+	// The unread passthrough paths pass r.ContentLength, which is -1 for a
+	// chunked body. Left as-is it would subtract from the process-wide total.
+	if bodyLen < 0 {
+		bodyLen = 0
+	}
 	now := m.clock.Now()
 	viaAnthropic, _ := r.Context().Value(proxyViaAnthropicKey{}).(bool)
 	c := &ProxyConn{
@@ -403,7 +446,7 @@ func (m *ProxyMetrics) end(c *ProxyConn) {
 		Stream:     c.stream,
 		DurationMs: now.Sub(c.startedAt).Milliseconds(),
 		TTFBMs:     -1,
-		BytesIn:    c.bytesIn,
+		BytesIn:    c.bytesIn + c.upgradedBytesIn.Load(),
 		BytesOut:   c.bytesOut.Load(),
 		FinishedAt: now,
 	}
@@ -572,3 +615,38 @@ func (m *meteredResponseWriter) Flush() {
 // Unwrap lets http.ResponseController reach the real writer through both
 // this and the virtualResponseRecorder it may nest.
 func (m *meteredResponseWriter) Unwrap() http.ResponseWriter { return m.ResponseWriter }
+
+// Hijack meters a connection that ReverseProxy upgrades (a passthrough
+// WebSocket). For a 101, ReverseProxy hijacks the client conn and copies
+// frames on it directly. Without this wrapper those bytes never pass through
+// Write, and a socket carrying a whole session would show 0 bytes.
+// http.ResponseController prefers Hijack over Unwrap, so ReverseProxy finds
+// this method first.
+func (m *meteredResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(m.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	m.conn.noteUpgrade()
+	return &meteredConn{Conn: conn, pc: m.conn}, brw, nil
+}
+
+// meteredConn counts both directions of a hijacked connection. Embedding the
+// net.Conn interface (not *net.TCPConn) hides ReadFrom/WriteTo, so io.Copy
+// always goes through Read/Write here.
+type meteredConn struct {
+	net.Conn
+	pc *ProxyConn
+}
+
+func (c *meteredConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.pc.noteRead(n)
+	return n, err
+}
+
+func (c *meteredConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.pc.noteWrite(n)
+	return n, err
+}

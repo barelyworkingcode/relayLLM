@@ -103,15 +103,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// router.anthropic's passthrough forwards whatever credential the client
-	// sent (Claude Code's OAuth bearer, or an API key) straight to
-	// api.anthropic.com on every request. That's fine on loopback; exposed
-	// on a non-loopback bind with no TLS on the router's own listener, it's
-	// a credential leaving the box in plaintext to anyone who can reach the
-	// port. Same fail-closed shape as the router-TLS-pair guard above.
-	if cfg.Router != nil && cfg.Router.Anthropic != nil && *routerTLSCert == "" {
+	// router.anthropic and router.passthrough forward whatever credential the
+	// client sent (Claude Code's or ChatGPT's OAuth bearer, or an API key)
+	// straight to the upstream on every request. That's fine on loopback;
+	// exposed on a non-loopback bind with no TLS on the router's own
+	// listener, it's a credential leaving the box in plaintext to anyone who
+	// can reach the port. Same fail-closed shape as the router-TLS-pair guard
+	// above.
+	if cfg.Router.forwardsClientCredentials() && *routerTLSCert == "" {
 		if host, ok := firstNonLoopbackBind(routerBinds); ok {
-			slog.Error("relay router: router.anthropic is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real Anthropic credential on every request)",
+			slog.Error("relay router: router.anthropic or router.passthrough is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real credential on every request)",
 				"router-bind", host)
 			os.Exit(1)
 		}
