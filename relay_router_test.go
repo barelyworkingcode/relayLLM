@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1299,9 +1300,15 @@ func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testi
 // Acquire) — proving, if the request ever returns, that Acquire was never
 // called at all rather than merely "returned quickly by luck."
 func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmission(t *testing.T) {
-	mgr, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
-		map[string]float64{"busy": 1, "wanted": 1})
-	addInstance(mgr, "busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
+		Models: []config.ServerModelConfig{
+			{Alias: "busy", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/busy.gguf"}},
+			{Alias: "wanted", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/wanted.gguf"}},
+		},
+	}, "/nonexistent/relayllm-test-server")
+	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
+	mgr.SetClock(clk)
+	mgr.InjectInstanceForTest("busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
 
 	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vGuard", Targets: []config.VirtualLLMTarget{{Alias: "wanted"}},
@@ -1330,6 +1337,20 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 	}
 }
 
+// waitForWaiters blocks until the fake clock has at least n outstanding
+// waiters, so a test can advance time knowing the goroutine is parked.
+func waitForWaiters(t *testing.T, clk *testutil.FakeClock, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if clk.Waiters() >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d clock waiter(s); have %d", n, clk.Waiters())
+}
+
 // TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt is the
 // complement of the "pre-canceled" test above: here the request context is
 // still live when ServeHTTP starts, so the router does call Acquire("wanted")
@@ -1337,9 +1358,15 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 // Acquire's ctx parameter must abort that wait rather than riding out the
 // (here: never-advanced) 120s admission deadline.
 func TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt(t *testing.T) {
-	mgr, clk := newBudgetManager(t, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120},
-		map[string]float64{"busy": 1, "wanted": 1})
-	addInstance(mgr, "busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
+	mgr := NewServerManager(llamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
+		Models: []config.ServerModelConfig{
+			{Alias: "busy", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/busy.gguf"}},
+			{Alias: "wanted", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/wanted.gguf"}},
+		},
+	}, "/nonexistent/relayllm-test-server")
+	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
+	mgr.SetClock(clk)
+	mgr.InjectInstanceForTest("busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
 
 	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vGuard", Targets: []config.VirtualLLMTarget{{Alias: "wanted"}},
@@ -1572,11 +1599,7 @@ func TestRouter_Proxy_ManagedAlias_BadEndpointURL_Returns502NotPanic(t *testing.
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "bad-url"}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{}), port: -1}
-	inst.healthy.Store(true)
-	mgr.mu.Lock()
-	mgr.instances["bad-url"] = inst
-	mgr.mu.Unlock()
+	mgr.InjectReadyInstanceForTest("bad-url", -1, 0)
 
 	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(router.server.Handler)
@@ -1596,11 +1619,7 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 	badMgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "bad-alias"}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{}), port: -1}
-	inst.healthy.Store(true)
-	badMgr.mu.Lock()
-	badMgr.instances["bad-alias"] = inst
-	badMgr.mu.Unlock()
+	badMgr.InjectReadyInstanceForTest("bad-alias", -1, 0)
 
 	var fallbackCalls atomic.Int64
 	fallback := newCountingChatUpstream(t, &fallbackCalls, "m")

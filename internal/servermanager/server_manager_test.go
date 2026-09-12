@@ -1,4 +1,4 @@
-package main
+package servermanager
 
 // Unit tests for the ServerManager helpers that don't need a real
 // managed-server subprocess. Specifically:
@@ -35,7 +35,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBuildServerArgs_PortAndHostAlwaysFirst(t *testing.T) {
-	got := buildServerArgs(llamaProfile, map[string]any{}, 9090)
+	got := buildServerArgs(LlamaProfile, map[string]any{}, 9090)
 	if len(got) < 4 {
 		t.Fatalf("expected at least port + host flags, got %v", got)
 	}
@@ -48,7 +48,7 @@ func TestBuildServerArgs_PortAndHostAlwaysFirst(t *testing.T) {
 }
 
 func TestBuildServerArgs_HostFromArgsOverridesDefault(t *testing.T) {
-	got := buildServerArgs(llamaProfile, map[string]any{"host": "0.0.0.0"}, 8000)
+	got := buildServerArgs(LlamaProfile, map[string]any{"host": "0.0.0.0"}, 8000)
 	if !slices.Contains(got, "0.0.0.0") {
 		t.Errorf("custom host missing: %v", got)
 	}
@@ -65,7 +65,7 @@ func TestBuildServerArgs_HostFromArgsOverridesDefault(t *testing.T) {
 }
 
 func TestBuildServerArgs_BoolTrueEmitsFlagBoolFalseOmits(t *testing.T) {
-	got := buildServerArgs(llamaProfile, map[string]any{
+	got := buildServerArgs(LlamaProfile, map[string]any{
 		"flash-attn": true,
 		"verbose":    false,
 		"kv-unified": true,
@@ -84,7 +84,7 @@ func TestBuildServerArgs_BoolTrueEmitsFlagBoolFalseOmits(t *testing.T) {
 func TestBuildServerArgs_IntegerAndFloat(t *testing.T) {
 	// JSON numbers come in as float64; whole numbers must render without a
 	// decimal point so the server's flag parser accepts them.
-	got := buildServerArgs(llamaProfile, map[string]any{
+	got := buildServerArgs(LlamaProfile, map[string]any{
 		"ctx-size": float64(131072), // integer-valued
 		"temp":     float64(0.6),    // fractional
 		"top-p":    float64(0.95),
@@ -96,7 +96,7 @@ func TestBuildServerArgs_IntegerAndFloat(t *testing.T) {
 }
 
 func TestBuildServerArgs_StringValue(t *testing.T) {
-	got := buildServerArgs(llamaProfile, map[string]any{
+	got := buildServerArgs(LlamaProfile, map[string]any{
 		"model":        "/models/qwen.gguf",
 		"cache-type-k": "q8_0",
 	}, 8000)
@@ -108,8 +108,8 @@ func TestBuildServerArgs_DeterministicOrder(t *testing.T) {
 	// Sort-by-key keeps logs comparable across runs. Two calls with the same
 	// input should produce identical output.
 	args := map[string]any{"zeta": "z", "alpha": "a", "beta": "b"}
-	first := buildServerArgs(llamaProfile, args, 8000)
-	second := buildServerArgs(llamaProfile, args, 8000)
+	first := buildServerArgs(LlamaProfile, args, 8000)
+	second := buildServerArgs(LlamaProfile, args, 8000)
 	if !slices.Equal(first, second) {
 		t.Errorf("output not deterministic:\n  first=%v\n  second=%v", first, second)
 	}
@@ -126,7 +126,7 @@ func TestBuildServerArgs_DeterministicOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildServerArgs_MlxProfile_InjectsServeFlag(t *testing.T) {
-	got := buildServerArgs(mlxProfile, map[string]any{
+	got := buildServerArgs(MlxProfile, map[string]any{
 		"model": "/models/mistral",
 	}, 9500)
 	// --serve should appear right after --port/--host, before sorted map flags.
@@ -141,7 +141,7 @@ func TestBuildServerArgs_MlxProfile_InjectsServeFlag(t *testing.T) {
 }
 
 func TestBuildServerArgs_LlamaProfile_NoServeFlag(t *testing.T) {
-	got := buildServerArgs(llamaProfile, map[string]any{
+	got := buildServerArgs(LlamaProfile, map[string]any{
 		"model": "/models/qwen.gguf",
 	}, 8090)
 	if slices.Contains(got, "--serve") {
@@ -268,7 +268,7 @@ func TestServerManager_HasAlias_NilSafeAndMatching(t *testing.T) {
 	cfg := &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}
-	mgr := NewServerManager(llamaProfile, cfg, "")
+	mgr := NewServerManager(LlamaProfile, cfg, "")
 	if !mgr.HasAlias("qwen-8b") {
 		t.Error("HasAlias should return true for configured alias")
 	}
@@ -281,7 +281,7 @@ func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
 	cfg := &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "m1"}, {Alias: "m2"}},
 	}
-	mgr := NewServerManager(llamaProfile, cfg, "")
+	mgr := NewServerManager(LlamaProfile, cfg, "")
 	got := mgr.Aliases()
 	if len(got) != 2 || !slices.Contains(got, "m1") || !slices.Contains(got, "m2") {
 		t.Errorf("Aliases: got %v, want [m1 m2]", got)
@@ -293,7 +293,7 @@ func TestServerManager_Aliases_ReturnsAll(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 18000}, "")
+	mgr := NewServerManager(LlamaProfile, &config.ServerConfig{BasePort: 18000}, "")
 	port, err := mgr.allocatePort()
 	if err != nil {
 		t.Fatalf("allocatePort: %v", err)
@@ -313,7 +313,7 @@ func TestServerManager_AllocatePort_ReturnsBindablePort(t *testing.T) {
 }
 
 func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 18100}, "")
+	mgr := NewServerManager(LlamaProfile, &config.ServerConfig{BasePort: 18100}, "")
 	// Pre-bind 18100 to force the allocator to skip it.
 	blocker, err := net.Listen("tcp", "127.0.0.1:18100")
 	if err != nil {
@@ -336,7 +336,7 @@ func TestServerManager_AllocatePort_AdvancesPastBoundPort(t *testing.T) {
 // TestServerManager_AllocatePort_BoundedNotInfinite verifies a persistent
 // Listen failure returns an error instead of spinning forever holding m.mu.
 func TestServerManager_AllocatePort_BoundedNotInfinite(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{BasePort: 70000}, "")
+	mgr := NewServerManager(LlamaProfile, &config.ServerConfig{BasePort: 70000}, "")
 	done := make(chan struct{})
 	go func() {
 		_, _ = mgr.allocatePort()

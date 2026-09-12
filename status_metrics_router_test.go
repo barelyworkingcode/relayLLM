@@ -32,18 +32,7 @@ func injectHealthyManagedInstance(t *testing.T, m *ServerManager, alias string, 
 	if err != nil {
 		t.Fatalf("parse upstream port: %v", err)
 	}
-	inst := &serverInstance{
-		config:    config.ServerModelConfig{Alias: alias},
-		port:      port,
-		ready:     make(chan struct{}),
-		startTime: m.clock.Now(),
-		lastUsed:  m.clock.Now(),
-	}
-	inst.healthy.Store(true)
-	close(inst.ready)
-	m.mu.Lock()
-	m.instances[alias] = inst
-	m.mu.Unlock()
+	m.InjectReadyInstanceForTest(alias, port, 0)
 }
 
 func splitHostPort(rawURL string) (host, port string, err error) {

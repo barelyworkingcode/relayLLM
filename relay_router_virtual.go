@@ -365,7 +365,7 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVi
 			// the loop moves on to the next target.
 			return nil, nil, fmt.Errorf("invalid managed server endpoint: %w", err)
 		}
-		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.profile.Kind, target.alias, onError)
+		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.Profile().Kind, target.alias, onError)
 		proxy.Transport = config.VirtualDialTransport
 		return proxy, rel, nil
 	}

@@ -1,4 +1,4 @@
-package main
+package servermanager
 
 import (
 	"context"
@@ -28,7 +28,7 @@ func newBudgetManager(t *testing.T, cfg *config.ServerConfig, sizes map[string]f
 	// so the interesting behavior is still exercised — and a developer with a
 	// real llama-server on PATH does not get a 120s health poll against a
 	// process spawned with a nonexistent model file.
-	m := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	m := NewServerManager(LlamaProfile, cfg, "/nonexistent/relayllm-test-server")
 	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
 	m.clock = clk
 	return m, clk
@@ -476,7 +476,7 @@ func TestAcquire_CtxCancelAbortsBudgetFullWait(t *testing.T) {
 }
 
 func TestBuildServerArgs_OmitsBudgetOnlyKeys(t *testing.T) {
-	args := buildServerArgs(llamaProfile, map[string]any{
+	args := buildServerArgs(LlamaProfile, map[string]any{
 		"memoryGB": 26.0,
 		"ctx-size": 4096.0,
 	}, 8090)

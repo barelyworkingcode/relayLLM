@@ -22,9 +22,10 @@ import (
 
 // newManagedAliasRouter wires a RelayRouter whose single managed alias is
 // already "running" against upstream, without spawning a real llama-server —
-// same trick relay_router_models_test.go uses (mgr.instances[alias] = ...),
-// extended with a real port so a full HTTP round trip through the router's
-// reverse proxy actually lands on upstream.
+// same trick relay_router_models_test.go uses
+// (mgr.InjectReadyInstanceForTest(alias, ...)), extended with a real port so
+// a full HTTP round trip through the router's reverse proxy actually lands
+// on upstream.
 func newManagedAliasRouter(t *testing.T, alias string, upstream *httptest.Server, effortMap map[string]string) *RelayRouter {
 	t.Helper()
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
@@ -32,12 +33,7 @@ func newManagedAliasRouter(t *testing.T, alias string, upstream *httptest.Server
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{})}
-	inst.port = port
-	inst.healthy.Store(true)
-	mgr.mu.Lock()
-	mgr.instances[alias] = inst
-	mgr.mu.Unlock()
+	mgr.InjectReadyInstanceForTest(alias, port, 0)
 
 	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	if effortMap != nil {

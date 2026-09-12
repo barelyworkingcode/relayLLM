@@ -493,7 +493,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// stream, so the budget cannot evict this instance mid-response.
 	endpoint, release, err := mgr.Acquire(r.Context(), alias)
 	if err != nil {
-		slog.Warn("relay router: failed to launch managed server", "kind", mgr.profile.Kind, "model", alias, "error", err)
+		slog.Warn("relay router: failed to launch managed server", "kind", mgr.Profile().Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -503,7 +503,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// Set after Acquire returns, not before: a request queued on admission
 	// has not chosen an instance yet, and the dashboard's target should mean
 	// "is being served by", not "wants".
-	conn.setTarget("managed", mgr.profile.Kind+":"+alias)
+	conn.setTarget("managed", mgr.Profile().Kind+":"+alias)
 
 	// No model swap needed here — the client already sent the bare alias the
 	// managed server expects — but the reasoning_effort rewrite still applies
@@ -524,11 +524,11 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		// Director dereferences target.Scheme unconditionally, so passing a
 		// nil target would panic inside the handler instead of failing the
 		// request cleanly.
-		slog.Warn("relay router: bad managed server endpoint", "kind", mgr.profile.Kind, "alias", alias, "error", err)
+		slog.Warn("relay router: bad managed server endpoint", "kind", mgr.Profile().Kind, "alias", alias, "error", err)
 		writeRouterError(w, http.StatusBadGateway, fmt.Sprintf("invalid managed server endpoint: %v", err))
 		return
 	}
-	newUpstreamProxy(target, rewritten, endpoint.APIKey, mgr.profile.Kind, alias, nil).ServeHTTP(w, r)
+	newUpstreamProxy(target, rewritten, endpoint.APIKey, mgr.Profile().Kind, alias, nil).ServeHTTP(w, r)
 }
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX

@@ -78,15 +78,15 @@ func assertLlamaClientAccepts(t *testing.T, rows []catalogRow) {
 
 func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *testutil.FakeClock) {
 	t.Helper()
-	cfg := &config.ServerConfig{}
-	mgr, clk := newBudgetManager(t, cfg, nil)
-	// Two models: one plain, one multimodal with a pinned context.
-	cfg.Models = append(cfg.Models,
-		config.ServerModelConfig{Alias: "plain", Args: map[string]any{"memoryGB": 4.0, "ctx-size": 32768.0}},
-		config.ServerModelConfig{Alias: "vision", Args: map[string]any{"memoryGB": 4.0, "mmproj": "/p.gguf"}},
-	)
-	mgr.memory["plain"] = 4 * bytesPerGB
-	mgr.memory["vision"] = 4 * bytesPerGB
+	// Two models: one plain, one multimodal with a pinned context. memoryGB
+	// is set explicitly so NewServerManager's own estimation (which reads
+	// it as an override) produces a known size without poking mgr.memory.
+	cfg := &config.ServerConfig{Models: []config.ServerModelConfig{
+		{Alias: "plain", Args: map[string]any{"memoryGB": 4.0, "ctx-size": 32768.0}},
+		{Alias: "vision", Args: map[string]any{"memoryGB": 4.0, "mmproj": "/p.gguf"}},
+	}}
+	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
 
 	return NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil), mgr, clk
 }
@@ -117,7 +117,7 @@ func TestRouterCatalog_ConfiguredModelsAreUsable(t *testing.T) {
 }
 
 func TestRouterCatalog_ReportsLoadState(t *testing.T) {
-	router, mgr, clk := newCatalogRouter(t)
+	router, mgr, _ := newCatalogRouter(t)
 
 	byID := func() map[string]catalogRow {
 		out := map[string]catalogRow{}
@@ -134,15 +134,12 @@ func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 
 	// A process that exists but has not passed its health check is "loading" —
 	// clients poll on this transition, so it must not read as unloaded.
-	inst := &serverInstance{ready: make(chan struct{}), lastUsed: clk.Now()}
-	mgr.mu.Lock()
-	mgr.instances["plain"] = inst
-	mgr.mu.Unlock()
+	markHealthy := mgr.InjectLoadingInstanceForTest("plain")
 	if got := byID()["plain"].Status.Value; got != ModelStatusLoading {
 		t.Errorf("status = %q, want %q while starting up", got, ModelStatusLoading)
 	}
 
-	inst.healthy.Store(true)
+	markHealthy()
 	if got := byID()["plain"].Status.Value; got != ModelStatusLoaded {
 		t.Errorf("status = %q, want %q once healthy", got, ModelStatusLoaded)
 	}
@@ -155,12 +152,10 @@ func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 
 // A live instance proves any recorded failure is stale.
 func TestRouterCatalog_RunningInstanceOverridesStaleFailure(t *testing.T) {
-	router, mgr, clk := newCatalogRouter(t)
+	router, mgr, _ := newCatalogRouter(t)
 
-	mgr.mu.Lock()
-	mgr.loadErrors["plain"] = "an old failure"
-	mgr.mu.Unlock()
-	addInstance(mgr, "plain", 0, clk.Now())
+	mgr.SetLoadErrorForTest("plain", "an old failure")
+	mgr.InjectReadyInstanceForTest("plain", 0, 0)
 
 	for _, row := range fetchCatalog(t, router, "/models") {
 		if row.ID != "plain" {
@@ -205,9 +200,7 @@ func TestRouterCatalog_MetadataMapping(t *testing.T) {
 func TestRouterCatalog_SurfacesLoadFailure(t *testing.T) {
 	router, mgr, _ := newCatalogRouter(t)
 
-	mgr.mu.Lock()
-	mgr.loadErrors["plain"] = "binary not found"
-	mgr.mu.Unlock()
+	mgr.SetLoadErrorForTest("plain", "binary not found")
 
 	var row catalogRow
 	for _, r := range fetchCatalog(t, router, "/models") {
@@ -231,9 +224,7 @@ func TestRouterCatalog_SurfacesLoadFailure(t *testing.T) {
 func TestRouterCatalog_LoadClearsPriorFailure(t *testing.T) {
 	router, mgr, _ := newCatalogRouter(t)
 
-	mgr.mu.Lock()
-	mgr.loadErrors["plain"] = "stale failure"
-	mgr.mu.Unlock()
+	mgr.SetLoadErrorForTest("plain", "stale failure")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/models/load", bytes.NewReader([]byte(`{"model":"plain"}`)))
@@ -247,9 +238,7 @@ func TestRouterCatalog_LoadClearsPriorFailure(t *testing.T) {
 	// previous run's failure as this one's.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		mgr.mu.Lock()
-		msg := mgr.loadErrors["plain"]
-		mgr.mu.Unlock()
+		msg := mgr.LoadErrorForTest("plain")
 		if msg != "stale failure" {
 			return // cleared, then possibly replaced by the real failure
 		}
@@ -330,15 +319,14 @@ func TestRouterModelLoad_RejectsUnmanagedModel(t *testing.T) {
 }
 
 func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
-	cfg := &config.ServerConfig{}
-	mgr, _ := newBudgetManager(t, cfg, nil)
-	cfg.Models = append(cfg.Models,
-		config.ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
-		config.ServerModelConfig{Alias: "unpinned", Args: map[string]any{}},
-	)
+	cfg := &config.ServerConfig{Models: []config.ServerModelConfig{
+		{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		{Alias: "unpinned", Args: map[string]any{}},
+	}}
+	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
 	// Native context as read from model metadata at construction.
-	mgr.trainedContext["pinned"] = 131072
-	mgr.trainedContext["unpinned"] = 262144
+	mgr.SetTrainedContextForTest("pinned", 131072)
+	mgr.SetTrainedContextForTest("unpinned", 262144)
 
 	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)
 	rows := map[string]catalogRow{}
@@ -460,15 +448,14 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 // hardcoded default when the field is absent. These tests pin that flat field
 // across all three row shapes, additively alongside meta.n_ctx/n_ctx_train.
 func TestRouterCatalog_ManagedContextLengthTopLevel(t *testing.T) {
-	cfg := &config.ServerConfig{}
-	mgr, _ := newBudgetManager(t, cfg, nil)
-	cfg.Models = append(cfg.Models,
-		config.ServerModelConfig{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
-		config.ServerModelConfig{Alias: "trained-only", Args: map[string]any{}},
-		config.ServerModelConfig{Alias: "unknown", Args: map[string]any{}},
-	)
-	mgr.trainedContext["pinned"] = 131072
-	mgr.trainedContext["trained-only"] = 262144
+	cfg := &config.ServerConfig{Models: []config.ServerModelConfig{
+		{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
+		{Alias: "trained-only", Args: map[string]any{}},
+		{Alias: "unknown", Args: map[string]any{}},
+	}}
+	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	mgr.SetTrainedContextForTest("pinned", 131072)
+	mgr.SetTrainedContextForTest("trained-only", 262144)
 	// "unknown" has neither a pinned ctx-size nor a recorded trained context.
 
 	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)

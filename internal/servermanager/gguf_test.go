@@ -1,4 +1,4 @@
-package main
+package servermanager
 
 import (
 	"bytes"
@@ -303,7 +303,7 @@ func TestEstimateModelMemory_ExplicitOverrideWins(t *testing.T) {
 		Alias: "override",
 		Args:  map[string]any{"memoryGB": 26.0, "model": "/does/not/exist.gguf"},
 	}
-	got := estimateModelMemory(llamaProfile, cfg, 10)
+	got := estimateModelMemory(LlamaProfile, cfg, 10)
 	want := int64(26 * bytesPerGB)
 	if got != want {
 		t.Errorf("estimate = %d (%s), want %d", got, formatGB(got), want)
@@ -317,7 +317,7 @@ func TestEstimateModelMemory_UnreadableModelIsUnknown(t *testing.T) {
 	}
 	// Unknown must be 0 — the manager treats that as "cannot be size-budgeted"
 	// rather than guessing a number that would silently mis-admit.
-	if got := estimateModelMemory(llamaProfile, cfg, 10); got != 0 {
+	if got := estimateModelMemory(LlamaProfile, cfg, 10); got != 0 {
 		t.Errorf("estimate = %d, want 0 for an unreadable model", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestEstimateModelMemory_AppliesHeadroom(t *testing.T) {
 	const kv = 1 * 128 * 1 * (64 + 64) * 2 // f16 default
 	base := info.Size() + kv
 
-	got := estimateModelMemory(llamaProfile, cfg, 50)
+	got := estimateModelMemory(LlamaProfile, cfg, 50)
 	want := base + base/2
 	if got != want {
 		t.Errorf("estimate = %d, want %d (base %d + 50%% headroom)", got, want, base)

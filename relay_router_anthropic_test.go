@@ -182,12 +182,7 @@ func anthropicRedirectFixture(t *testing.T, alias string, upstream *httptest.Ser
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{})}
-	inst.port = port
-	inst.healthy.Store(true)
-	mgr.mu.Lock()
-	mgr.instances[alias] = inst
-	mgr.mu.Unlock()
+	mgr.InjectReadyInstanceForTest(alias, port, 0)
 
 	return newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", modelMap), []*ServerManager{mgr}, nil, nil)
 }
@@ -413,12 +408,7 @@ func TestAnthropic_Redirect_BackendDown_MapsToOverloadedError(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "dead-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{})}
-	inst.port = deadPort
-	inst.healthy.Store(true)
-	mgr.mu.Lock()
-	mgr.instances["dead-model"] = inst
-	mgr.mu.Unlock()
+	mgr.InjectReadyInstanceForTest("dead-model", deadPort, 0)
 
 	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", map[string]string{"claude-haiku-4-5": "dead-model"}), []*ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
@@ -573,12 +563,7 @@ func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "slow-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
-	inst := &serverInstance{ready: make(chan struct{})}
-	inst.port = port
-	inst.healthy.Store(true)
-	mgr.mu.Lock()
-	mgr.instances["slow-model"] = inst
-	mgr.mu.Unlock()
+	mgr.InjectReadyInstanceForTest("slow-model", port, 0)
 
 	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
