@@ -1,7 +1,9 @@
-package main
+package provider
 
 import (
 	"encoding/json"
+	"relayllm/internal/events"
+	"relayllm/internal/types"
 	"testing"
 )
 
@@ -52,17 +54,17 @@ func TestExtractUsageFromAgentEnd_MultiTurn(t *testing.T) {
 // canonical assistant event stream and that allBlocks accumulates the
 // completed content blocks in the right order.
 func TestBlockInterleaving(t *testing.T) {
-	var events []map[string]any
+	var capturedEvents []map[string]any
 	handler := func(_ string, data json.RawMessage) {
 		var ev map[string]any
 		_ = json.Unmarshal(data, &ev)
-		events = append(events, ev)
+		capturedEvents = append(capturedEvents, ev)
 	}
 	p := &PiProvider{
 		handler:      handler,
 		piIdxToRelay: make(map[int]int),
 	}
-	p.emitter = NewEventEmitter(handler)
+	p.emitter = events.NewEventEmitter(handler)
 
 	// thinking_start (idx 0) → start a thinking block
 	p.translateMessageUpdate(json.RawMessage(`{"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}`))
@@ -76,7 +78,7 @@ func TestBlockInterleaving(t *testing.T) {
 
 	// Every event must have type "assistant" — that's the canonical relay
 	// wire format defined in events.go.
-	for i, ev := range events {
+	for i, ev := range capturedEvents {
 		if ev["type"] != "assistant" {
 			t.Errorf("event[%d].type: got %v want \"assistant\"", i, ev["type"])
 		}
@@ -89,14 +91,14 @@ func TestBlockInterleaving(t *testing.T) {
 	//   {index:1, content_block:{type:text}}             TextBlockStart
 	//   {index:1, delta:{type:text_delta}}               TextDelta
 	//   {index:1, content_block_stop:true}               text_end
-	if len(events) != 6 {
-		t.Fatalf("want 6 events, got %d: %v", len(events), events)
+	if len(capturedEvents) != 6 {
+		t.Fatalf("want 6 events, got %d: %v", len(capturedEvents), capturedEvents)
 	}
-	if events[2]["content_block_stop"] != true || events[2]["index"].(float64) != 0 {
-		t.Errorf("event[2] should be auto-close of block 0; got %v", events[2])
+	if capturedEvents[2]["content_block_stop"] != true || capturedEvents[2]["index"].(float64) != 0 {
+		t.Errorf("event[2] should be auto-close of block 0; got %v", capturedEvents[2])
 	}
-	if events[5]["content_block_stop"] != true || events[5]["index"].(float64) != 1 {
-		t.Errorf("event[5] should be close of block 1; got %v", events[5])
+	if capturedEvents[5]["content_block_stop"] != true || capturedEvents[5]["index"].(float64) != 1 {
+		t.Errorf("event[5] should be close of block 1; got %v", capturedEvents[5])
 	}
 
 	// Both blocks must end up in allBlocks for session.Messages persistence.
@@ -121,12 +123,12 @@ func piTestProvider() (*PiProvider, *[]map[string]any) {
 		*captured = append(*captured, ev)
 	}
 	p := &PiProvider{
-		session:       &Session{ID: "sid-test"},
+		session:       &types.Session{ID: "sid-test"},
 		handler:       handler,
 		piIdxToRelay:  make(map[int]int),
 		toolNamesByID: make(map[string]string),
 	}
-	p.emitter = NewEventEmitter(handler)
+	p.emitter = events.NewEventEmitter(handler)
 	return p, captured
 }
 

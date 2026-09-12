@@ -15,6 +15,7 @@ package main
 import (
 	"encoding/json"
 	"os/exec"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 )
@@ -61,8 +62,8 @@ func TestClaudeLive_HTTPMessage_RoundTripsThroughCLI(t *testing.T) {
 	sess.Unlock()
 
 	var resp struct {
-		Response string       `json:"response"`
-		Stats    SessionStats `json:"stats"`
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
 	}
 	httpResp := srv.PostJSON("/api/sessions/"+sessionID+"/message",
 		map[string]interface{}{"text": "Reply with exactly: pong"},
@@ -82,7 +83,7 @@ func TestClaudeLive_HTTPMessage_RoundTripsThroughCLI(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Session resume — claudeSessionID survives EndSession → reload → SendMessage
+// types.Session resume — claudeSessionID survives EndSession → reload → SendMessage
 // ---------------------------------------------------------------------------
 
 func TestClaudeLive_SessionResume_RemembersContext(t *testing.T) {

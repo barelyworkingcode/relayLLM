@@ -1,13 +1,15 @@
-package main
+package provider
 
 import (
 	"encoding/json"
+	"relayllm/internal/relay"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"testing"
 )
 
 func TestClaudeRelayMCPConfig_Disabled(t *testing.T) {
-	p := &ClaudeProvider{session: &Session{}}
+	p := &ClaudeProvider{session: &types.Session{}}
 	if got := p.relayMCPConfigJSON(""); got != "" {
 		t.Errorf("disabled config = %q, want empty", got)
 	}
@@ -20,7 +22,7 @@ func TestClaudeRelayMCPConfig_NoToken(t *testing.T) {
 	t.Setenv("RELAY_MCP_COMMAND", "/usr/local/bin/relay")
 
 	settings, _ := json.Marshal(map[string]any{"useRelayTools": true})
-	p := &ClaudeProvider{session: &Session{Settings: settings}}
+	p := &ClaudeProvider{session: &types.Session{Settings: settings}}
 	if got := p.relayMCPConfigJSON(""); got != "" {
 		t.Errorf("no-token config = %q, want empty", got)
 	}
@@ -30,7 +32,7 @@ func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 	t.Setenv("RELAY_MCP_COMMAND", "/usr/local/bin/relay")
 
 	settings, _ := json.Marshal(map[string]any{"useRelayTools": true})
-	p := &ClaudeProvider{session: &Session{Settings: settings}}
+	p := &ClaudeProvider{session: &types.Session{Settings: settings}}
 	raw := p.relayMCPConfigJSON("proj-token-abc")
 	if raw == "" {
 		t.Fatal("config empty despite useRelayTools + project token")
@@ -57,8 +59,8 @@ func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 		t.Errorf("args = %v, want [mcp]", server.Args)
 	}
 	// The child must carry the project-scoped token under the new env name.
-	if server.Env[envProjectToken] != "proj-token-abc" {
-		t.Errorf("%s = %q, want proj-token-abc", envProjectToken, server.Env[envProjectToken])
+	if server.Env[relay.EnvProjectToken] != "proj-token-abc" {
+		t.Errorf("%s = %q, want proj-token-abc", relay.EnvProjectToken, server.Env[relay.EnvProjectToken])
 	}
 	if _, leaked := server.Env["RELAY_MCP_TOKEN"]; leaked {
 		t.Errorf("relay MCP child env leaked a service-token slot: %v", server.Env)
@@ -70,20 +72,20 @@ func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 // which makes this restart- and rotation-safe.
 func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
-	data, _ := json.Marshal(RelayPtyEnvResponse{RelayToken: "resolved-token-xyz", WorkingDir: "/proj"})
-	fb.SetResponse(relayBridgeResponse{Type: respPtyEnv, Data: data})
+	data, _ := json.Marshal(relay.RelayPtyEnvResponse{RelayToken: "resolved-token-xyz", WorkingDir: "/proj"})
+	fb.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
-	p := &ClaudeProvider{session: &Session{ID: "s1", ProjectID: "proj-1", Directory: "/proj"}, directory: "/proj"}
+	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1", Directory: "/proj"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "resolved-token-xyz" {
 		t.Errorf("token = %q, want resolved-token-xyz", got)
 	}
 	reqs := fb.Requests()
-	if len(reqs) != 1 || reqs[0].Type != reqResolvePtyEnv {
+	if len(reqs) != 1 || reqs[0].Type != relay.ReqResolvePtyEnv {
 		t.Fatalf("bridge requests = %+v, want one ResolvePtyEnv", reqs)
 	}
 	// The request must resolve by the authoritative project id, not just a dir.
-	var got RelayPtyEnvRequest
+	var got relay.RelayPtyEnvRequest
 	if err := json.Unmarshal(reqs[0].Arguments, &got); err != nil {
 		t.Fatalf("decode request args: %v", err)
 	}
@@ -95,9 +97,9 @@ func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 // Standalone relayLLM (no service token in env) has no bridge to ask; return
 // empty rather than dialing and warning — and never escalate to a service token.
 func TestClaudeResolveMCPToken_StandaloneReturnsEmpty(t *testing.T) {
-	t.Setenv(envServiceToken, "")
-	t.Setenv(envServiceTokenLegacy, "")
-	p := &ClaudeProvider{session: &Session{ID: "s1", ProjectID: "proj-1"}, directory: "/proj"}
+	t.Setenv(relay.EnvServiceToken, "")
+	t.Setenv(relay.EnvServiceTokenLegacy, "")
+	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "" {
 		t.Errorf("token = %q, want empty (standalone)", got)
 	}

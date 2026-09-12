@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bufio"
@@ -10,6 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/events"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/spawn"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,8 +32,8 @@ const piRPCTimeout = 10 * time.Second
 // agent_end) into the Claude-shaped stream-json envelope so Eve can use a
 // single renderer regardless of which CLI agent backs the session.
 type PiProvider struct {
-	session *Session
-	handler EventHandler
+	session *types.Session
+	handler types.EventHandler
 
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
@@ -46,7 +50,7 @@ type PiProvider struct {
 	extraArgs     []string // appended to argv after standard flags
 
 	// Relay-managed spawn fields (mirror the PTY pidev template). When
-	// useRelayToken is set, Start() calls RelayManagedSpec.Resolve() to fetch
+	// useRelayToken is set, Start() calls spawn.RelayManagedSpec.Resolve() to fetch
 	// a project-scoped token before spawning pi. Skills load from the
 	// project's .claude/skills directory (relay generates and manages them).
 	useRelayToken  bool
@@ -57,7 +61,7 @@ type PiProvider struct {
 	// disabled (Mode == "never" or unset) Start() skips materialization
 	// and pi falls back to its global ~/.pi/agent/ config as before.
 	piConfig      *config.PiConfig
-	overlayInputs PiOverlayInputs
+	overlayInputs pioverlay.PiOverlayInputs
 
 	// RPC request/response correlation. pi commands carry an optional `id`
 	// field; the matching response echoes the same `id`. We register a
@@ -68,7 +72,7 @@ type PiProvider struct {
 
 	// Canonical event emitter (events.go) — produces the `type:"assistant"`
 	// wire format Eve renders for Ollama/OpenAI too. Initialized in Start.
-	emitter *EventEmitter
+	emitter *events.EventEmitter
 
 	// Per-turn translation state. Pi opens content blocks at sparse/
 	// re-usable `contentIndex` values and may open block N+1 before
@@ -81,7 +85,7 @@ type PiProvider struct {
 	currentBlockIdx int
 	piIdxToRelay    map[int]int
 	openRelayIdx    int             // 0-based relay index of the currently open block
-	openKind        string          // BlockText / BlockThinking / BlockToolUse — empty when no block open
+	openKind        string          // events.BlockText / events.BlockThinking / events.BlockToolUse — empty when no block open
 	openText        strings.Builder // accumulated text/thinking content for the open block
 	openToolID      string          // tool_use only
 	openToolName    string          // tool_use only
@@ -104,7 +108,7 @@ type PiProvider struct {
 	firstTokenNano atomic.Int64
 }
 
-func NewPiProvider(session *Session, handler EventHandler, provider, modelID, dataDir string, cfg *config.PiConfig, overlayInputs PiOverlayInputs) *PiProvider {
+func NewPiProvider(session *types.Session, handler types.EventHandler, provider, modelID, dataDir string, cfg *config.PiConfig, overlayInputs pioverlay.PiOverlayInputs) *PiProvider {
 	p := &PiProvider{
 		session:       session,
 		handler:       handler,
@@ -119,7 +123,7 @@ func NewPiProvider(session *Session, handler EventHandler, provider, modelID, da
 		piConfig:      cfg,
 		overlayInputs: overlayInputs,
 	}
-	p.emitter = NewEventEmitter(handler)
+	p.emitter = events.NewEventEmitter(handler)
 	if cfg != nil {
 		p.binaryPath = cfg.BinaryPath
 		p.extraArgs = cfg.ExtraArgs
@@ -161,8 +165,8 @@ func (p *PiProvider) sessionDir() string {
 // extraArgs, or when the convention dir (<project>/.claude/skills) is absent.
 // The filesystem probe lives here (not in buildPiArgs) so the argv assembly
 // stays pure and hermetically testable.
-func (p *PiProvider) resolveSkillDir(subs SpawnSubs) string {
-	if hasArg(p.extraArgs, "--skill") {
+func (p *PiProvider) resolveSkillDir(subs spawn.SpawnSubs) string {
+	if spawn.HasArg(p.extraArgs, "--skill") {
 		return ""
 	}
 	root := subs.ProjectPath
@@ -186,7 +190,7 @@ func (p *PiProvider) resolveSkillDir(subs SpawnSubs) string {
 // buildClaudeArgs — so the model-routing flags (--provider/--model/
 // --thinking), session resume (--session), and extraArgs expansion are
 // hermetically testable without spawning. See provider_pi_spawn_test.go.
-func (p *PiProvider) buildPiArgs(subs SpawnSubs, sessionDir, skillDir string) []string {
+func (p *PiProvider) buildPiArgs(subs spawn.SpawnSubs, sessionDir, skillDir string) []string {
 	args := []string{"--mode", "rpc"}
 
 	if p.provider != "" {
@@ -229,7 +233,7 @@ func (p *PiProvider) Start() error {
 	// Relay-managed spawn prep: fetch project token + resolved project path,
 	// expose ${PROJECT_PATH}/${RELAY_TOKEN}/${project.path} for extraArgs.
 	// No-op when none of the relay-managed fields are set.
-	subs, err := RelayManagedSpec{
+	subs, err := spawn.RelayManagedSpec{
 		ProjectID:     p.session.ProjectID,
 		Directory:     p.directory,
 		UseRelayToken: p.useRelayToken,
@@ -249,12 +253,12 @@ func (p *PiProvider) Start() error {
 	piPath := resolvePiPath(p.binaryPath)
 	cmd := exec.Command(piPath, args...)
 	cmd.Dir = p.directory
-	cmd.Env = ensurePath(childBaseEnv())
+	cmd.Env = spawn.EnsurePath(spawn.ChildBaseEnv())
 	cmd.Env = append(cmd.Env,
 		"PI_OFFLINE=1",
 		"PI_SKIP_VERSION_CHECK=1",
 	)
-	cmd.Env, err = applyPiOverlayEnv(cmd.Env, p.directory, p.piConfig, p.overlayInputs)
+	cmd.Env, err = pioverlay.ApplyPiOverlayEnv(cmd.Env, p.directory, p.piConfig, p.overlayInputs)
 	if err != nil {
 		return fmt.Errorf("pi: %w", err)
 	}
@@ -262,8 +266,8 @@ func (p *PiProvider) Start() error {
 	// (subdir-tolerant, consistent with the Claude and terminal paths). Empty
 	// for a session with no project. Dual-written under the legacy name for
 	// existing skills that reference RELAY_TOKEN.
-	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
-	cmd.Env = applyEnvPassthrough(cmd.Env, p.envPassthrough)
+	cmd.Env = spawn.SetProjectTokenEnv(cmd.Env, subs.RelayToken)
+	cmd.Env = spawn.ApplyEnvPassthrough(cmd.Env, p.envPassthrough)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -435,19 +439,19 @@ func (p *PiProvider) allocBlockIndex(piIdx int) int {
 // No-op if no block is open. MUST be called with streamMu held.
 func (p *PiProvider) finalizeOpenBlockLocked() {
 	switch p.openKind {
-	case BlockText:
+	case events.BlockText:
 		p.emitter.BlockStop(p.openRelayIdx)
 		p.allBlocks = append(p.allBlocks, map[string]any{
-			"type": BlockText,
+			"type": events.BlockText,
 			"text": p.openText.String(),
 		})
-	case BlockThinking:
+	case events.BlockThinking:
 		p.emitter.BlockStop(p.openRelayIdx)
 		p.allBlocks = append(p.allBlocks, map[string]any{
-			"type":     BlockThinking,
+			"type":     events.BlockThinking,
 			"thinking": p.openText.String(),
 		})
-	case BlockToolUse:
+	case events.BlockToolUse:
 		var input json.RawMessage
 		if s := p.openToolArgs.String(); s != "" {
 			input = json.RawMessage(s)
@@ -457,7 +461,7 @@ func (p *PiProvider) finalizeOpenBlockLocked() {
 			input = json.RawMessage(`{}`)
 		}
 		p.allBlocks = append(p.allBlocks, map[string]any{
-			"type":  BlockToolUse,
+			"type":  events.BlockToolUse,
 			"id":    p.openToolID,
 			"name":  p.openToolName,
 			"input": input,
@@ -561,7 +565,7 @@ func (p *PiProvider) flushOpenBlock() {
 }
 
 // translate converts a pi RPC event to one or more canonical relay
-// llm_event frames (events.go format) and emits them via the EventEmitter.
+// llm_event frames (events.go format) and emits them via the events.EventEmitter.
 func (p *PiProvider) translate(eventType string, raw json.RawMessage) {
 	switch eventType {
 	case "agent_start":
@@ -734,7 +738,7 @@ func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
 	case "text_start":
 		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
 		idx := p.allocBlockIndex(ev.ContentIndex)
-		p.startBlock(idx, BlockText)
+		p.startBlock(idx, events.BlockText)
 		p.emitter.TextBlockStart(idx)
 
 	case "text_delta":
@@ -750,7 +754,7 @@ func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
 	case "thinking_start":
 		p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
 		idx := p.allocBlockIndex(ev.ContentIndex)
-		p.startBlock(idx, BlockThinking)
+		p.startBlock(idx, events.BlockThinking)
 		p.emitter.ThinkingBlockStart(idx)
 
 	case "thinking_delta":
@@ -765,7 +769,7 @@ func (p *PiProvider) translateMessageUpdate(raw json.RawMessage) {
 
 	case "toolcall_start":
 		idx := p.allocBlockIndex(ev.ContentIndex)
-		p.startBlock(idx, BlockToolUse)
+		p.startBlock(idx, events.BlockToolUse)
 		id, name := p.resolveToolIdentity(ev)
 		p.setOpenTool(id, name)
 		p.emitter.ToolUseBlockStart(idx, id, name)
@@ -802,7 +806,7 @@ func (p *PiProvider) translateToolResult(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return
 	}
-	p.emitter.ToolResult(ev.ToolCallID, ev.ToolName, flattenTextBlocks(ev.Result.Content), ev.IsError)
+	p.emitter.ToolResult(ev.ToolCallID, ev.ToolName, types.FlattenTextBlocks(ev.Result.Content), ev.IsError)
 }
 
 func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
@@ -829,7 +833,7 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 	}
 
 	statsData, _ := json.Marshal(stats)
-	p.handler(HandlerStatsUpdate, statsData)
+	p.handler(events.HandlerStatsUpdate, statsData)
 
 	// Persist the assistant turn as canonical content blocks (mirrors
 	// chat_base lines 402-407). Pi owns its own per-session JSONL too,
@@ -842,7 +846,7 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 	if len(blocks) > 0 {
 		contentJSON, _ := json.Marshal(blocks)
 		p.session.Lock()
-		p.session.Messages = append(p.session.Messages, Message{
+		p.session.Messages = append(p.session.Messages, types.Message{
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Role:      "assistant",
 			Content:   contentJSON,
@@ -852,13 +856,13 @@ func (p *PiProvider) translateAgentEnd(raw json.RawMessage) {
 
 	// nil data → session layer skips its fallback text-only save (we just
 	// did the canonical save above).
-	p.handler(HandlerMessageComplete, nil)
+	p.handler(events.HandlerMessageComplete, nil)
 }
 
 // extractUsageFromAgentEnd sums per-message usage from an agent_end event.
 // Pi reports per-assistant-message tokens, so summing covers multi-turn
 // agent runs (e.g. several tool-use rounds within one prompt).
-func extractUsageFromAgentEnd(raw json.RawMessage) SessionStats {
+func extractUsageFromAgentEnd(raw json.RawMessage) types.SessionStats {
 	var ev struct {
 		Messages []struct {
 			Role  string `json:"role"`
@@ -873,7 +877,7 @@ func extractUsageFromAgentEnd(raw json.RawMessage) SessionStats {
 			} `json:"usage"`
 		} `json:"messages"`
 	}
-	var s SessionStats
+	var s types.SessionStats
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return s
 	}
@@ -939,7 +943,7 @@ func (p *PiProvider) sendRPC(cmd map[string]interface{}) (json.RawMessage, error
 	}
 }
 
-func (p *PiProvider) SendMessage(text string, files []FileAttachment) error {
+func (p *PiProvider) SendMessage(text string, files []types.FileAttachment) error {
 	if !p.alive.Load() || p.stdin == nil {
 		return fmt.Errorf("pi process not running")
 	}

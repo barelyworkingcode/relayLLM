@@ -6,7 +6,7 @@ package main
 // surface fake-provider tests can't reach:
 //
 //   - SSE stream chunking and event ordering
-//   - ServerManager lifecycle (launch, port allocation, graceful stop)
+//   - servermanager.ServerManager lifecycle (launch, port allocation, graceful stop)
 //   - Real tool-call JSON quality (model emits valid function args)
 //   - Mid-stream stop / abort
 //
@@ -23,7 +23,11 @@ import (
 	"os"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/events"
+	"relayllm/internal/mcp"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,12 +38,12 @@ const liveTestAlias = "Qwen3.6 MoE 35"
 
 // Shared across all subtests so the model loads exactly once. nil if the
 // model isn't installed — every subtest checks and t.Skip's in that case.
-var liveLlama *ServerManager
+var liveLlama *servermanager.ServerManager
 
 func TestMain(m *testing.M) {
 	cfg := loadLiveLlamaConfig()
 	if cfg != nil {
-		liveLlama = NewServerManager(llamaProfile, cfg, "")
+		liveLlama = servermanager.NewServerManager(servermanager.LlamaProfile, cfg, "")
 	}
 	code := m.Run()
 	if liveLlama != nil {
@@ -148,7 +152,7 @@ func TestLlamaLive_HTTPMessage_RoundTripsRealLLM(t *testing.T) {
 	requireLive(t)
 
 	// TestServer wires sessions + perms + HTTP routes against the real
-	// ServerManager. The only fake here is the bearer-auth glue.
+	// servermanager.ServerManager. The only fake here is the bearer-auth glue.
 	srv := newLiveTestServer(t)
 
 	sessionID := srv.CreateSession(map[string]interface{}{
@@ -159,8 +163,8 @@ func TestLlamaLive_HTTPMessage_RoundTripsRealLLM(t *testing.T) {
 	})
 
 	var resp struct {
-		Response string       `json:"response"`
-		Stats    SessionStats `json:"stats"`
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
 	}
 	httpResp := srv.PostJSON("/api/sessions/"+sessionID+"/message",
 		map[string]interface{}{"text": "Reply with exactly the single word: pong"},
@@ -210,7 +214,7 @@ func TestLlamaLive_ToolCall_RoundTripsWithFakeMCP(t *testing.T) {
 	fakeMCP := testutil.NewFakeMCPClient(tool)
 
 	srv := newLiveTestServer(t)
-	srv.Sessions.SetMCPClientFactory(func(*Session) MCPClient { return fakeMCP })
+	srv.Sessions.SetMCPClientFactory(func(*types.Session) mcp.MCPClient { return fakeMCP })
 
 	sessionID := srv.CreateSession(map[string]interface{}{
 		"providerType": "llama",
@@ -220,8 +224,8 @@ func TestLlamaLive_ToolCall_RoundTripsWithFakeMCP(t *testing.T) {
 	})
 
 	var resp struct {
-		Response string       `json:"response"`
-		Stats    SessionStats `json:"stats"`
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
 	}
 	httpResp := srv.PostJSON("/api/sessions/"+sessionID+"/message",
 		map[string]interface{}{"text": "Use the add tool to compute 17+25 and tell me the answer."},
@@ -262,13 +266,13 @@ func TestLlamaLive_StopMidGeneration_CleanlyAborts(t *testing.T) {
 	})
 
 	// Wait for at least one llm_event so we know the stream is actively emitting.
-	ReadUntilType(t, conn, HandlerLLMEvent, 10*time.Second)
+	ReadUntilType(t, conn, events.HandlerLLMEvent, 10*time.Second)
 
 	// Issue stop.
 	WSSend(t, conn, map[string]interface{}{"type": "stop_generation", "sessionId": sessionID})
 
 	// message_complete arrives within a reasonable window after stop.
-	ReadUntilType(t, conn, HandlerMessageComplete, 5*time.Second)
+	ReadUntilType(t, conn, events.HandlerMessageComplete, 5*time.Second)
 
 	// Lifecycle sanity: after stop, the same model is still healthy.
 	instances := liveLlama.ListInstances()
@@ -283,7 +287,7 @@ func TestLlamaLive_StopMidGeneration_CleanlyAborts(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// newLiveTestServer wires a TestServer with the real ServerManager so
+// newLiveTestServer wires a TestServer with the real servermanager.ServerManager so
 // "llama/{alias}" sessions route to a real llama-server process.
 func newLiveTestServer(t *testing.T) *TestServer {
 	t.Helper()

@@ -1,7 +1,8 @@
-package main
+package provider
 
 import (
 	"relayllm/internal/config"
+	"relayllm/internal/pioverlay"
 	"relayllm/internal/types"
 
 	"bufio"
@@ -43,7 +44,7 @@ var piModels piModelsCache
 //
 // If pi is not on PATH, returns nil — the /api/models endpoint silently
 // drops the pi section.
-func FetchPiModels(ctx context.Context, piCfg *config.PiConfig, inputs PiOverlayInputs) []types.ModelInfo {
+func FetchPiModels(ctx context.Context, piCfg *config.PiConfig, inputs pioverlay.PiOverlayInputs) []types.ModelInfo {
 	var configuredPath string
 	if piCfg != nil {
 		configuredPath = piCfg.BinaryPath
@@ -102,7 +103,7 @@ func fetchPiListModelsCached(ctx context.Context, configuredPath string) []types
 // applyPiOverlayToModelList drops providers the overlay excludes and appends
 // overlay-added providers (currently: relay-router proxy entries). Keeps
 // ordering stable so the UI picker stays predictable.
-func applyPiOverlayToModelList(raw []types.ModelInfo, overlay config.PiProjectOverlay, inputs PiOverlayInputs) []types.ModelInfo {
+func applyPiOverlayToModelList(raw []types.ModelInfo, overlay config.PiProjectOverlay, inputs pioverlay.PiOverlayInputs) []types.ModelInfo {
 	excluded := make(map[string]struct{}, len(overlay.ExcludeProviders))
 	for _, name := range overlay.ExcludeProviders {
 		excluded[name] = struct{}{}
@@ -124,11 +125,11 @@ func applyPiOverlayToModelList(raw []types.ModelInfo, overlay config.PiProjectOv
 	// reflects what the user can actually pick.
 	if inputs.RouterPort != "" {
 		for _, sm := range inputs.ServerModels {
-			value := piModelString(piRelayRouterProvider, sm.Alias)
+			value := piModelString(pioverlay.RelayRouterProvider, sm.Alias)
 			out = append(out, types.ModelInfo{
 				Label:    value,
 				Value:    value,
-				Group:    "Pi · " + piRelayRouterProvider,
+				Group:    "Pi · " + pioverlay.RelayRouterProvider,
 				Provider: "pi",
 			})
 		}

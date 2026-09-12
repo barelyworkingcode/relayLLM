@@ -12,7 +12,57 @@ import (
 	"relayllm/internal/config"
 	"strings"
 	"testing"
+	"time"
 )
+
+// integStopTestEndpoint/skipIfOMLXUnavailable duplicate the identical check
+// in internal/provider/stop_generation_test.go — both are live-tagged test
+// scaffolding in different packages (test-file symbols never cross a
+// package boundary), so duplicating this small reachability probe is
+// simpler than sharing it.
+var integStopTestEndpoint = config.OpenAIEndpoint{
+	Name:    "omlx",
+	BaseURL: "http://localhost:8000/v1",
+	APIKey:  "omlx-sygde9eyq9mc0fvx",
+}
+
+const integStopTestModel = "gemma-4-31b-it-mxfp8"
+
+func skipIfOMLXUnavailable(t *testing.T) {
+	t.Helper()
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, integStopTestEndpoint.BaseURL+"/models", nil)
+	if integStopTestEndpoint.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+integStopTestEndpoint.APIKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Skipf("OMLX not reachable: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("OMLX /models returned %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Skipf("OMLX: decode /models: %v", err)
+	}
+	found := false
+	for _, m := range payload.Data {
+		if strings.Contains(m.ID, integStopTestModel) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skipf("OMLX: model %s not loaded", integStopTestModel)
+	}
+}
 
 // testServer wires up the full relayLLM stack in-process for integration testing.
 type testServer struct {
@@ -31,7 +81,12 @@ func newTestServer(t *testing.T) *testServer {
 	sessions := NewSessionManager(sessionStore, perms)
 	sessions.SetOpenAIConfig(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{
-			{Name: "omlx", BaseURL: integOMLXURL, APIKey: integOMLXKey},
+			// Local dev oMLX server + personal local-server token (not a
+			// production secret). Kept in sync with the identical constants
+			// in internal/provider/openai_integration_test.go by hand — this
+			// file predates the package split and duplicating two string
+			// literals is simpler than sharing a live-tagged-only const.
+			{Name: "omlx", BaseURL: "http://localhost:8000/v1", APIKey: "omlx-sygde9eyq9mc0fvx"},
 		},
 	})
 

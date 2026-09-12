@@ -1,11 +1,12 @@
 //go:build live
 
-package main
+package provider
 
 import (
 	"encoding/json"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"testing"
@@ -67,7 +68,7 @@ type stopCapture struct {
 	mu sync.Mutex
 
 	text               strings.Builder
-	stats              SessionStats
+	stats              types.SessionStats
 	gotComplete        chan struct{}
 	completeCount      int
 	gotError           string
@@ -168,14 +169,14 @@ func (c *stopCapture) getError() string {
 func newStopTestProvider(t *testing.T, prompt string) (*BaseChatProvider, *stopCapture) {
 	t.Helper()
 
-	session := &Session{
+	session := &types.Session{
 		ID:           "stop-test",
 		Model:        stopTestModel,
 		ProviderType: "openai",
-		Messages:     []Message{},
+		Messages:     []types.Message{},
 	}
 	userContent, _ := json.Marshal(prompt)
-	session.Messages = append(session.Messages, Message{
+	session.Messages = append(session.Messages, types.Message{
 		Timestamp: timeNow(),
 		Role:      "user",
 		Content:   userContent,
@@ -261,11 +262,11 @@ func TestStopGeneration_NoBleed(t *testing.T) {
 	skipIfOMLXUnavailable(t)
 
 	// Use a session directly so we can drive two SendMessage calls.
-	session := &Session{
+	session := &types.Session{
 		ID:           "stop-bleed-test",
 		Model:        stopTestModel,
 		ProviderType: "openai",
-		Messages:     []Message{},
+		Messages:     []types.Message{},
 	}
 
 	cap := newStopCapture()
@@ -281,7 +282,7 @@ func TestStopGeneration_NoBleed(t *testing.T) {
 		"Mention the word ELEPHANT in every sentence. Make it at least 2000 words."
 	userContent1, _ := json.Marshal(prompt1)
 	session.Lock()
-	session.Messages = append(session.Messages, Message{
+	session.Messages = append(session.Messages, types.Message{
 		Timestamp: timeNow(), Role: "user", Content: userContent1,
 	})
 	session.Unlock()
@@ -324,7 +325,7 @@ gotTurn1:
 	prompt2 := "What is 2 + 2? Reply with ONLY the number, nothing else."
 	userContent2, _ := json.Marshal(prompt2)
 	session.Lock()
-	session.Messages = append(session.Messages, Message{
+	session.Messages = append(session.Messages, types.Message{
 		Timestamp: timeNow(), Role: "user", Content: userContent2,
 	})
 	session.Unlock()

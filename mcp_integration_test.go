@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"relayllm/internal/provider"
 	"strings"
 	"testing"
 )
@@ -114,7 +115,7 @@ func TestIntegration_MCPToolCalling(t *testing.T) {
 		if msg.Role == "tool" {
 			hasToolMsg = true
 		}
-		if msg.Role == "assistant" && len(toolCallsFromContent(msg.Content)) > 0 {
+		if msg.Role == "assistant" && len(provider.ToolCallsFromContent(msg.Content)) > 0 {
 			hasToolCallAssistant = true
 		}
 	}

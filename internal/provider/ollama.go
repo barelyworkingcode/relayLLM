@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"relayllm/internal/types"
@@ -95,7 +95,7 @@ func (t *OllamaChatTransport) Ping(ctx context.Context) error {
 // BuildMessages converts session history into Ollama chat format, including
 // system prompt, image attachments (as top-level images: []string), and
 // persisted tool_calls / tool-result messages.
-func (t *OllamaChatTransport) BuildMessages(systemPrompt string, msgs []Message) []map[string]any {
+func (t *OllamaChatTransport) BuildMessages(systemPrompt string, msgs []types.Message) []map[string]any {
 	result := make([]map[string]any, 0, len(msgs)+1)
 
 	if systemPrompt != "" {
@@ -110,15 +110,15 @@ func (t *OllamaChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 		case "tool":
 			result = append(result, map[string]any{
 				"role":    "tool",
-				"content": extractTextContent(msg),
+				"content": types.ExtractTextContent(msg),
 			})
 
 		case "assistant":
 			entry := map[string]any{
 				"role":    "assistant",
-				"content": extractTextContent(msg),
+				"content": types.ExtractTextContent(msg),
 			}
-			if norm := toolCallsFromContent(msg.Content); len(norm) > 0 {
+			if norm := ToolCallsFromContent(msg.Content); len(norm) > 0 {
 				// Convert normalized → Ollama wire shape (no "id", no "type").
 				tc := make([]map[string]any, len(norm))
 				for i, n := range norm {
@@ -136,7 +136,7 @@ func (t *OllamaChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 		default: // "user" and any other role
 			entry := map[string]any{
 				"role":    msg.Role,
-				"content": extractTextContent(msg),
+				"content": types.ExtractTextContent(msg),
 			}
 			if len(msg.Files) > 0 {
 				images := make([]string, 0, len(msg.Files))
@@ -261,7 +261,7 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	var fullText strings.Builder
-	var stats SessionStats
+	var stats types.SessionStats
 	toolIdx := 0 // monotonic index across the whole stream
 
 	for scanner.Scan() {
@@ -305,7 +305,7 @@ func (t *OllamaChatTransport) StreamChunks(resp *http.Response, startTime time.T
 			if chunk.TotalDuration > 0 && chunk.EvalDuration > 0 {
 				ttft = float64(chunk.TotalDuration-chunk.EvalDuration) / 1e9
 			}
-			stats = SessionStats{
+			stats = types.SessionStats{
 				InputTokens:          chunk.PromptEvalCount,
 				OutputTokens:         chunk.EvalCount,
 				TimeToFirstToken:     ttft,
@@ -393,9 +393,9 @@ func (t *OllamaChatTransport) fetchModelContextLength(ctx context.Context) int {
 	return 0
 }
 
-// fetchOllamaModels queries Ollama's /api/tags endpoint and returns available
+// FetchOllamaModels queries Ollama's /api/tags endpoint and returns available
 // models in types.ModelInfo form for the /api/models aggregation route.
-func fetchOllamaModels(baseURL string) []types.ModelInfo {
+func FetchOllamaModels(baseURL string) []types.ModelInfo {
 	client := &http.Client{Timeout: 3 * time.Second}
 
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/tags", nil)

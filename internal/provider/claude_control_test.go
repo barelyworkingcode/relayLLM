@@ -1,9 +1,12 @@
-package main
+package provider
 
 import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"relayllm/internal/events"
+	"relayllm/internal/permission"
+	"relayllm/internal/types"
 	"testing"
 	"time"
 )
@@ -18,11 +21,11 @@ import (
 
 // newControlTestProvider builds a ClaudeProvider with its stdin wired to a
 // pipe the test can read control_response bytes off of. perms defaults to a
-// fresh PermissionManager if nil.
-func newControlTestProvider(t *testing.T, session *Session, perms *PermissionManager) (*ClaudeProvider, *io.PipeReader) {
+// fresh permission.PermissionManager if nil.
+func newControlTestProvider(t *testing.T, session *types.Session, perms *permission.PermissionManager) (*ClaudeProvider, *io.PipeReader) {
 	t.Helper()
 	if perms == nil {
-		perms = NewPermissionManager()
+		perms = permission.NewPermissionManager()
 	}
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { pw.Close(); pr.Close() })
@@ -34,7 +37,7 @@ func newControlTestProvider(t *testing.T, session *Session, perms *PermissionMan
 		stdin:   pw,
 	}
 	p.handler = func(string, json.RawMessage) {}
-	p.emitter = NewEventEmitter(p.handler)
+	p.emitter = events.NewEventEmitter(p.handler)
 	return p, pr
 }
 
@@ -65,7 +68,7 @@ func readOneLine(t *testing.T, pr *io.PipeReader) []byte {
 
 // firstPendingPermissionID returns the id of the (single) pending permission
 // request registered in perms, failing the test if there isn't exactly one.
-func firstPendingPermissionID(t *testing.T, perms *PermissionManager) string {
+func firstPendingPermissionID(t *testing.T, perms *permission.PermissionManager) string {
 	t.Helper()
 	ids := perms.PendingIDs()
 	if len(ids) != 1 {
@@ -92,14 +95,14 @@ func controlRequestLine(requestID, toolName, input, toolUseID string) []byte {
 }
 
 func TestControlRequest_AllowWritesExactControlResponse(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	p.processLine(controlRequestLine("42", "Write", `{"file_path":"/tmp/x"}`, "tu_1"))
 
 	id := firstPendingPermissionID(t, perms)
-	perms.Resolve(id, PermissionDecision{Decision: "allow"})
+	perms.Resolve(id, permission.PermissionDecision{Decision: "allow"})
 
 	got := readOneLine(t, pr)
 	want := buildControlResponseAllow(json.RawMessage("42"), json.RawMessage(`{"file_path":"/tmp/x"}`))
@@ -109,14 +112,14 @@ func TestControlRequest_AllowWritesExactControlResponse(t *testing.T) {
 }
 
 func TestControlRequest_DenyWritesExactControlResponse(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	p.processLine(controlRequestLine(`"req-7"`, "Bash", `{"command":"rm -rf /"}`, "tu_2"))
 
 	id := firstPendingPermissionID(t, perms)
-	perms.Resolve(id, PermissionDecision{Decision: "deny", Reason: "not on my watch"})
+	perms.Resolve(id, permission.PermissionDecision{Decision: "deny", Reason: "not on my watch"})
 
 	got := readOneLine(t, pr)
 	want := buildControlResponseDeny(json.RawMessage(`"req-7"`), "not on my watch")
@@ -127,13 +130,13 @@ func TestControlRequest_DenyWritesExactControlResponse(t *testing.T) {
 
 // A deny with no reason defaults to "Denied by user" (../relay/docs/ssh-hosts.md).
 func TestControlRequest_DenyWithoutReasonDefaultsMessage(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	p.processLine(controlRequestLine("1", "Read", `{}`, "tu_3"))
 	id := firstPendingPermissionID(t, perms)
-	perms.Resolve(id, PermissionDecision{Decision: "deny"})
+	perms.Resolve(id, permission.PermissionDecision{Decision: "deny"})
 
 	got := readOneLine(t, pr)
 	want := buildControlResponseDeny(json.RawMessage("1"), "Denied by user")
@@ -145,8 +148,8 @@ func TestControlRequest_DenyWithoutReasonDefaultsMessage(t *testing.T) {
 // A session policy deny/allow rule short-circuits before ever registering a
 // pending request or bothering a viewer — exactly like /api/permission.
 func TestControlRequest_PolicyDenyShortCircuits(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1", Policy: &PermissionPolicy{DeniedTools: []string{"Bash"}}}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1", Policy: &types.PermissionPolicy{DeniedTools: []string{"Bash"}}}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	go p.processLine(controlRequestLine("9", "Bash", `{"command":"ls"}`, "tu_4"))
@@ -164,8 +167,8 @@ func TestControlRequest_PolicyDenyShortCircuits(t *testing.T) {
 }
 
 func TestControlRequest_PolicyAllowShortCircuits(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1", Policy: &PermissionPolicy{AllowedTools: []string{"Read"}}}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1", Policy: &types.PermissionPolicy{AllowedTools: []string{"Read"}}}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	go p.processLine(controlRequestLine("9", "Read", `{"path":"/tmp/x"}`, "tu_5"))
@@ -181,8 +184,8 @@ func TestControlRequest_PolicyAllowShortCircuits(t *testing.T) {
 // so the CLI's stdio permission channel never blocks on a request type this
 // provider doesn't implement.
 func TestControlRequest_UnsupportedSubtype(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	raw, _ := json.Marshal(map[string]any{
@@ -202,8 +205,8 @@ func TestControlRequest_UnsupportedSubtype(t *testing.T) {
 // Kill denies every pending control_request for the session instead of
 // leaving it to burn its 60s timeout.
 func TestClaudeProvider_Kill_DeniesAllPendingControlRequests(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	p.processLine(controlRequestLine("1", "Write", `{}`, "tu_1"))
@@ -220,17 +223,17 @@ func TestClaudeProvider_Kill_DeniesAllPendingControlRequests(t *testing.T) {
 
 // permission_response (the WS message Eve sends for both the hook and the
 // control_request path) resolves a control_request-registered entry through
-// the exact same PermissionManager.Resolve call the hook path uses — no
+// the exact same permission.PermissionManager.Resolve call the hook path uses — no
 // separate resolution mechanism needed.
 func TestControlRequest_ResolvesThroughSharedPermissionManager(t *testing.T) {
-	perms := NewPermissionManager()
-	session := &Session{ID: "sess-1"}
+	perms := permission.NewPermissionManager()
+	session := &types.Session{ID: "sess-1"}
 	p, pr := newControlTestProvider(t, session, perms)
 
 	p.processLine(controlRequestLine("1", "Edit", `{"path":"/x"}`, "tu_1"))
 	id := firstPendingPermissionID(t, perms)
 
-	if ok := perms.Resolve(id, PermissionDecision{Decision: "allow"}); !ok {
+	if ok := perms.Resolve(id, permission.PermissionDecision{Decision: "allow"}); !ok {
 		t.Fatal("Resolve reported the id as not found")
 	}
 	got := readOneLine(t, pr)

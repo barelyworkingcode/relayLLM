@@ -1,10 +1,11 @@
-package main
+package provider
 
 import (
 	"strings"
 	"testing"
 
 	"relayllm/internal/sshhost"
+	"relayllm/internal/types"
 )
 
 // Hermetic coverage of Claude CLI spawn argv/env construction. These lock the
@@ -57,7 +58,7 @@ func envValue(env []string, key string) (string, bool) {
 	return "", false
 }
 
-func claudeArgsProvider(sess *Session) *ClaudeProvider {
+func claudeArgsProvider(sess *types.Session) *ClaudeProvider {
 	return &ClaudeProvider{session: sess, model: sess.Model}
 }
 
@@ -66,7 +67,7 @@ func claudeArgsProvider(sess *Session) *ClaudeProvider {
 // ---------------------------------------------------------------------------
 
 func TestBuildClaudeArgs_BaseFlags(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "claude-sonnet-4-6"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "claude-sonnet-4-6"})
 	args := p.buildClaudeArgs("")
 
 	// The fixed stream-json contract Eve's renderer depends on.
@@ -84,12 +85,12 @@ func TestBuildClaudeArgs_BaseFlags(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_ResumeOnlyWithSessionID(t *testing.T) {
-	fresh := claudeArgsProvider(&Session{ID: "s1", Model: "m"})
+	fresh := claudeArgsProvider(&types.Session{ID: "s1", Model: "m"})
 	if spawnHasFlag(fresh.buildClaudeArgs(""), "--resume") {
 		t.Error("fresh session must not pass --resume")
 	}
 
-	resumed := claudeArgsProvider(&Session{ID: "s1", Model: "m"})
+	resumed := claudeArgsProvider(&types.Session{ID: "s1", Model: "m"})
 	resumed.claudeSessionID = "abc-123"
 	if v, ok := spawnFlagValue(resumed.buildClaudeArgs(""), "--resume"); !ok || v != "abc-123" {
 		t.Errorf("--resume = %q (present=%v); want abc-123", v, ok)
@@ -99,7 +100,7 @@ func TestBuildClaudeArgs_ResumeOnlyWithSessionID(t *testing.T) {
 // The core security guard: a normal (non-headless, default-mode) session must
 // never receive the permission escape hatches.
 func TestBuildClaudeArgs_DefaultModeHasNoPermissionFlags(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "m"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "m"})
 	args := p.buildClaudeArgs("")
 
 	if spawnHasFlag(args, "--dangerously-skip-permissions") {
@@ -111,7 +112,7 @@ func TestBuildClaudeArgs_DefaultModeHasNoPermissionFlags(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_HeadlessAddsBypassAndSkip(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "m", Headless: true})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "m", Headless: true})
 	args := p.buildClaudeArgs("")
 
 	if v, ok := spawnFlagValue(args, "--permission-mode"); !ok || v != "bypassPermissions" {
@@ -124,7 +125,7 @@ func TestBuildClaudeArgs_HeadlessAddsBypassAndSkip(t *testing.T) {
 
 // Headless is the legacy synonym and must win even when a different mode is set.
 func TestBuildClaudeArgs_HeadlessOverridesExplicitMode(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "m", Headless: true, PermissionMode: "acceptEdits"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "m", Headless: true, PermissionMode: "acceptEdits"})
 	args := p.buildClaudeArgs("")
 	if v, _ := spawnFlagValue(args, "--permission-mode"); v != "bypassPermissions" {
 		t.Errorf("headless must force bypassPermissions, got --permission-mode %q", v)
@@ -136,7 +137,7 @@ func TestBuildClaudeArgs_HeadlessOverridesExplicitMode(t *testing.T) {
 
 // A non-default mode that is NOT bypass forwards the mode but never the skip flag.
 func TestBuildClaudeArgs_ExplicitModeNoBypass(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "m", PermissionMode: "acceptEdits"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "m", PermissionMode: "acceptEdits"})
 	args := p.buildClaudeArgs("")
 
 	if v, ok := spawnFlagValue(args, "--permission-mode"); !ok || v != "acceptEdits" {
@@ -148,10 +149,10 @@ func TestBuildClaudeArgs_ExplicitModeNoBypass(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_PolicyTools(t *testing.T) {
-	p := claudeArgsProvider(&Session{
+	p := claudeArgsProvider(&types.Session{
 		ID:    "s1",
 		Model: "m",
-		Policy: &PermissionPolicy{
+		Policy: &types.PermissionPolicy{
 			AllowedTools: []string{"Read", "Grep"},
 			DeniedTools:  []string{"Bash"},
 		},
@@ -167,7 +168,7 @@ func TestBuildClaudeArgs_PolicyTools(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_MCPConfigOptional(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "m"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "m"})
 
 	if spawnHasFlag(p.buildClaudeArgs(""), "--mcp-config") {
 		t.Error("empty mcpCfg must omit --mcp-config")
@@ -182,7 +183,7 @@ func TestBuildClaudeArgs_MCPConfigOptional(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildClaudeEnv_AlwaysSocketAndSessionID(t *testing.T) {
-	p := &ClaudeProvider{session: &Session{ID: "sess-42"}, hookSocket: "/tmp/h.sock"}
+	p := &ClaudeProvider{session: &types.Session{ID: "sess-42"}, hookSocket: "/tmp/h.sock"}
 	env := p.buildClaudeEnv(nil, "")
 
 	if v, ok := envValue(env, "RELAY_LLM_HOOK_SOCKET"); !ok || v != "/tmp/h.sock" {
@@ -194,24 +195,24 @@ func TestBuildClaudeEnv_AlwaysSocketAndSessionID(t *testing.T) {
 }
 
 func TestBuildClaudeEnv_HookTokenOnlyWhenSet(t *testing.T) {
-	without := &ClaudeProvider{session: &Session{ID: "s"}}
+	without := &ClaudeProvider{session: &types.Session{ID: "s"}}
 	if _, ok := envValue(without.buildClaudeEnv(nil, ""), "RELAY_LLM_HOOK_TOKEN"); ok {
 		t.Error("no hookToken must omit RELAY_LLM_HOOK_TOKEN")
 	}
 
-	with := &ClaudeProvider{session: &Session{ID: "s"}, hookToken: "tok"}
+	with := &ClaudeProvider{session: &types.Session{ID: "s"}, hookToken: "tok"}
 	if v, ok := envValue(with.buildClaudeEnv(nil, ""), "RELAY_LLM_HOOK_TOKEN"); !ok || v != "tok" {
 		t.Errorf("RELAY_LLM_HOOK_TOKEN = %q (present=%v); want tok", v, ok)
 	}
 }
 
 func TestBuildClaudeEnv_HeadlessFlagTracksMode(t *testing.T) {
-	headless := &ClaudeProvider{session: &Session{ID: "s", Headless: true}}
+	headless := &ClaudeProvider{session: &types.Session{ID: "s", Headless: true}}
 	if v, ok := envValue(headless.buildClaudeEnv(nil, ""), "RELAY_LLM_HEADLESS"); !ok || v != "true" {
 		t.Errorf("headless RELAY_LLM_HEADLESS = %q (present=%v); want true", v, ok)
 	}
 
-	normal := &ClaudeProvider{session: &Session{ID: "s"}}
+	normal := &ClaudeProvider{session: &types.Session{ID: "s"}}
 	if _, ok := envValue(normal.buildClaudeEnv(nil, ""), "RELAY_LLM_HEADLESS"); ok {
 		t.Error("non-headless session must NOT set RELAY_LLM_HEADLESS")
 	}
@@ -222,7 +223,7 @@ func TestBuildClaudeEnv_HeadlessFlagTracksMode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildClaudeArgs_Host_AddsStdioPromptToolOmitsMCPConfig(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "sonnet", Host: &HostSpec{ID: "h1", Name: "devbox"}})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "sonnet", Host: &types.HostSpec{ID: "h1", Name: "devbox"}})
 	args := p.buildClaudeArgs(`{"mcpServers":{}}`)
 
 	if v, ok := spawnFlagValue(args, "--permission-prompt-tool"); !ok || v != "stdio" {
@@ -234,7 +235,7 @@ func TestBuildClaudeArgs_Host_AddsStdioPromptToolOmitsMCPConfig(t *testing.T) {
 }
 
 func TestBuildClaudeArgs_Console_NeverAddsStdioPromptTool(t *testing.T) {
-	p := claudeArgsProvider(&Session{ID: "s1", Model: "sonnet"})
+	p := claudeArgsProvider(&types.Session{ID: "s1", Model: "sonnet"})
 	if spawnHasFlag(p.buildClaudeArgs(""), "--permission-prompt-tool") {
 		t.Error("a console session must not pass --permission-prompt-tool")
 	}
@@ -245,7 +246,7 @@ func TestBuildClaudeArgs_Console_NeverAddsStdioPromptTool(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildHostExec_NameIsSSHArgv0(t *testing.T) {
-	spec := &HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	spec := &types.HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	name, _ := buildHostExec(spec, "/home/a b", []string{"--print"}, map[string]string{"RELAY_LLM_SESSION_ID": "sid-1"})
 	if name != "ssh" {
 		t.Errorf("name = %q, want ssh", name)
@@ -253,7 +254,7 @@ func TestBuildHostExec_NameIsSSHArgv0(t *testing.T) {
 }
 
 func TestBuildHostExec_ArgvShapeAndTrailingRemoteCommand(t *testing.T) {
-	spec := &HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	spec := &types.HostSpec{SSHArgv: []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	args := []string{"--print", "--model", "sonnet"}
 	env := map[string]string{"RELAY_LLM_SESSION_ID": "sid-1"}
 
@@ -281,11 +282,11 @@ func TestBuildHostExec_ArgvShapeAndTrailingRemoteCommand(t *testing.T) {
 // "/opt/homebrew/bin/claude", model sonnet, default permission mode — the
 // scenario named in this feature's task report.
 func TestBuildHostExec_ExactArgvFixture(t *testing.T) {
-	spec := &HostSpec{
+	spec := &types.HostSpec{
 		SSHArgv:    []string{"ssh", "-o", "BatchMode=yes", "admin@localhost"},
 		ClaudePath: "/opt/homebrew/bin/claude",
 	}
-	session := &Session{ID: "sess-123", Model: "sonnet", Host: spec}
+	session := &types.Session{ID: "sess-123", Model: "sonnet", Host: spec}
 	p := claudeArgsProvider(session)
 	args := p.buildClaudeArgs("") // host branch: mcpCfg is always ignored
 

@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bufio"
@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,7 @@ type BackendAcquirer interface {
 }
 
 // BackendResolver launches-or-reuses a managed server and returns the endpoint
-// to talk to plus a lease release. See ServerManager.Acquire — ctx bounds the
+// to talk to plus a lease release. See servermanager.ServerManager.Acquire — ctx bounds the
 // resolver's own admission wait, not a launch it ends up owning.
 type BackendResolver func(ctx context.Context) (config.OpenAIEndpoint, func(), error)
 
@@ -114,7 +115,7 @@ func (t *OpenAIChatTransport) Ping(ctx context.Context) error {
 	// A managed backend has no endpoint until the first turn acquires one, and
 	// pinging it would mean launching the model at session-create time — the
 	// eager behavior the budget exists to avoid. Readiness is instead proven
-	// by the health check inside ServerManager.Acquire.
+	// by the health check inside servermanager.ServerManager.Acquire.
 	if t.resolve != nil {
 		return nil
 	}
@@ -154,7 +155,7 @@ func (t *OpenAIChatTransport) addAuth(req *http.Request) {
 // embedded as content blocks in the user message (not a top-level images[]),
 // and tool result messages carry a tool_call_id pairing them back to the
 // assistant entry that produced them.
-func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message) []map[string]any {
+func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []types.Message) []map[string]any {
 	result := make([]map[string]any, 0, len(msgs)+1)
 
 	if systemPrompt != "" {
@@ -177,7 +178,7 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 		case "tool":
 			entry := map[string]any{
 				"role":    "tool",
-				"content": extractTextContent(msg),
+				"content": types.ExtractTextContent(msg),
 			}
 			// Attach tool_call_id if we have one from the preceding assistant.
 			if toolResultIdx < len(lastAssistantCalls) {
@@ -197,9 +198,9 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 		case "assistant":
 			entry := map[string]any{
 				"role":    "assistant",
-				"content": extractTextContent(msg),
+				"content": types.ExtractTextContent(msg),
 			}
-			if norm := toolCallsFromContent(msg.Content); len(norm) > 0 {
+			if norm := ToolCallsFromContent(msg.Content); len(norm) > 0 {
 				// Mutate in place so any synthesized IDs propagate to the
 				// tool-result pairing pass below. Scope the synthesized id by
 				// the assistant's history position so an identically-shaped
@@ -225,7 +226,7 @@ func (t *OpenAIChatTransport) BuildMessages(systemPrompt string, msgs []Message)
 			lastAssistantCalls = nil
 			toolResultIdx = 0
 
-			text := extractTextContent(msg)
+			text := types.ExtractTextContent(msg)
 			if len(msg.Files) == 0 {
 				result = append(result, map[string]any{
 					"role":    msg.Role,
@@ -499,7 +500,7 @@ func (t *OpenAIChatTransport) StreamChunks(resp *http.Response, startTime time.T
 
 	// Compute stats. OpenAI-compatible servers don't expose Ollama-style
 	// eval durations, so we derive TTFT and TPS from wall clock.
-	stats := SessionStats{}
+	stats := types.SessionStats{}
 	if usage != nil {
 		stats.InputTokens = usage.PromptTokens
 		stats.OutputTokens = usage.CompletionTokens
