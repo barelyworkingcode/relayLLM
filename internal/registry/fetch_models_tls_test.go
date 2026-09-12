@@ -1,4 +1,4 @@
-package main
+package registry
 
 // Coverage for FetchOpenAIModels (provider_openai.go) against a real TLS
 // server, exercising the pinned/CA-anchored transports built by
