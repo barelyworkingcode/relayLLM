@@ -1,4 +1,4 @@
-package main
+package session
 
 // SessionManager + SessionStore lifecycle coverage. These tests drive the
 // manager directly (no HTTP/WS) so a failure points at the manager itself,
@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"relayllm/internal/permission"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"strconv"
 	"sync"
 	"testing"
@@ -22,17 +24,17 @@ func newTestSessionManager(t *testing.T) *SessionManager {
 	t.Helper()
 	dir := t.TempDir()
 	store := NewSessionStore(filepath.Join(dir, "sessions"))
-	perms := NewPermissionManager()
+	perms := permission.NewPermissionManager()
 	mgr := NewSessionManager(store, perms)
 	mgr.SetDataDir(dir)
-	mgr.SetProviderFactory(func(_ *Session, h EventHandler) (Provider, error) {
+	mgr.SetProviderFactory(func(_ *types.Session, h types.EventHandler) (types.Provider, error) {
 		return testutil.NewFakeProvider(h), nil
 	})
 	t.Cleanup(mgr.StopAll)
 	return mgr
 }
 
-func mustCreateSession(t *testing.T, mgr *SessionManager, name string) *Session {
+func mustCreateSession(t *testing.T, mgr *SessionManager, name string) *types.Session {
 	t.Helper()
 	sess, err := mgr.CreateSession("", t.TempDir(), name, "fake/m1", "", false, "fake", nil)
 	if err != nil {
@@ -51,7 +53,7 @@ func TestSession_PersistsToDiskOnEnd(t *testing.T) {
 
 	// Inject one message so we can prove it survives the round-trip.
 	sess.Lock()
-	sess.Messages = []Message{{Role: "user", Content: json.RawMessage(`"hello"`)}}
+	sess.Messages = []types.Message{{Role: "user", Content: json.RawMessage(`"hello"`)}}
 	sess.Unlock()
 
 	mgr.EndSession(sess.ID)
@@ -62,7 +64,7 @@ func TestSession_PersistsToDiskOnEnd(t *testing.T) {
 		t.Fatalf("expected persisted file at %s: %v", path, err)
 	}
 	data, _ := os.ReadFile(path)
-	var disk Session
+	var disk types.Session
 	if err := json.Unmarshal(data, &disk); err != nil {
 		t.Fatalf("decode persisted: %v", err)
 	}
@@ -116,7 +118,7 @@ func TestSession_ClearSession_WipesHistory_KeepsSession(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	sess := mustCreateSession(t, mgr, "to-clear")
 	sess.Lock()
-	sess.Messages = []Message{
+	sess.Messages = []types.Message{
 		{Role: "user", Content: json.RawMessage(`"a"`)},
 		{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"b"}]`)},
 	}
@@ -150,7 +152,7 @@ func TestSession_RenameSession_UpdatesNameInMemoryAndDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read disk: %v", err)
 	}
-	var disk Session
+	var disk types.Session
 	_ = json.Unmarshal(data, &disk)
 	if disk.Name != "new-name" {
 		t.Errorf("disk name: got %q", disk.Name)
@@ -174,7 +176,7 @@ func TestSession_SetSessionFolder_WorksOnPersistedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read disk: %v", err)
 	}
-	var disk Session
+	var disk types.Session
 	_ = json.Unmarshal(data, &disk)
 	if disk.Folder != "Archive" {
 		t.Errorf("disk folder: got %q, want %q", disk.Folder, "Archive")
@@ -319,9 +321,9 @@ func TestSession_SweepSessions_DeletesOldHeadlessOnly(t *testing.T) {
 	writeSession("old-headless", true, -10*24*time.Hour)
 	writeSession("old-keeper", false, -10*24*time.Hour)
 
-	removed, _, err := sweepSessions(sessionsDir, 7*24*time.Hour)
+	removed, _, err := SweepSessions(sessionsDir, 7*24*time.Hour)
 	if err != nil {
-		t.Fatalf("sweepSessions: %v", err)
+		t.Fatalf("SweepSessions: %v", err)
 	}
 	if removed != 1 {
 		t.Errorf("removed: got %d, want 1", removed)
@@ -341,7 +343,7 @@ func TestSession_SweepSessions_DeletesOldHeadlessOnly(t *testing.T) {
 
 func TestSession_SweepSessions_NoSessionsDir_IsNoOp(t *testing.T) {
 	dir := t.TempDir()
-	removed, livePi, err := sweepSessions(filepath.Join(dir, "nonexistent"), time.Hour)
+	removed, livePi, err := SweepSessions(filepath.Join(dir, "nonexistent"), time.Hour)
 	if err != nil {
 		t.Fatalf("sweep on missing dir: %v", err)
 	}
@@ -363,7 +365,7 @@ func TestSession_SweepSessions_HarvestsLivePiIDs(t *testing.T) {
 	})
 	os.WriteFile(filepath.Join(sessionsDir, "s1.json"), body, 0o600)
 
-	_, livePi, err := sweepSessions(sessionsDir, time.Hour)
+	_, livePi, err := SweepSessions(sessionsDir, time.Hour)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -378,10 +380,10 @@ func TestSession_SweepSessions_HarvestsLivePiIDs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPolicy_MatchToolRule_BareName(t *testing.T) {
-	if !MatchToolRule("Read", `{}`, []string{"Read"}) {
+	if !permission.MatchToolRule("Read", `{}`, []string{"Read"}) {
 		t.Error("bare-name pattern should match same-named tool")
 	}
-	if MatchToolRule("Write", `{}`, []string{"Read"}) {
+	if permission.MatchToolRule("Write", `{}`, []string{"Read"}) {
 		t.Error("bare-name pattern should not match a different tool")
 	}
 }
@@ -403,9 +405,9 @@ func TestPolicy_MatchToolRule_ArgPrefix(t *testing.T) {
 		{"Bash", `{ "command":"ls"}`, "Bash:ls", true, "leading whitespace tolerated"},
 	}
 	for _, tc := range cases {
-		got := MatchToolRule(tc.toolName, tc.toolInput, []string{tc.pattern})
+		got := permission.MatchToolRule(tc.toolName, tc.toolInput, []string{tc.pattern})
 		if got != tc.want {
-			t.Errorf("%s: MatchToolRule(%q, %q, [%q]) = %v, want %v",
+			t.Errorf("%s: permission.MatchToolRule(%q, %q, [%q]) = %v, want %v",
 				tc.desc, tc.toolName, tc.toolInput, tc.pattern, got, tc.want)
 		}
 	}
@@ -423,7 +425,7 @@ func TestSession_GetSession_ConcurrentLazyLoad_ReturnsSameInstance(t *testing.T)
 
 	const N = 16
 	var wg sync.WaitGroup
-	results := make([]*Session, N)
+	results := make([]*types.Session, N)
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func(i int) {
@@ -472,7 +474,7 @@ func TestSession_CreateSession_GeneratesUniqueIDs(t *testing.T) {
 func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
-	host := &HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	host := &types.HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	fb.SetHostPtyEnv("/home/admin/proj", host)
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
@@ -491,7 +493,7 @@ func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
 func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
-	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
+	fb.SetHostPtyEnv("/home/admin/proj", &types.HostSpec{ID: "h1", Name: "devbox"})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	sess, err := mgr.CreateSession("", t.TempDir(), "s", "fake/m1", "", false, "fake", nil)
@@ -511,7 +513,7 @@ func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
 func TestSession_CreateSession_RefusesPiOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
-	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
+	fb.SetHostPtyEnv("/home/admin/proj", &types.HostSpec{ID: "h1", Name: "devbox"})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	_, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "pi/anthropic/claude-sonnet-4", "", false, "pi", nil)
@@ -536,7 +538,7 @@ func TestSession_CreateSession_PiAllowedOnConsole(t *testing.T) {
 func TestSession_CreateSession_SkipsClaudeMdReadOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
-	fb.SetHostPtyEnv("", &HostSpec{ID: "h1", Name: "devbox"})
+	fb.SetHostPtyEnv("", &types.HostSpec{ID: "h1", Name: "devbox"})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	dir := t.TempDir()

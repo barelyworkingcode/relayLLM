@@ -1,9 +1,11 @@
-package main
+package session
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"relayllm/internal/events"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +22,7 @@ var ErrResponseTimeout = errors.New("response timeout")
 type ResponseCollector struct {
 	mu       sync.Mutex
 	text     strings.Builder
-	stats    SessionStats
+	stats    types.SessionStats
 	done     chan struct{}
 	doneOnce sync.Once
 	err      error
@@ -37,18 +39,18 @@ func (c *ResponseCollector) HandleEvent(msg map[string]interface{}) {
 	msgType, _ := msg["type"].(string)
 
 	switch msgType {
-	case HandlerLLMEvent:
+	case events.HandlerLLMEvent:
 		eventRaw, _ := msg["event"].(json.RawMessage)
 		c.extractText(eventRaw)
 
-	case HandlerStatsUpdate:
-		if stats, ok := msg["stats"].(SessionStats); ok {
+	case events.HandlerStatsUpdate:
+		if stats, ok := msg["stats"].(types.SessionStats); ok {
 			c.mu.Lock()
 			c.stats = stats
 			c.mu.Unlock()
 		}
 
-	case HandlerMessageComplete:
+	case events.HandlerMessageComplete:
 		c.doneOnce.Do(func() { close(c.done) })
 
 	case "error":
@@ -89,7 +91,7 @@ func (c *ResponseCollector) extractText(eventRaw json.RawMessage) {
 }
 
 // Wait blocks until the response is complete or timeout.
-func (c *ResponseCollector) Wait(timeout time.Duration) (string, SessionStats, error) {
+func (c *ResponseCollector) Wait(timeout time.Duration) (string, types.SessionStats, error) {
 	select {
 	case <-c.done:
 		c.mu.Lock()
@@ -99,6 +101,6 @@ func (c *ResponseCollector) Wait(timeout time.Duration) (string, SessionStats, e
 		}
 		return c.text.String(), c.stats, nil
 	case <-time.After(timeout):
-		return "", SessionStats{}, fmt.Errorf("%w after %v", ErrResponseTimeout, timeout)
+		return "", types.SessionStats{}, fmt.Errorf("%w after %v", ErrResponseTimeout, timeout)
 	}
 }

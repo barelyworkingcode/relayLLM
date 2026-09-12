@@ -110,7 +110,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	RegisterTerminalRoutes(mux, templateStore, terminals)
 	RegisterPermissionRoutes(mux, perms, sessions)
 	// Empty configs are fine — /api/models just returns nothing when nothing's wired.
-	RegisterModelRoutes(mux, "", nil, nil, nil, nil, sessions.piOverlayInputs)
+	RegisterModelRoutes(mux, "", nil, nil, nil, nil, sessions.PiOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, dataDir)
 	RegisterStatusRoutes(mux, sessions, terminals, nil, nil, time.Now())
 	RegisterDetailedStatusRoutes(mux, DetailedStatusDeps{

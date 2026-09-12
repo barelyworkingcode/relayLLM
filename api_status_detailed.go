@@ -21,6 +21,7 @@ import (
 	"net/http"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
+	"relayllm/internal/session"
 	"sort"
 	"strconv"
 	"strings"
@@ -332,7 +333,7 @@ func detailedRecentRequestRow(rr RecentRequestInfo) map[string]any {
 // (same package) rather than through ListSessions(), which returns a
 // display-oriented map missing providerType/stats/processing — the fields
 // this dashboard needs. Locking mirrors ListSessions()'s own convention
-// exactly: sessions.mu.RLock for the map, then each session's own mu for its
+// exactly: SnapshotSessions for the map, then each session's own mu for its
 // mutable fields, never both at once.
 // ---------------------------------------------------------------------------
 
@@ -341,15 +342,7 @@ func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]i
 		return []map[string]any{}, 0
 	}
 
-	sessions.mu.RLock()
-	list := make([]*Session, 0, len(sessions.sessions))
-	for _, s := range sessions.sessions {
-		if s.Headless {
-			continue
-		}
-		list = append(list, s)
-	}
-	sessions.mu.RUnlock()
+	list := sessions.SnapshotSessions()
 
 	rows = make([]map[string]any, 0, len(list))
 	for _, s := range list {
@@ -365,7 +358,7 @@ func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]i
 		directory := s.Directory
 		createdAt := s.CreatedAt
 		messageCount := len(s.Messages)
-		lastMsgAt := lastMessageAt(s.Messages)
+		lastMsgAt := session.LastMessageAt(s.Messages)
 		stats := s.Stats
 		s.Unlock()
 

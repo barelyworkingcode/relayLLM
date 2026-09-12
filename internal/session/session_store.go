@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"encoding/json"
@@ -6,11 +6,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"relayllm/internal/types"
 	"strings"
 	"time"
 )
 
-func (s *SessionStore) Save(session *Session) error {
+func (s *SessionStore) Save(session *types.Session) error {
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return err
 	}
@@ -27,14 +28,14 @@ func (s *SessionStore) Save(session *Session) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-func (s *SessionStore) Load(id string) (*Session, error) {
+func (s *SessionStore) Load(id string) (*types.Session, error) {
 	path := filepath.Join(s.dir, id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var session Session
+	var session types.Session
 	if err := json.Unmarshal(data, &session); err != nil {
 		return nil, err
 	}
@@ -46,7 +47,7 @@ func (s *SessionStore) Delete(id string) error {
 	return os.Remove(path)
 }
 
-func (s *SessionStore) LoadAll() ([]*Session, error) {
+func (s *SessionStore) LoadAll() ([]*types.Session, error) {
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return nil, err
 	}
@@ -56,7 +57,7 @@ func (s *SessionStore) LoadAll() ([]*Session, error) {
 		return nil, err
 	}
 
-	var sessions []*Session
+	var sessions []*types.Session
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -71,11 +72,11 @@ func (s *SessionStore) LoadAll() ([]*Session, error) {
 	return sessions, nil
 }
 
-// sweepSessions does a single pass over sessions/: deletes headless session
+// SweepSessions does a single pass over sessions/: deletes headless session
 // files older than headlessMaxAge, and returns the set of piSessionIds
 // referenced by surviving sessions (so the pi sweeper can skip live ones).
 // Non-headless sessions are never deleted — only the UI removes those.
-func sweepSessions(dir string, headlessMaxAge time.Duration) (removed int, livePi map[string]struct{}, err error) {
+func SweepSessions(dir string, headlessMaxAge time.Duration) (removed int, livePi map[string]struct{}, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -120,12 +121,12 @@ func sweepSessions(dir string, headlessMaxAge time.Duration) (removed int, liveP
 	return removed, livePi, nil
 }
 
-// sweepOrphanedPiSessions deletes pi-session JSONLs whose piSessionId isn't
+// SweepOrphanedPiSessions deletes pi-session JSONLs whose piSessionId isn't
 // in livePi. The minAge cushion avoids racing a pi process whose owning
 // session.json hasn't yet persisted its piSessionId. Walks recursively to
 // cover both pi's flat ({dir}/<ts>_<uuid>.jsonl) and nested
 // ({dir}/<cwd>/<ts>_<uuid>.jsonl) layouts.
-func sweepOrphanedPiSessions(piDir string, livePi map[string]struct{}, minAge time.Duration) (removed int, err error) {
+func SweepOrphanedPiSessions(piDir string, livePi map[string]struct{}, minAge time.Duration) (removed int, err error) {
 	cutoff := time.Now().Add(-minAge)
 	walkErr := filepath.WalkDir(piDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
