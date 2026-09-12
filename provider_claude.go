@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"relayllm/internal/sshhost"
 )
 
 var emptyJSONObject = []byte("{}")
@@ -274,7 +276,7 @@ func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string
 // security invariant — RELAY_LLM_SESSION_ID only, never the hook socket/token
 // or any relay token (decision 6) — is visible at the call site too.
 func buildHostExec(spec *HostSpec, dir string, args []string, env map[string]string) (name string, argv []string) {
-	remote := RemoteCommand(dir, append([]string{spec.ClaudePath}, args...), env)
+	remote := sshhost.RemoteCommand(dir, append([]string{spec.ClaudePath}, args...), env)
 	name = spec.SSHArgv[0]
 	argv = append(append([]string{}, spec.SSHArgv[1:]...), "-T", "--", remote)
 	return name, argv

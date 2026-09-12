@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"relayllm/internal/netutil"
 )
 
 // RelayRouter aggregates managed-server aliases (llama.cpp, MLX, …) and
@@ -290,7 +292,7 @@ func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegis
 // so a port-0 caller (the whole test suite passes ":0") sees the port it
 // actually got, not the literal string NewRelayRouter was constructed with.
 func (p *RelayRouter) Listen(addrs []string) error {
-	lns, err := listenAll(addrs, "relay router")
+	lns, err := netutil.ListenAll(addrs, "relay router")
 	if err != nil {
 		return err
 	}

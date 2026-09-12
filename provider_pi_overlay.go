@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"relayllm/internal/netutil"
 )
 
 // PiOverlayInputs bundles everything MaterializePiOverlay needs to translate
@@ -46,7 +48,7 @@ func routerOverlayHost(binds []string) string {
 		case "", "0.0.0.0", "::", "[::]":
 			return "localhost"
 		}
-		if isLoopbackHost(b) {
+		if netutil.IsLoopbackHost(b) {
 			return b
 		}
 	}

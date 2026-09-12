@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"net"
 	"net/http"
+	clk "relayllm/internal/clock"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -343,7 +344,7 @@ func derefOr(p *string, def string) string {
 // only for map insert/delete and ring append — never across a Write, never
 // across clock.Now() in a loop.
 type ProxyMetrics struct {
-	clock Clock
+	clock clk.Clock
 
 	nextID atomic.Uint64
 
@@ -360,9 +361,9 @@ type ProxyMetrics struct {
 }
 
 // NewProxyMetrics returns a registry. clock nil -> DefaultClock.
-func NewProxyMetrics(clock Clock) *ProxyMetrics {
+func NewProxyMetrics(clock clk.Clock) *ProxyMetrics {
 	if clock == nil {
-		clock = DefaultClock
+		clock = clk.DefaultClock
 	}
 	now := clock.Now()
 	return &ProxyMetrics{

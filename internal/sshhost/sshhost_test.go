@@ -1,4 +1,4 @@
-package main
+package sshhost
 
 import (
 	"encoding/base64"
@@ -11,7 +11,7 @@ import (
 // this is what keeps the three implementations from drifting apart.
 
 func TestBuildRemoteScript_Fixture1(t *testing.T) {
-	got := buildRemoteScript("/home/a b", []string{"/usr/bin/claude", "--print", "it's"}, nil)
+	got := BuildRemoteScript("/home/a b", []string{"/usr/bin/claude", "--print", "it's"}, nil)
 	want := `cd '/home/a b' && exec env '/usr/bin/claude' '--print' 'it'\''s'`
 	if got != want {
 		t.Errorf("script = %q, want %q", got, want)
@@ -19,7 +19,7 @@ func TestBuildRemoteScript_Fixture1(t *testing.T) {
 }
 
 func TestBuildRemoteScript_Fixture2(t *testing.T) {
-	got := buildRemoteScript("", []string{"cat", "/x/y.jsonl"}, map[string]string{"TERM": "xterm-256color"})
+	got := BuildRemoteScript("", []string{"cat", "/x/y.jsonl"}, map[string]string{"TERM": "xterm-256color"})
 	want := `exec env 'TERM'='xterm-256color' 'cat' '/x/y.jsonl'`
 	if got != want {
 		t.Errorf("script = %q, want %q", got, want)
@@ -63,7 +63,7 @@ func TestRemoteCommand_Fixture2Roundtrip(t *testing.T) {
 // regardless of Go's randomized map iteration order.
 func TestBuildRemoteScript_EnvKeysSorted(t *testing.T) {
 	env := map[string]string{"ZETA": "1", "ALPHA": "2", "MU": "3"}
-	got := buildRemoteScript("", []string{"true"}, env)
+	got := BuildRemoteScript("", []string{"true"}, env)
 	want := `exec env 'ALPHA'='2' 'MU'='3' 'ZETA'='1' 'true'`
 	if got != want {
 		t.Errorf("script = %q, want %q", got, want)
@@ -71,11 +71,11 @@ func TestBuildRemoteScript_EnvKeysSorted(t *testing.T) {
 }
 
 func TestSingleQuote_EscapesEmbeddedQuotes(t *testing.T) {
-	if got, want := singleQuote(`it's`), `'it'\''s'`; got != want {
-		t.Errorf("singleQuote = %q, want %q", got, want)
+	if got, want := SingleQuote(`it's`), `'it'\''s'`; got != want {
+		t.Errorf("SingleQuote = %q, want %q", got, want)
 	}
-	if got, want := singleQuote(""), `''`; got != want {
-		t.Errorf("singleQuote(\"\") = %q, want %q", got, want)
+	if got, want := SingleQuote(""), `''`; got != want {
+		t.Errorf("SingleQuote(\"\") = %q, want %q", got, want)
 	}
 }
 
@@ -100,21 +100,4 @@ func TestRemoteShellCommand_NoCwd(t *testing.T) {
 	if decoded != want {
 		t.Errorf("decoded = %q, want %q", decoded, want)
 	}
-}
-
-// RemoteShellCommandDecodedForTest reverses wrapLauncher for assertions —
-// production never needs to decode its own launcher, only the host's login
-// shell does.
-func RemoteShellCommandDecodedForTest(launcher string) string {
-	const prefix = `sh -c 'eval "$(printf %s `
-	const suffix = ` | base64 -d)"'`
-	if !strings.HasPrefix(launcher, prefix) || !strings.HasSuffix(launcher, suffix) {
-		panic("not a launcher: " + launcher)
-	}
-	b64 := launcher[len(prefix) : len(launcher)-len(suffix)]
-	decoded, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		panic(err)
-	}
-	return string(decoded)
 }

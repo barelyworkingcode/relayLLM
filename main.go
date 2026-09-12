@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"relayllm/internal/netutil"
 )
 
 func main() {
@@ -40,8 +42,8 @@ func main() {
 	// Parsed once here; every downstream consumer (loopback validation,
 	// listenAddrs, the pi-overlay host, the manifest) works off these lists
 	// rather than re-splitting the raw flag value.
-	routerBinds := parseBindList(*routerBind)
-	httpBinds := parseBindList(*httpBind)
+	routerBinds := netutil.ParseBindList(*routerBind)
+	httpBinds := netutil.ParseBindList(*httpBind)
 
 	if (*routerTLSCert == "") != (*routerTLSKey == "") {
 		missing := "--router-tls-cert/RELAY_LLM_ROUTER_TLS_CERT"
@@ -111,7 +113,7 @@ func main() {
 	// can reach the port. Same fail-closed shape as the router-TLS-pair guard
 	// above.
 	if cfg.Router.forwardsClientCredentials() && *routerTLSCert == "" {
-		if host, ok := firstNonLoopbackBind(routerBinds); ok {
+		if host, ok := netutil.FirstNonLoopbackBind(routerBinds); ok {
 			slog.Error("relay router: router.anthropic or router.passthrough is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real credential on every request)",
 				"router-bind", host)
 			os.Exit(1)
@@ -248,7 +250,7 @@ func main() {
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
 	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
-	routerAddrs := listenAddrs(routerBinds, *routerPort)
+	routerAddrs := netutil.ListenAddrs(routerBinds, *routerPort)
 	// cfg.Router is passed straight into StartRelayRouter rather than set on
 	// the router afterward — see StartRelayRouter's doc comment for why a
 	// separate post-construction setter call raced the router's first
@@ -328,7 +330,7 @@ func main() {
 	// fatal, the same reason the socket's is: it would otherwise leave the
 	// operator with a silently absent listener and a healthy-looking
 	// process.
-	httpAddrs := listenAddrs(httpBinds, *httpPort)
+	httpAddrs := netutil.ListenAddrs(httpBinds, *httpPort)
 	tcpServer, err := startMainTCPListener(httpAddrs, *httpTLSCert, *httpTLSKey, recovered)
 	if err != nil {
 		slog.Error("failed to listen on http port", "addrs", httpAddrs, "error", err)
@@ -562,104 +564,6 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-// parseBindList splits a --router-bind/--http-bind value into its component
-// binds, so both flags can name more than one interface (e.g.
-// "127.0.0.1,192.168.64.1") without going all the way to the promiscuous
-// 0.0.0.0. There's no separate env-var syntax for a list — RELAY_ROUTER_BIND
-// / RELAY_LLM_HTTP_BIND carry the same comma-separated string envOrDefault
-// hands back as-is, so CLI and env configuration parse through one path.
-//
-// Elements are trimmed, and an IPv6 literal's surrounding brackets are
-// stripped (net.JoinHostPort re-adds them as needed, and isLoopbackHost's
-// net.ParseIP rejects a bracketed literal outright). Exact duplicates are
-// dropped in order, since "127.0.0.1,127.0.0.1" is a guaranteed
-// self-inflicted EADDRINUSE, not two distinct interfaces.
-//
-// A value that trims to nothing at all still returns one empty-string
-// element — that's today's wildcard bind (net.JoinHostPort("", port) binds
-// every interface), not "listen nowhere".
-func parseBindList(s string) []string {
-	parts := strings.Split(s, ",")
-	binds := make([]string, 0, len(parts))
-	seen := make(map[string]bool, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.TrimPrefix(p, "[")
-		p = strings.TrimSuffix(p, "]")
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		binds = append(binds, p)
-	}
-	if len(binds) == 0 {
-		return []string{""}
-	}
-	return binds
-}
-
-// listenAddrs composes one TCP listen address per bind (already split by
-// parseBindList) for a --router-bind/--router-port or
-// --http-bind/--http-port pair. An empty port means that listener is
-// disabled, so binds are irrelevant and deliberately not consulted in that
-// case; every caller treats a nil result as "don't listen".
-func listenAddrs(binds []string, port string) []string {
-	if port == "" {
-		return nil
-	}
-	addrs := make([]string, len(binds))
-	for i, b := range binds {
-		addrs[i] = net.JoinHostPort(b, port)
-	}
-	return addrs
-}
-
-// firstNonLoopbackBind returns the first bind that isn't loopback, so a
-// caller can name the specific offender in an error message rather than
-// dumping the whole list. The wildcards ("", "0.0.0.0", "::") report as
-// non-loopback here — net.ParseIP gives them no IsLoopback — which is the
-// correct fail-closed answer: they accept off-box connections too.
-func firstNonLoopbackBind(binds []string) (string, bool) {
-	for _, b := range binds {
-		if !isLoopbackHost(b) {
-			return b, true
-		}
-	}
-	return "", false
-}
-
-// listenAll binds every address in addrs on a best-effort basis: an address
-// that fails to bind (already in use, no such interface, …) is logged and
-// skipped rather than aborting every other bind. This is deliberate, not an
-// oversight — a configured address is not guaranteed locally assignable in
-// every deployment (a gateway IP, say, that some environments can bind and
-// others can't), and requiring every one of several binds to succeed would
-// make that address's mere presence in the list a single point of failure
-// for the whole listener. what tags the log line (e.g. "relay router",
-// "http front") so an operator can tell which listener a failure belongs to
-// when both are configured with overlapping addresses.
-//
-// Only when NOT ONE address could be bound does this return an error — a
-// listener that binds nothing at all is exactly the original single-bind
-// failure case and must still surface as a startup failure, the same as
-// before this function accepted more than one address.
-func listenAll(addrs []string, what string) ([]net.Listener, error) {
-	lns := make([]net.Listener, 0, len(addrs))
-	for _, addr := range addrs {
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			slog.Error("failed to bind listener; continuing with any other configured addresses",
-				"component", what, "addr", addr, "error", err)
-			continue
-		}
-		lns = append(lns, ln)
-	}
-	if len(lns) == 0 {
-		return nil, fmt.Errorf("%s: no listener could be bound (tried %v)", what, addrs)
-	}
-	return lns, nil
-}
-
 // validateHTTPListener checks the --http-port flag group before anything
 // binds. An empty port disables the listener entirely and every other flag
 // in the group becomes moot, so it returns nil without looking at them —
@@ -706,7 +610,7 @@ func startMainTCPListener(addrs []string, certFile, keyFile string, handler http
 	if len(addrs) == 0 {
 		return nil, nil
 	}
-	lns, err := listenAll(addrs, "http front")
+	lns, err := netutil.ListenAll(addrs, "http front")
 	if err != nil {
 		return nil, err
 	}

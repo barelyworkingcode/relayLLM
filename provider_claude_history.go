@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"relayllm/internal/sshhost"
 )
 
 // encodeClaudeProjectDir applies Claude CLI's project-directory encoding
@@ -94,7 +96,7 @@ func readClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string)
 		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
 	}
 	path := "~/.claude/projects/" + encodeClaudeProjectDir(directory) + "/" + claudeSessionID + ".jsonl"
-	remote := RemoteCommand("", []string{"cat", path}, nil)
+	remote := sshhost.RemoteCommand("", []string{"cat", path}, nil)
 	argv := append([]string{host.SSHArgv[0]}, host.SSHArgv[1:]...)
 	argv = append(argv, "-T", "--", remote)
 
@@ -114,7 +116,7 @@ func deleteClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID strin
 		return fmt.Errorf("host %q has no ssh_argv", host.Name)
 	}
 	path := "~/.claude/projects/" + encodeClaudeProjectDir(directory) + "/" + claudeSessionID + ".jsonl"
-	remote := RemoteCommand("", []string{"rm", "-f", path}, nil)
+	remote := sshhost.RemoteCommand("", []string{"rm", "-f", path}, nil)
 	argv := append([]string{host.SSHArgv[0]}, host.SSHArgv[1:]...)
 	argv = append(argv, "-T", "--", remote)
 

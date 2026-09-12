@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"relayllm/internal/sshhost"
 )
 
 // Hermetic coverage of Claude CLI spawn argv/env construction. These lock the
@@ -267,7 +269,7 @@ func TestBuildHostExec_ArgvShapeAndTrailingRemoteCommand(t *testing.T) {
 		}
 	}
 
-	wantRemote := RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env)
+	wantRemote := sshhost.RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env)
 	if argv[len(argv)-1] != wantRemote {
 		t.Errorf("trailing remote command = %q, want %q", argv[len(argv)-1], wantRemote)
 	}
@@ -298,14 +300,14 @@ func TestBuildHostExec_ExactArgvFixture(t *testing.T) {
 		`'/opt/homebrew/bin/claude' '--print' '--output-format' 'stream-json' ` +
 		`'--input-format' 'stream-json' '--verbose' '--model' 'sonnet' ` +
 		`'--permission-prompt-tool' 'stdio'`
-	wantRemote := RemoteShellCommandDecodedForTest(RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env))
+	wantRemote := sshhost.RemoteShellCommandDecodedForTest(sshhost.RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env))
 	if wantRemote != wantScript {
 		t.Fatalf("test fixture drifted from buildRemoteScript output:\n got %q\nwant %q", wantRemote, wantScript)
 	}
 
 	wantArgv := []string{
 		"-o", "BatchMode=yes", "admin@localhost", "-T", "--",
-		RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env),
+		sshhost.RemoteCommand("/home/a b", append([]string{spec.ClaudePath}, args...), env),
 	}
 	if len(argv) != len(wantArgv) {
 		t.Fatalf("argv = %v, want %v", argv, wantArgv)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	clk "relayllm/internal/clock"
 	"sort"
 	"strconv"
 	"strings"
@@ -193,7 +194,7 @@ type ServerManager struct {
 	nextPort   int
 	instances  map[string]*serverInstance // alias → instance
 
-	clock Clock
+	clock clk.Clock
 
 	// Budget, resolved from config at construction.
 	maxLoaded        int
@@ -260,7 +261,7 @@ func NewServerManager(profile ServerProfile, cfg *ServerConfig, binaryPathOverri
 		binaryPath:     bin,
 		nextPort:       basePort,
 		instances:      make(map[string]*serverInstance),
-		clock:          DefaultClock,
+		clock:          clk.DefaultClock,
 		memory:         make(map[string]int64, len(cfg.Models)),
 		trainedContext: make(map[string]int64, len(cfg.Models)),
 		loadErrors:     make(map[string]string),

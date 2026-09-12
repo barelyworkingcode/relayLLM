@@ -1,6 +1,7 @@
 package main
 
 import (
+	clk "relayllm/internal/clock"
 	"sync"
 	"time"
 )
@@ -77,7 +78,7 @@ type virtualAffinityEntry struct {
 // write path (record), matching ProxyRegistry's natural-expiry style —
 // nothing sweeps this map on a timer.
 type virtualAffinityStore struct {
-	clock Clock
+	clock clk.Clock
 	ttl   time.Duration
 	cap   int
 
@@ -88,9 +89,9 @@ type virtualAffinityStore struct {
 // newVirtualAffinityStore returns a store using clock for TTL bookkeeping.
 // clock defaults to DefaultClock when nil, so production call sites don't
 // need to know about the seam.
-func newVirtualAffinityStore(clock Clock) *virtualAffinityStore {
+func newVirtualAffinityStore(clock clk.Clock) *virtualAffinityStore {
 	if clock == nil {
-		clock = DefaultClock
+		clock = clk.DefaultClock
 	}
 	return &virtualAffinityStore{
 		clock:   clock,

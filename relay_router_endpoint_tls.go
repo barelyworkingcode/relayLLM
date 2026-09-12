@@ -11,28 +11,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-)
 
-// isLoopbackHost reports whether host (a URL's Hostname(), so brackets
-// already stripped from a literal IPv6 address) refers to this machine.
-// "localhost" is treated as loopback by name — it isn't guaranteed to
-// resolve to 127.0.0.1/::1 in every resolver configuration, but nothing on
-// this hop does a DNS lookup to find out, and the whole point of the
-// loopback carve-out is "this can only ever be the same box regardless of
-// resolver," which the literal name already guarantees in practice for the
-// deployments this code runs on.
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
+	"relayllm/internal/netutil"
+)
 
 // normalizePin lowercases a pin and strips optional colon separators (the
 // format `openssl x509 -fingerprint -sha256` prints), then checks the result
@@ -91,7 +76,7 @@ func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 	case "https":
 		// verified below
 	case "http":
-		if !isLoopbackHost(u.Hostname()) {
+		if !netutil.IsLoopbackHost(u.Hostname()) {
 			if !allowPlaintext {
 				return fmt.Errorf("endpoint %q: baseURL %q is plain http to a non-loopback host; use https with caFile, or set top-level \"allowPlaintextEndpoints\": true to acknowledge this hop is unencrypted", ep.Name, ep.BaseURL)
 			}

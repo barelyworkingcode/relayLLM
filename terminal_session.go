@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"relayllm/internal/sshhost"
 )
 
 const (
@@ -231,13 +233,13 @@ func buildHostTerminalExec(spec *HostSpec, tmplID, dir, command string, args []s
 	var remote string
 	switch tmplID {
 	case "", "shell":
-		remote = RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -l`)
+		remote = sshhost.RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -l`)
 	case "claude":
 		full := append([]string{spec.ClaudePath}, args...)
-		remote = RemoteCommand(dir, full, map[string]string{"TERM": "xterm-256color"})
+		remote = sshhost.RemoteCommand(dir, full, map[string]string{"TERM": "xterm-256color"})
 	default:
-		line := shellQuoteJoin(append([]string{command}, args...))
-		remote = RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -lic `+singleQuote(line))
+		line := sshhost.ShellQuoteJoin(append([]string{command}, args...))
+		remote = sshhost.RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -lic `+sshhost.SingleQuote(line))
 	}
 	name = spec.SSHArgv[0]
 	argv = append(append([]string{}, spec.SSHArgv[1:]...), "-tt", "--", remote)
@@ -247,7 +249,7 @@ func buildHostTerminalExec(spec *HostSpec, tmplID, dir, command string, args []s
 // termEnvPrefix renders the `exec env 'TERM'='xterm-256color' ` prefix shared
 // by both non-RemoteCommand branches of buildHostTerminalExec.
 func termEnvPrefix() string {
-	return "exec env " + singleQuote("TERM") + "=" + singleQuote("xterm-256color") + " "
+	return "exec env " + sshhost.SingleQuote("TERM") + "=" + sshhost.SingleQuote("xterm-256color") + " "
 }
 
 func (s *TerminalSession) readLoop() {
