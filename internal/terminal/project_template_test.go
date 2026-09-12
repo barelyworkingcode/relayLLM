@@ -1,7 +1,8 @@
-package main
+package terminal
 
 import (
 	"encoding/json"
+	"relayllm/internal/relay"
 	"relayllm/internal/testutil"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 // config.TerminalTemplate and carries (projectID, templateID) on the request.
 func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
-	data, _ := json.Marshal(RelayProjectTemplateResponse{
+	data, _ := json.Marshal(relay.RelayProjectTemplateResponse{
 		ID:          "ssh-box",
 		Name:        "Box SSH",
 		Command:     "ssh",
@@ -20,10 +21,10 @@ func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 		Description: "private",
 		Icon:        "shell",
 	})
-	fb.SetResponse(relayBridgeResponse{Type: respProjectTemplate, Data: data})
+	fb.SetResponse(relay.BridgeResponse{Type: relay.RespProjectTemplate, Data: data})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
-	tmpl, err := resolveRelayProjectTemplate("proj-1", "ssh-box")
+	tmpl, err := relay.ResolveProjectTemplate("proj-1", "ssh-box")
 	if err != nil {
 		t.Fatalf("resolveRelayProjectTemplate: %v", err)
 	}
@@ -41,10 +42,10 @@ func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("bridge requests = %d, want 1", len(reqs))
 	}
-	if reqs[0].Type != reqResolveProjectTemplate {
-		t.Errorf("request type = %q, want %q", reqs[0].Type, reqResolveProjectTemplate)
+	if reqs[0].Type != relay.ReqResolveProjectTemplate {
+		t.Errorf("request type = %q, want %q", reqs[0].Type, relay.ReqResolveProjectTemplate)
 	}
-	var got RelayProjectTemplateRequest
+	var got relay.RelayProjectTemplateRequest
 	if err := json.Unmarshal(reqs[0].Arguments, &got); err != nil {
 		t.Fatalf("decode args: %v", err)
 	}
@@ -67,8 +68,8 @@ func TestTerminalCreate_MissNoProject_NoFallback(t *testing.T) {
 // A global-store miss WITH a project but no reachable relay (standalone: no
 // service token) must fail closed — the resolve errors out and nothing spawns.
 func TestTerminalCreate_ProjectFallback_FailsClosed(t *testing.T) {
-	t.Setenv(envServiceToken, "")
-	t.Setenv(envServiceTokenLegacy, "")
+	t.Setenv(relay.EnvServiceToken, "")
+	t.Setenv(relay.EnvServiceTokenLegacy, "")
 	store := NewTemplateStore(t.TempDir())
 	mgr := NewTerminalManager(store, t.TempDir())
 	if _, err := mgr.Create("private-id", "", t.TempDir(), "proj-1", 80, 24, nil); err == nil ||
