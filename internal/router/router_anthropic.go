@@ -1,4 +1,4 @@
-package main
+package router
 
 // Anthropic Messages API compatibility for the relay-router. Lets Claude
 // Code (which only ever speaks Anthropic's dialect and takes a base URL, not
@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/registry"
 )
 
 const (
@@ -294,7 +295,7 @@ func (p *RelayRouter) targetSupportsImages(ctx context.Context, target string) b
 	}
 	if p.virtual != nil {
 		if candidates := p.virtualCandidates(ctx, target); len(candidates) > 0 {
-			var statuses []EndpointStatus
+			var statuses []registry.EndpointStatus
 			if p.registry != nil {
 				statuses = p.registry.Snapshot(ctx)
 			}

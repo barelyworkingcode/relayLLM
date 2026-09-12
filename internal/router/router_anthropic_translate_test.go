@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for the pure Anthropic <-> OpenAI translation in
 // relay_router_anthropic_translate.go — request shape translation and the OpenAI-SSE ->

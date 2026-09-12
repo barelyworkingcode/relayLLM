@@ -1,9 +1,9 @@
-package main
+package router
 
 // Proxy-path instrumentation for GET /api/status/detailed (api_status_detailed.go).
 // This is the one genuinely new mechanism the diagnostic dashboard needs —
 // everything else in that handler is aggregation of state that already
-// exists (ServerManager, ProxyRegistry, TerminalManager, SessionManager).
+// exists (servermanager.ServerManager, registry.ProxyRegistry, TerminalManager, SessionManager).
 //
 // handleProxy (relay_router.go) registers one ProxyConn per inbound proxied
 // request via ProxyMetrics.begin, wraps the client's http.ResponseWriter in
@@ -35,7 +35,7 @@ const throughputWindow = 5 * time.Second
 // a 300ms request in `active` at all, so without a completed-request tail the
 // page shows an idle system while hundreds of requests fly through. Fixed
 // size, overwritten in place — no allocation after warmup, no goroutine,
-// matching ProxyRegistry's and virtualAffinityStore's "bounded, no
+// matching registry.ProxyRegistry's and virtualAffinityStore's "bounded, no
 // background sweep" style.
 const recentRequestCap = 64
 
@@ -73,10 +73,10 @@ var (
 // alike (ws/chat only ever report active/idle — see ws.go's wsIdleAfter and
 // Session.IsProcessing's doc comments for why neither gets quiet/stalled).
 const (
-	connStateActive  = "active"
-	connStateIdle    = "idle"
-	connStateQuiet   = "quiet"
-	connStateStalled = "stalled"
+	ConnStateActive  = "active"
+	ConnStateIdle    = "idle"
+	ConnStateQuiet   = "quiet"
+	ConnStateStalled = "stalled"
 )
 
 // proxyConnState implements RECONCILED_SCHEMA.md §4's state machine for a
@@ -95,24 +95,24 @@ func proxyConnState(now, startedAt time.Time, headerNano, lastWriteNano int64, s
 		// turns by design. OMP's codex transport reuses one for a whole
 		// session. Silence there is idle, never quiet or stalled.
 		if sinceLastByte < proxyQuietAfter {
-			return connStateActive
+			return ConnStateActive
 		}
-		return connStateIdle
+		return ConnStateIdle
 	}
 	switch {
 	case sinceHeader && sinceLastByte >= proxyStallAfter:
-		return connStateStalled
+		return ConnStateStalled
 	case streaming && !sinceHeader && now.Sub(startedAt) >= proxyHeaderStallAfter:
 		// Pre-header stall, streaming requests only: a non-streaming
 		// completion legitimately produces its first byte only when
 		// generation is finished, which can be minutes — flagging that as
 		// stalled would make the dashboard cry wolf on every long
 		// non-streaming call.
-		return connStateStalled
+		return ConnStateStalled
 	case sinceHeader && sinceLastByte >= proxyQuietAfter:
-		return connStateQuiet
+		return ConnStateQuiet
 	default:
-		return connStateActive
+		return ConnStateActive
 	}
 }
 
@@ -487,7 +487,7 @@ type ProxyConnInfo struct {
 	BytesIn              int64
 	BytesOut             int64
 	BytesOutPerSec       float64
-	State                string // connStateActive | connStateQuiet | connStateStalled
+	State                string // ConnStateActive | ConnStateQuiet | ConnStateStalled
 }
 
 // ProxyAggregate is the process-wide proxy summary feeding
@@ -549,7 +549,7 @@ func (m *ProxyMetrics) Snapshot() ([]ProxyConnInfo, ProxyAggregate, []RecentRequ
 	stalled := 0
 	for _, c := range activeConns {
 		info := c.snapshot(now)
-		if info.State == connStateStalled {
+		if info.State == ConnStateStalled {
 			stalled++
 		}
 		infos = append(infos, info)

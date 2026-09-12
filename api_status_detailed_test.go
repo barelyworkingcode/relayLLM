@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/router"
 	"strings"
 	"testing"
 	"time"
@@ -121,8 +122,8 @@ func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 	onlineEP := config.OpenAIEndpoint{Name: "online", BaseURL: "http://127.0.0.1:1/v1"}
 	offlineEP := config.OpenAIEndpoint{Name: "offline", BaseURL: "http://127.0.0.1:1/v1"}
 	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{onlineEP, offlineEP}})
-	seedEndpointStatus(registry, onlineEP, true, UpstreamModel{ID: "m"})
-	seedEndpointStatus(registry, offlineEP, false)
+	registry.SetStatusForTest(onlineEP, true, UpstreamModel{ID: "m"})
+	registry.SetStatusForTest(offlineEP, false)
 
 	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vMixed",
@@ -132,19 +133,19 @@ func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 		},
 	}}}
 
-	router := NewRelayRouter(":0", nil, registry, virtual)
-	// Record a pin directly on the affinity store — same package, and this
-	// is exactly what routeVirtual does on a successful response (see
+	rtr := NewRelayRouter(":0", nil, registry, virtual)
+	// Record a pin directly on the affinity store via the test seam — this is
+	// exactly what routeVirtual does on a successful response (see
 	// relay_router_virtual.go), without needing a live HTTP round trip here.
-	onlineTarget := resolvedVirtualTarget{endpoint: onlineEP, upstreamID: "m"}
-	router.affinity.record("vMixed", "conv-1", onlineTarget.identity())
+	onlineIdentity := router.EndpointTargetIdentity(onlineEP, "m")
+	rtr.RecordAffinityForTest("vMixed", "conv-1", onlineIdentity)
 
 	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
 	deps := DetailedStatusDeps{
 		Sessions:  sessions,
 		Registry:  registry,
 		Virtual:   virtual,
-		Router:    router,
+		Router:    rtr,
 		StartTime: time.Now(),
 	}
 	got := buildDetailedStatus(context.Background(), deps)
@@ -168,7 +169,7 @@ func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 		reachable, _ := c["reachable"].(bool)
 		pinned, _ := c["pinnedConversations"].(int)
 		switch identity {
-		case onlineTarget.identity():
+		case onlineIdentity:
 			if !reachable {
 				t.Errorf("online candidate reachable = %v, want true", reachable)
 			}

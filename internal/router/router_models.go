@@ -1,9 +1,11 @@
-package main
+package router
 
 import (
 	"fmt"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"sort"
 	"strings"
 )
@@ -95,7 +97,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	// endpoint row further down — Snapshot is O(endpoints); probing it again
 	// per virtual model would make this handler O(virtuals × endpoints) for
 	// no benefit, since every virtual model shares the same registry state.
-	var epStatuses []EndpointStatus
+	var epStatuses []registry.EndpointStatus
 	if p.registry != nil {
 		epStatuses = p.registry.Snapshot(r.Context())
 	}
@@ -140,7 +142,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				// Remote endpoints have no load step and the registry has
 				// already dropped the unreachable ones, so anything listed
 				// here is usable right now.
-				"status": map[string]any{"value": ModelStatusLoaded},
+				"status": map[string]any{"value": servermanager.ModelStatusLoaded},
 				// Text unless the upstream advertised otherwise: plain
 				// OpenAI /v1/models has no modality field, so a VLM behind
 				// an endpoint that stays quiet is indistinguishable from a
@@ -184,7 +186,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				"object":       "model",
 				"created":      0,
 				"owned_by":     "anthropic-map",
-				"status":       map[string]any{"value": ModelStatusLoaded},
+				"status":       map[string]any{"value": servermanager.ModelStatusLoaded},
 				"architecture": map[string]any{"input_modalities": []string{"text"}},
 			})
 		}
@@ -201,10 +203,10 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModelLoad starts loading a managed model and returns immediately —
-// see ServerManager.StartLoad for why this must not block.
+// see servermanager.ServerManager.StartLoad for why this must not block.
 
-func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []EndpointStatus) map[string]any {
-	candidates, freshCount := candidatesForVirtual(virtual, statuses, p.managers)
+func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []registry.EndpointStatus) map[string]any {
+	candidates, freshCount := CandidatesForVirtual(virtual, statuses, p.managers)
 
 	modalities := []string{"text"}
 	var meta map[string]any
@@ -212,11 +214,11 @@ func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []E
 	var contextLength int64
 	var hasContextLength bool
 	if freshCount > 0 {
-		status = map[string]any{"value": ModelStatusLoaded}
+		status = map[string]any{"value": servermanager.ModelStatusLoaded}
 		modalities, meta, contextLength, hasContextLength = virtualRowMetadata(candidates[0], statuses)
 	} else {
 		status = map[string]any{
-			"value":  ModelStatusUnloaded,
+			"value":  servermanager.ModelStatusUnloaded,
 			"failed": true,
 			// Same convention as a managed alias's load failure: without this
 			// a client polling for "loaded" spins forever instead of stopping.
@@ -258,7 +260,7 @@ func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []E
 // anything unadvertised. Never claim "image" support that can't be backed —
 // offering images to a server that can't take them fails mid-turn (see
 // CLAUDE.md).
-func virtualRowMetadata(first resolvedVirtualTarget, statuses []EndpointStatus) (modalities []string, meta map[string]any, contextLength int64, hasContextLength bool) {
+func virtualRowMetadata(first ResolvedVirtualTarget, statuses []registry.EndpointStatus) (modalities []string, meta map[string]any, contextLength int64, hasContextLength bool) {
 	if first.manager != nil {
 		for _, entry := range first.manager.ModelCatalog() {
 			if entry.Alias != first.alias {
@@ -326,7 +328,7 @@ func resolveContextLength(candidates ...int64) (int64, bool) {
 // describes reachability (offline endpoints, missing aliases) — config
 // mistakes (bad target shape, unknown endpoint/alias names) are
 // warnVirtualModelConfig's job at startup, not a per-request runtime message.
-func virtualUnavailableReason(virtual *config.VirtualLLM, statuses []EndpointStatus) string {
+func virtualUnavailableReason(virtual *config.VirtualLLM, statuses []registry.EndpointStatus) string {
 	configured := make(map[string]bool, len(statuses))
 	for _, status := range statuses {
 		configured[status.Endpoint.Name] = true
@@ -349,7 +351,7 @@ func virtualUnavailableReason(virtual *config.VirtualLLM, statuses []EndpointSta
 // endpointModalities renders an upstream model's advertised input modalities.
 // Text is always present: every chat model takes text, and a client that finds
 // an empty list has nothing to fall back on.
-func endpointModalities(m UpstreamModel) []string {
+func endpointModalities(m registry.UpstreamModel) []string {
 	if m.SupportsImages {
 		return []string{"text", "image"}
 	}

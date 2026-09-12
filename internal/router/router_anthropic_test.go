@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for the router-level Anthropic-compat wiring (relay_router_anthropic.go):
 // passthrough byte-fidelity, redirect dispatch + credential isolation, error
@@ -16,6 +16,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"relayllm/internal/config"
+	"relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"testing"
 	"time"
 )
@@ -23,7 +25,7 @@ import (
 // newAnthropicRouter builds a *RelayRouter with router.anthropic configured
 // against upstream (standing in for api.anthropic.com), plus whatever
 // managers/registry/virtual config the caller passes for the redirect path.
-func newAnthropicRouter(t *testing.T, cfg *config.AnthropicRouterConfig, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
+func newAnthropicRouter(t *testing.T, cfg *config.AnthropicRouterConfig, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
 	t.Helper()
 	r := NewRelayRouter(":0", managers, registry, virtual)
 	r.setAnthropic(cfg)
@@ -179,12 +181,12 @@ func TestAnthropic_Passthrough_APIPrefixReachesUpstream(t *testing.T) {
 func anthropicRedirectFixture(t *testing.T, alias string, upstream *httptest.Server, modelMap map[string]string) *RelayRouter {
 	t.Helper()
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	mgr.InjectReadyInstanceForTest(alias, port, 0)
 
-	return newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", modelMap), []*ServerManager{mgr}, nil, nil)
+	return newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", modelMap), []*servermanager.ServerManager{mgr}, nil, nil)
 }
 
 // openaiSSEUpstream answers with a canned OpenAI-style SSE stream (one text
@@ -394,7 +396,7 @@ func TestAnthropic_Redirect_BackendDown_MapsToOverloadedError(t *testing.T) {
 	// exactly like anthropicRedirectFixture's live-instance trick), but the
 	// dial itself fails, exercising newUpstreamProxy's default 502
 	// ErrorHandler path through the translating writer. Deliberately not an
-	// OpenAI endpoint: ProxyRegistry.LookupModel gates on its own
+	// OpenAI endpoint: registry.ProxyRegistry.LookupModel gates on its own
 	// reachability probe first, which would fail closed with "unknown
 	// model" before ever reaching a dial — a different (and already
 	// covered) code path, not the mid-dispatch failure this test targets.
@@ -405,12 +407,12 @@ func TestAnthropic_Redirect_BackendDown_MapsToOverloadedError(t *testing.T) {
 	deadPort := closedListener.Addr().(*net.TCPAddr).Port
 	closedListener.Close()
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "dead-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	mgr.InjectReadyInstanceForTest("dead-model", deadPort, 0)
 
-	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", map[string]string{"claude-haiku-4-5": "dead-model"}), []*ServerManager{mgr}, nil, nil)
+	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", map[string]string{"claude-haiku-4-5": "dead-model"}), []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -560,12 +562,12 @@ func TestAnthropic_Redirect_PingDuringSlowBackend(t *testing.T) {
 	defer upstream.Close()
 
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "slow-model", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	mgr.InjectReadyInstanceForTest("slow-model", port, 0)
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
 		Upstream:            "https://unused.invalid",
 		ModelMap:            map[string]string{"claude-haiku-4-5": "slow-model"},
@@ -691,13 +693,13 @@ func TestAnthropic_Redirect_StillLabeledViaAnthropicNotPassthrough(t *testing.T)
 	}))
 	defer upstream.Close()
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "local-model"}},
 	}, "")
 	injectHealthyManagedInstance(t, mgr, "local-model", upstream)
 
 	cfg := anthropicUpstreamCfg(t, "http://unused.invalid", map[string]string{"claude-sonnet-4-5": "local-model"})
-	r := newAnthropicRouter(t, cfg, []*ServerManager{mgr}, nil, nil)
+	r := newAnthropicRouter(t, cfg, []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 

@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for the unified OpenAI-compatible router (relay_router.go).
 // The router has been zero-tested. These tests pin:
@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
 	"strings"
 	"sync/atomic"
@@ -106,10 +108,10 @@ func TestRouter_ListModels_EmptyWithNilBackends(t *testing.T) {
 }
 
 func TestRouter_ListModels_IncludesLlamaAliases(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "qwen-8b"}, {Alias: "qwen-30b"}},
 	}, "")
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -132,7 +134,7 @@ func TestRouter_ListModels_PrefixesEndpointModels(t *testing.T) {
 			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "test-key"},
 		},
 	}
-	registry := NewProxyRegistry(cfg)
+	registry := regpkg.NewProxyRegistry(cfg)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
@@ -155,7 +157,7 @@ func TestRouter_ListModels_OmitsOfflineEndpoint(t *testing.T) {
 			{Name: "offline", BaseURL: "http://127.0.0.1:1/v1", APIKey: "x"},
 		},
 	}
-	registry := NewProxyRegistry(cfg)
+	registry := regpkg.NewProxyRegistry(cfg)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
@@ -244,12 +246,12 @@ func TestRouter_Proxy_LlamaAlias_RoutesToManagedBranch(t *testing.T) {
 	// The 502 is the test signal: the router DID pick the managed branch and
 	// not the endpoint branch (which would 400). We're testing the dispatch
 	// decision, not the lifecycle.
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		BinaryPath: "/nonexistent/llama-server-binary-for-test",
 		Models:     []config.ServerModelConfig{{Alias: "test-alias", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -292,7 +294,7 @@ func TestRouter_Proxy_EndpointModel_RewritesBodyAndStripsPrefix(t *testing.T) {
 			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "upstream-key"},
 		},
 	}
-	registry := NewProxyRegistry(cfg)
+	registry := regpkg.NewProxyRegistry(cfg)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
@@ -362,7 +364,7 @@ func TestRouter_Proxy_BareChatCompletionsPath_ReachesV1OnlyUpstream(t *testing.T
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "europa", BaseURL: upstream.URL + "/v1"},
 	}})
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
@@ -405,7 +407,7 @@ func TestRouter_Proxy_VirtualModelUsesFirstReachableTarget(t *testing.T) {
 	fallback := newTarget(&fallbackCalls, "mac-code")
 	defer fallback.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "remote", BaseURL: primary.URL + "/v1"},
 		{Name: "mac", BaseURL: fallback.URL + "/v1"},
 	}})
@@ -457,7 +459,7 @@ func TestRouter_Proxy_VirtualModelFallsBackWhenPrimaryIsOffline(t *testing.T) {
 	}))
 	defer fallback.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "remote", BaseURL: "http://127.0.0.1:1/v1"},
 		{Name: "mac", BaseURL: fallback.URL + "/v1"},
 	}})
@@ -475,10 +477,10 @@ func TestRouter_Proxy_VirtualModelFallsBackWhenPrimaryIsOffline(t *testing.T) {
 }
 
 func TestRouter_VirtualModelUsesManagedAliasFallback(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "local-code"}},
 	}, "")
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vCode", Targets: []config.VirtualLLMTarget{{Alias: "local-code"}},
 	}}})
 
@@ -499,15 +501,15 @@ func TestRouter_Proxy_LlamaWinsOnCollision(t *testing.T) {
 			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"},
 		},
 	}
-	registry := NewProxyRegistry(cfg)
+	registry := regpkg.NewProxyRegistry(cfg)
 	registry.Snapshot(context.Background())
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		BinaryPath: "/nonexistent/binary",
 		Models:     []config.ServerModelConfig{{Alias: "qwen", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, registry, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -528,16 +530,16 @@ func TestRouter_Proxy_LlamaWinsOverMlxCollision(t *testing.T) {
 	// Both llama and mlx managers have the same alias. Llama must win because
 	// it's first in the managers slice. We assert by triggering the llama
 	// branch's failure mode (502, no binary).
-	llamaMgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	llamaMgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		BinaryPath: "/nonexistent/binary",
 		Models:     []config.ServerModelConfig{{Alias: "shared", Args: map[string]any{"model": "/fake"}}},
 	}, "")
-	mlxMgr := NewServerManager(mlxProfile, &config.ServerConfig{
+	mlxMgr := servermanager.NewServerManager(servermanager.MlxProfile, &config.ServerConfig{
 		BinaryPath: "/nonexistent/mlx-serve",
 		Models:     []config.ServerModelConfig{{Alias: "shared", Args: map[string]any{"model": "/fake"}}},
 	}, "")
 
-	r := NewRelayRouter(":0", []*ServerManager{llamaMgr, mlxMgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{llamaMgr, mlxMgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -580,7 +582,7 @@ func TestRouter_Proxy_VirtualModel_AllTargetsOffline_StillRoutesViaLastResort(t 
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "flaky", BaseURL: upstream.URL + "/v1"},
 	}})
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
@@ -604,7 +606,7 @@ func TestRouter_Proxy_VirtualModel_AllTargetsOffline_StillRoutesViaLastResort(t 
 // virtual model, not 400 "unknown model" — a configured virtual is never
 // "unknown", it's just currently unservable.
 func TestRouter_Proxy_VirtualModel_AllUnreachable_Returns503NotUnknown(t *testing.T) {
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "dead1", BaseURL: "http://127.0.0.1:1/v1"},
 		{Name: "dead2", BaseURL: "http://127.0.0.1:1/v1"},
 	}})
@@ -636,7 +638,7 @@ func TestRouter_Proxy_VirtualModel_AllUnreachable_Returns503NotUnknown(t *testin
 // every target is currently offline, so a polling client learns it will not
 // resolve right now instead of never seeing it at all.
 func TestRouterCatalog_VirtualModel_AllOffline_ListedAsUnloaded(t *testing.T) {
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "dead", BaseURL: "http://127.0.0.1:1/v1"},
 	}})
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
@@ -652,8 +654,8 @@ func TestRouterCatalog_VirtualModel_AllOffline_ListedAsUnloaded(t *testing.T) {
 	if row.ID == "" {
 		t.Fatal("virtual model missing from catalog even though every target is offline")
 	}
-	if row.Status == nil || row.Status.Value != ModelStatusUnloaded {
-		t.Errorf("status.value = %+v, want %q", row.Status, ModelStatusUnloaded)
+	if row.Status == nil || row.Status.Value != servermanager.ModelStatusUnloaded {
+		t.Errorf("status.value = %+v, want %q", row.Status, servermanager.ModelStatusUnloaded)
 	}
 	if row.Status == nil || !row.Status.Failed {
 		t.Errorf("status.failed = %+v, want true so a polling client stops instead of spinning", row.Status)
@@ -699,7 +701,7 @@ func TestRouter_Proxy_VirtualModel_RetriesAfterPreResponseFailure(t *testing.T) 
 	}))
 	defer secondary.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "primary", BaseURL: primary.URL + "/v1"},
 		{Name: "secondary", BaseURL: secondary.URL + "/v1"},
 	}})
@@ -763,7 +765,7 @@ func TestRouter_Proxy_VirtualModel_NoRetryAfterBytesWritten(t *testing.T) {
 	}))
 	defer secondary.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "primary", BaseURL: primary.URL + "/v1"},
 		{Name: "secondary", BaseURL: secondary.URL + "/v1"},
 	}})
@@ -794,12 +796,12 @@ func TestRouter_Proxy_VirtualModel_NoRetryAfterBytesWritten(t *testing.T) {
 // A virtual row must inherit real metadata from its first candidate, not the
 // hardcoded text-only placeholder the old handleModels used.
 func TestRouterCatalog_VirtualModel_InheritsMetadataFromAliasTarget(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
 			"mmproj": "/p.gguf", "ctx-size": 32768.0,
 		}}},
 	}, "")
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vVision", Targets: []config.VirtualLLMTarget{{Alias: "vision-alias"}},
 	}}})
 
@@ -812,8 +814,8 @@ func TestRouterCatalog_VirtualModel_InheritsMetadataFromAliasTarget(t *testing.T
 	if row.ID == "" {
 		t.Fatal("virtual model missing from catalog")
 	}
-	if row.Status == nil || row.Status.Value != ModelStatusLoaded {
-		t.Errorf("status = %+v, want %q", row.Status, ModelStatusLoaded)
+	if row.Status == nil || row.Status.Value != servermanager.ModelStatusLoaded {
+		t.Errorf("status = %+v, want %q", row.Status, servermanager.ModelStatusLoaded)
 	}
 	if got := row.Architecture.InputModalities; len(got) != 2 || got[0] != "text" || got[1] != "image" {
 		t.Errorf("modalities = %v, want [text image]", got)
@@ -859,7 +861,7 @@ func newCountingChatUpstream(t *testing.T, calls *atomic.Int64, modelID string) 
 // Snapshot's probe goroutines are joined (wg.Wait()) before it returns, so by
 // the time a request's response has been read, nothing else can be touching
 // this map.
-func seedEndpointStatus(registry *ProxyRegistry, ep config.OpenAIEndpoint, online bool, models ...UpstreamModel) {
+func seedEndpointStatus(registry *regpkg.ProxyRegistry, ep config.OpenAIEndpoint, online bool, models ...regpkg.UpstreamModel) {
 	registry.SetStatusForTest(ep, online, models...)
 }
 
@@ -874,9 +876,9 @@ func TestRouterAffinity_PinSurvivesReachabilityFlip(t *testing.T) {
 
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
 	secondaryEP := config.OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
 	seedEndpointStatus(registry, primaryEP, false)
-	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, secondaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv",
@@ -901,7 +903,7 @@ func TestRouterAffinity_PinSurvivesReachabilityFlip(t *testing.T) {
 
 	// Primary is now reachable — reachability-preferred ordering would put
 	// it first. The pin must keep the conversation on secondary anyway.
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	resp2 := postBytes(t, srv.URL+"/v1/chat/completions", body)
 	resp2.Body.Close()
@@ -925,9 +927,9 @@ func TestRouterAffinity_DistinctConversationKeysPinIndependently(t *testing.T) {
 
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
 	secondaryEP := config.OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
 	seedEndpointStatus(registry, primaryEP, false)
-	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, secondaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv",
@@ -945,7 +947,7 @@ func TestRouterAffinity_DistinctConversationKeysPinIndependently(t *testing.T) {
 		t.Fatalf("conv-A first request: secondary calls = %d, want 1", secondaryCalls.Load())
 	}
 
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	convB := []byte(`{"model":"vConv","prompt_cache_key":"conv-B"}`)
 	postBytes(t, srv.URL+"/v1/chat/completions", convB).Body.Close()
@@ -971,8 +973,8 @@ func TestRouterAffinity_NoKeyMeansNoAffinity(t *testing.T) {
 	var primaryCalls atomic.Int64
 	primary := newCountingChatUpstream(t, &primaryCalls, "m")
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP}})
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP}})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv", Targets: []config.VirtualLLMTarget{{Endpoint: "primary", Model: "m"}},
@@ -998,9 +1000,9 @@ func TestRouterAffinity_FallsBackToUserField(t *testing.T) {
 
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
 	secondaryEP := config.OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
 	seedEndpointStatus(registry, primaryEP, false)
-	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, secondaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv",
@@ -1018,7 +1020,7 @@ func TestRouterAffinity_FallsBackToUserField(t *testing.T) {
 		t.Fatalf("first request: secondary calls = %d, want 1", secondaryCalls.Load())
 	}
 
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
 	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
 
 	if primaryCalls.Load() != 0 || secondaryCalls.Load() != 2 {
@@ -1037,9 +1039,9 @@ func TestRouterAffinity_PinnedTargetRemovedFromConfigFallsBack(t *testing.T) {
 
 	aEP := config.OpenAIEndpoint{Name: "a", BaseURL: a.URL + "/v1"}
 	bEP := config.OpenAIEndpoint{Name: "b", BaseURL: b.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{aEP, bEP}})
-	seedEndpointStatus(registry, aEP, true, UpstreamModel{ID: "m"})
-	seedEndpointStatus(registry, bEP, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{aEP, bEP}})
+	seedEndpointStatus(registry, aEP, true, regpkg.UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, bEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv",
@@ -1080,9 +1082,9 @@ func TestRouterAffinity_RepinsAfterPinnedTargetFails(t *testing.T) {
 
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
 	secondaryEP := config.OpenAIEndpoint{Name: "secondary", BaseURL: secondary.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
-	seedEndpointStatus(registry, secondaryEP, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, secondaryEP}})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, secondaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vConv",
@@ -1107,7 +1109,7 @@ func TestRouterAffinity_RepinsAfterPinnedTargetFails(t *testing.T) {
 	// at a closed port while still marking it "online" — the registry's own
 	// 15s-stale cache wouldn't know it just died until the next real probe,
 	// which is exactly the scenario the retry path exists for.
-	seedEndpointStatus(registry, config.OpenAIEndpoint{Name: "primary", BaseURL: "http://127.0.0.1:1/v1"}, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, config.OpenAIEndpoint{Name: "primary", BaseURL: "http://127.0.0.1:1/v1"}, true, regpkg.UpstreamModel{ID: "m"})
 
 	// Request 2: the pin still points at primary (order unchanged by
 	// applyAffinity — already first), but primary now fails pre-response, so
@@ -1123,7 +1125,7 @@ func TestRouterAffinity_RepinsAfterPinnedTargetFails(t *testing.T) {
 
 	// Restore primary to full health — reachability ordering alone would now
 	// prefer it again (declared first, believed online).
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "m"})
 
 	// Request 3: the pin now points at secondary, so it must go straight
 	// there — primary, though healthy again, must not receive a call.
@@ -1138,7 +1140,7 @@ func TestRouterAffinity_RepinsAfterPinnedTargetFails(t *testing.T) {
 // success does. Every target here is unreachable, so the store must stay
 // empty after the 503.
 func TestRouterAffinity_FailedAttemptRecordsNoPin(t *testing.T) {
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "dead1", BaseURL: "http://127.0.0.1:1/v1"},
 		{Name: "dead2", BaseURL: "http://127.0.0.1:1/v1"},
 	}})
@@ -1192,12 +1194,12 @@ func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T
 	defer upstream.Close()
 
 	ep := config.OpenAIEndpoint{Name: "lmstudio", BaseURL: upstream.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
-	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "qwen-70b"}, UpstreamModel{ID: "qwen-7b"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, regpkg.UpstreamModel{ID: "qwen-70b"}, regpkg.UpstreamModel{ID: "qwen-7b"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vBigSmall",
-		// Declared order: big first, small second — the order candidatesForVirtual
+		// Declared order: big first, small second — the order CandidatesForVirtual
 		// would prefer absent a pin.
 		Targets: []config.VirtualLLMTarget{
 			{Endpoint: "lmstudio", Model: "qwen-70b"},
@@ -1210,7 +1212,7 @@ func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T
 	// Simulate "a previous turn was served by the small model and pinned
 	// there" directly, rather than needing a third failing server to force
 	// failover onto it.
-	router.affinity.record("vBigSmall", "conv-1", resolvedVirtualTarget{endpoint: ep, upstreamID: "qwen-7b"}.identity())
+	router.affinity.record("vBigSmall", "conv-1", ResolvedVirtualTarget{endpoint: ep, upstreamID: "qwen-7b"}.Identity())
 
 	body := []byte(`{"model":"vBigSmall","prompt_cache_key":"conv-1"}`)
 	postBytes(t, srv.URL+"/v1/chat/completions", body).Body.Close()
@@ -1226,7 +1228,7 @@ func TestRouterAffinity_SameEndpointDifferentModelsPinIndependently(t *testing.T
 // routeVirtual's loop, before any candidate is attempted, precisely because
 // treating it like any other pre-response failure and simply advancing would
 // mean a managed-alias candidate still pays for an unbounded
-// ServerManager.Acquire call (cold launch, or up to admissionTimeoutSeconds)
+// servermanager.ServerManager.Acquire call (cold launch, or up to admissionTimeoutSeconds)
 // for a response nobody is waiting on. This drives the router's real HTTP
 // handler directly with a pre-canceled request context so the check is
 // exercised exactly where it lives.
@@ -1250,7 +1252,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testi
 	third := newTarget(&thirdCalls)
 	defer third.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "first", BaseURL: first.URL + "/v1"},
 		{Name: "second", BaseURL: second.URL + "/v1"},
 		{Name: "third", BaseURL: third.URL + "/v1"},
@@ -1293,7 +1295,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testi
 // Acquire) — proving, if the request ever returns, that Acquire was never
 // called at all rather than merely "returned quickly by luck."
 func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmission(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
 		Models: []config.ServerModelConfig{
 			{Alias: "busy", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/busy.gguf"}},
 			{Alias: "wanted", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/wanted.gguf"}},
@@ -1303,7 +1305,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 	mgr.SetClock(clk)
 	mgr.InjectInstanceForTest("busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
 
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vGuard", Targets: []config.VirtualLLMTarget{{Alias: "wanted"}},
 	}}})
 
@@ -1326,7 +1328,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 		// the admission wait forever (the testutil.FakeClock here is never advanced
 		// and "busy" is never released).
 	case <-time.After(2 * time.Second):
-		t.Fatal("request never returned — the router appears stuck inside ServerManager.Acquire's admission wait for a response nobody will read")
+		t.Fatal("request never returned — the router appears stuck inside servermanager.ServerManager.Acquire's admission wait for a response nobody will read")
 	}
 }
 
@@ -1351,7 +1353,7 @@ func waitForWaiters(t *testing.T, clk *testutil.FakeClock, n int) {
 // Acquire's ctx parameter must abort that wait rather than riding out the
 // (here: never-advanced) 120s admission deadline.
 func TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{MaxLoaded: 1, AdmissionTimeoutSeconds: 120,
 		Models: []config.ServerModelConfig{
 			{Alias: "busy", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/busy.gguf"}},
 			{Alias: "wanted", Args: map[string]any{"memoryGB": 1.0, "model": "/nonexistent/wanted.gguf"}},
@@ -1361,7 +1363,7 @@ func TestRouter_Proxy_VirtualModel_CtxCancelDuringAcquireWait_AbortsIt(t *testin
 	mgr.SetClock(clk)
 	mgr.InjectInstanceForTest("busy", 1, clk.Now()) // occupies the sole slot, mid-generation: not idle-evictable
 
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vGuard", Targets: []config.VirtualLLMTarget{{Alias: "wanted"}},
 	}}})
 
@@ -1407,8 +1409,8 @@ func TestRouterAffinity_FailingBackendGets500ButNoPin(t *testing.T) {
 	defer failing.Close()
 
 	ep := config.OpenAIEndpoint{Name: "failing", BaseURL: failing.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
-	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vFail", Targets: []config.VirtualLLMTarget{{Endpoint: "failing", Model: "m"}},
@@ -1445,8 +1447,8 @@ func TestRouterAffinity_4xxResponseStillPins(t *testing.T) {
 	defer badRequest.Close()
 
 	ep := config.OpenAIEndpoint{Name: "bad", BaseURL: badRequest.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
-	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	seedEndpointStatus(registry, ep, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vBad", Targets: []config.VirtualLLMTarget{{Endpoint: "bad", Model: "m"}},
@@ -1467,51 +1469,51 @@ func TestRouterAffinity_4xxResponseStillPins(t *testing.T) {
 	}
 }
 
-// classifyVirtualTarget is the single classifier both candidatesForVirtual
+// ClassifyVirtualTarget is the single classifier both CandidatesForVirtual
 // and warnVirtualModelConfig dispatch on, so they can never disagree about a
 // target that sets endpoint (without model) *and* alias:
-// candidatesForVirtual's case order checks endpoint+model first (fails,
+// CandidatesForVirtual's case order checks endpoint+model first (fails,
 // model is empty), then alias (matches) — so it routes fine via the alias,
-// and classifyVirtualTarget must resolve it the same way rather than as the
+// and ClassifyVirtualTarget must resolve it the same way rather than as the
 // broken "endpoint without model" shape.
 func TestClassifyVirtualTarget_EndpointWithoutModelButWithAliasIsAlias(t *testing.T) {
 	target := config.VirtualLLMTarget{Endpoint: "ep", Alias: "local"}
-	if got := classifyVirtualTarget(target); got != virtualTargetAlias {
-		t.Errorf("classify(%+v) = %v, want virtualTargetAlias", target, got)
+	if got := ClassifyVirtualTarget(target); got != VirtualTargetAlias {
+		t.Errorf("classify(%+v) = %v, want VirtualTargetAlias", target, got)
 	}
 }
 
 func TestClassifyVirtualTarget_EndpointAndModelIsEndpoint(t *testing.T) {
 	target := config.VirtualLLMTarget{Endpoint: "ep", Model: "m", Alias: "local"}
-	if got := classifyVirtualTarget(target); got != virtualTargetEndpoint {
-		t.Errorf("classify(%+v) = %v, want virtualTargetEndpoint (endpoint+model wins when both shapes are set)", target, got)
+	if got := ClassifyVirtualTarget(target); got != VirtualTargetEndpoint {
+		t.Errorf("classify(%+v) = %v, want VirtualTargetEndpoint (endpoint+model wins when both shapes are set)", target, got)
 	}
 }
 
 func TestClassifyVirtualTarget_EndpointWithoutModelOrAliasIsInvalid(t *testing.T) {
 	target := config.VirtualLLMTarget{Endpoint: "ep"}
-	if got := classifyVirtualTarget(target); got != virtualTargetInvalid {
-		t.Errorf("classify(%+v) = %v, want virtualTargetInvalid", target, got)
+	if got := ClassifyVirtualTarget(target); got != VirtualTargetInvalid {
+		t.Errorf("classify(%+v) = %v, want VirtualTargetInvalid", target, got)
 	}
 }
 
 func TestClassifyVirtualTarget_ModelWithoutEndpointOrAliasIsInvalid(t *testing.T) {
 	target := config.VirtualLLMTarget{Model: "m"}
-	if got := classifyVirtualTarget(target); got != virtualTargetInvalid {
-		t.Errorf("classify(%+v) = %v, want virtualTargetInvalid", target, got)
+	if got := ClassifyVirtualTarget(target); got != VirtualTargetInvalid {
+		t.Errorf("classify(%+v) = %v, want VirtualTargetInvalid", target, got)
 	}
 }
 
-// The classifier's output must actually be what candidatesForVirtual routes
+// The classifier's output must actually be what CandidatesForVirtual routes
 // — proving the shared-classifier fix, not just the classifier in isolation.
 func TestCandidatesForVirtual_EndpointWithoutModelButWithAliasRoutesViaAlias(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "local"}},
 	}, "")
 	virtual := &config.VirtualLLM{Name: "v", Targets: []config.VirtualLLMTarget{{Endpoint: "ep", Alias: "local"}}}
-	candidates, freshCount := candidatesForVirtual(virtual, nil, []*ServerManager{mgr})
+	candidates, freshCount := CandidatesForVirtual(virtual, nil, []*servermanager.ServerManager{mgr})
 	if len(candidates) != 1 || candidates[0].alias != "local" {
-		t.Fatalf("candidatesForVirtual = %+v, want a single alias candidate", candidates)
+		t.Fatalf("CandidatesForVirtual = %+v, want a single alias candidate", candidates)
 	}
 	if freshCount != 1 {
 		t.Errorf("freshCount = %d, want 1", freshCount)
@@ -1547,7 +1549,7 @@ func TestRouterCatalog_VirtualNameCollidesWithEndpointID_CatalogMatchesDispatch(
 	}))
 	defer virtualBackend.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "ep", BaseURL: endpointBackend.URL + "/v1"},
 		{Name: "backend", BaseURL: virtualBackend.URL + "/v1"},
 	}})
@@ -1589,12 +1591,12 @@ func TestRouterCatalog_VirtualNameCollidesWithEndpointID_CatalogMatchesDispatch(
 // hermetically: endpointForPort's "http://127.0.0.1:%d/v1" formats a
 // negative port into an unparseable ":-1" port suffix.
 func TestRouter_Proxy_ManagedAlias_BadEndpointURL_Returns502NotPanic(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "bad-url"}},
 	}, "")
 	mgr.InjectReadyInstanceForTest("bad-url", -1, 0)
 
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(router.server.Handler)
 	defer srv.Close()
 
@@ -1609,7 +1611,7 @@ func TestRouter_Proxy_ManagedAlias_BadEndpointURL_Returns502NotPanic(t *testing.
 // Same defect, virtual-failover path: a bad managed BaseURL for one alias
 // candidate must just be one failed candidate, not an aborted request.
 func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandidate(t *testing.T) {
-	badMgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	badMgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "bad-alias"}},
 	}, "")
 	badMgr.InjectReadyInstanceForTest("bad-alias", -1, 0)
@@ -1617,10 +1619,10 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 	var fallbackCalls atomic.Int64
 	fallback := newCountingChatUpstream(t, &fallbackCalls, "m")
 	fallbackEP := config.OpenAIEndpoint{Name: "fallback", BaseURL: fallback.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{fallbackEP}})
-	seedEndpointStatus(registry, fallbackEP, true, UpstreamModel{ID: "m"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{fallbackEP}})
+	seedEndpointStatus(registry, fallbackEP, true, regpkg.UpstreamModel{ID: "m"})
 
-	router := NewRelayRouter(":0", []*ServerManager{badMgr}, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{badMgr}, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vBadURL", Targets: []config.VirtualLLMTarget{
 			{Alias: "bad-alias"},
 			{Endpoint: "fallback", Model: "m"},
@@ -1649,10 +1651,10 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 // the write happens inside StartRelayRouter itself, before Serve's
 // "go func(){...}()" statements start serving.
 func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{":0"}, []*ServerManager{mgr}, nil, nil, &config.RouterConfig{
+	router, err := StartRelayRouter([]string{":0"}, []*servermanager.ServerManager{mgr}, nil, nil, &config.RouterConfig{
 		ReasoningEffortMap: map[string]string{"minimal": "none"},
 	}, "", "")
 	if err != nil {
@@ -1702,10 +1704,10 @@ func TestStartRelayRouter_TrulyEmptyConfigReturnsNil(t *testing.T) {
 
 // A nil *config.RouterConfig must remain a valid, no-op input.
 func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{":0"}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{":0"}, []*servermanager.ServerManager{mgr}, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatalf("StartRelayRouter: %v", err)
 	}
@@ -1723,10 +1725,10 @@ func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 // them behind the same handler — the multi-interface case this whole
 // Listen/Serve split exists for.
 func TestStartRelayRouter_MultipleAddrsAllServe(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{"127.0.0.1:0", "127.0.0.1:0"}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{"127.0.0.1:0", "127.0.0.1:0"}, []*servermanager.ServerManager{mgr}, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatalf("StartRelayRouter: %v", err)
 	}
@@ -1775,10 +1777,10 @@ func TestStartRelayRouter_PartialBindFailureStillStarts(t *testing.T) {
 	}
 	defer ln.Close()
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{"127.0.0.1:0", busy}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{"127.0.0.1:0", busy}, []*servermanager.ServerManager{mgr}, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatalf("StartRelayRouter: %v", err)
 	}
@@ -1805,10 +1807,10 @@ func TestStartRelayRouter_TotalBindFailureIsFatal(t *testing.T) {
 	}
 	defer ln.Close()
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{busy, busy}, []*ServerManager{mgr}, nil, nil, nil, "", "")
+	router, err := StartRelayRouter([]string{busy, busy}, []*servermanager.ServerManager{mgr}, nil, nil, nil, "", "")
 	if err == nil {
 		router.Close()
 		t.Fatal("expected an error when every requested address is already in use")
@@ -1842,7 +1844,7 @@ func waitForRouterUp(t *testing.T, addr string) {
 // whether the upstream is reachable.
 func TestProxyRegistry_Snapshot_CanceledCallerContextDoesNotPoisonProbe(t *testing.T) {
 	upstream := newFakeOpenAIUpstream(t, []string{"m1"})
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "ep", BaseURL: upstream.URL + "/v1"},
 	}})
 

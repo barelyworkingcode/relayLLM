@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for /v1/audio/transcriptions (relay_router.go).
 //
@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
 	"strings"
 	"testing"
 )
@@ -112,7 +113,7 @@ func newTranscriptionUpstream(t *testing.T, advertise string) *transcriptionUpst
 
 func newAudioRouter(t *testing.T, upstreamURL, key string) *httptest.Server {
 	t.Helper()
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstreamURL + "/v1", APIKey: key}},
 	})
 	r := NewRelayRouter(":0", nil, registry, nil)

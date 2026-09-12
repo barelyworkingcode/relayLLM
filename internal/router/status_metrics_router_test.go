@@ -1,4 +1,4 @@
-package main
+package router
 
 // Router-level coverage for status_metrics.go's wiring into handleProxy /
 // routeVirtual (relay_router.go, relay_router_virtual.go) — the double-count
@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"strconv"
 	"testing"
 )
@@ -22,7 +24,7 @@ import (
 // server_budget_test.go's addInstance uses to exercise Acquire without
 // spawning a real llama-server/mlx-serve binary, except here the port is a
 // real httptest.Server so a subsequent reverse-proxy hop actually completes.
-func injectHealthyManagedInstance(t *testing.T, m *ServerManager, alias string, upstream *httptest.Server) {
+func injectHealthyManagedInstance(t *testing.T, m *servermanager.ServerManager, alias string, upstream *httptest.Server) {
 	t.Helper()
 	_, portStr, err := splitHostPort(upstream.URL)
 	if err != nil {
@@ -50,12 +52,12 @@ func TestProxyMetrics_ManagedRouteRecordsTarget(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "test-alias"}},
 	}, "")
 	injectHealthyManagedInstance(t, mgr, "test-alias", upstream)
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
@@ -95,7 +97,7 @@ func TestProxyMetrics_EndpointRouteRecordsTarget(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "fakeep", BaseURL: upstream.URL + "/v1"},
 	}})
 
@@ -134,7 +136,7 @@ func TestProxyMetrics_VirtualFailoverSingleEntry(t *testing.T) {
 	// its /v1/chat/completions hijacks and closes the connection before
 	// writing anything — a pre-response failure indistinguishable from a
 	// dial error, forcing routeVirtual's retry path rather than
-	// candidatesForVirtual's reachability-preferred ordering.
+	// CandidatesForVirtual's reachability-preferred ordering.
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			return
@@ -158,9 +160,9 @@ func TestProxyMetrics_VirtualFailoverSingleEntry(t *testing.T) {
 
 	primaryEP := config.OpenAIEndpoint{Name: "primary", BaseURL: primary.URL + "/v1"}
 	liveEP := config.OpenAIEndpoint{Name: "live", BaseURL: live.URL + "/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, liveEP}})
-	seedEndpointStatus(registry, primaryEP, true, UpstreamModel{ID: "primary-model"})
-	seedEndpointStatus(registry, liveEP, true, UpstreamModel{ID: "live-model"})
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{primaryEP, liveEP}})
+	seedEndpointStatus(registry, primaryEP, true, regpkg.UpstreamModel{ID: "primary-model"})
+	seedEndpointStatus(registry, liveEP, true, regpkg.UpstreamModel{ID: "live-model"})
 
 	router := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vFail",
@@ -217,12 +219,12 @@ func TestProxyMetrics_MidStreamAbortDeregisters(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
 		{Name: "flaky", BaseURL: upstream.URL + "/v1"},
 	}})
 	// Warm the endpoint so LookupModel resolves it directly (its /v1/models
 	// probe would otherwise 404 against this handler and read as offline).
-	seedEndpointStatus(registry, config.OpenAIEndpoint{Name: "flaky", BaseURL: upstream.URL + "/v1"}, true, UpstreamModel{ID: "m"})
+	seedEndpointStatus(registry, config.OpenAIEndpoint{Name: "flaky", BaseURL: upstream.URL + "/v1"}, true, regpkg.UpstreamModel{ID: "m"})
 
 	router := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(router.server.Handler)

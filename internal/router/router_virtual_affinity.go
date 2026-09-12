@@ -1,4 +1,4 @@
-package main
+package router
 
 import (
 	clk "relayllm/internal/clock"
@@ -29,7 +29,7 @@ type virtualAffinityKey struct {
 }
 
 type virtualAffinityEntry struct {
-	target   string // resolvedVirtualTarget.identity()
+	target   string // ResolvedVirtualTarget.Identity()
 	lastUsed time.Time
 }
 
@@ -73,9 +73,9 @@ type virtualAffinityEntry struct {
 // which is a stranger failure mode than a request simply going to the same
 // backend it always has.
 //
-// Bounded the same way ProxyRegistry bounds its probe cache: no background
+// Bounded the same way registry.ProxyRegistry bounds its probe cache: no background
 // goroutine. Expiry and the LRU cap are both enforced lazily, only on the
-// write path (record), matching ProxyRegistry's natural-expiry style —
+// write path (record), matching registry.ProxyRegistry's natural-expiry style —
 // nothing sweeps this map on a timer.
 type virtualAffinityStore struct {
 	clock clk.Clock

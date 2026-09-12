@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for the two router-side TLS surfaces added alongside
 // relay_router_endpoint_tls.go:
@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
 	"strings"
 	"testing"
@@ -32,9 +34,9 @@ import (
 // The registry's /v1/models catalog probe and the actual chat-completions
 // forward share the same endpoint transport (both go through ep.Transport()),
 // so the first request below both proves the pinned proxy path works AND
-// warms ProxyRegistry's 15s freshness cache to Online. The second request
+// warms regpkg.ProxyRegistry's 15s freshness cache to Online. The second request
 // then re-pins the SAME cfg.Endpoints[0] entry to a fingerprint the server
-// will never present: ProxyRegistry.LookupModel re-reads the live cfg on
+// will never present: regpkg.ProxyRegistry.LookupModel re-reads the live cfg on
 // every call but skips re-probing while the cached status is still fresh
 // (see its isFresh check), so it reports the endpoint Online from the first
 // probe while handing back the newly mismatched endpoint value. That routes
@@ -77,7 +79,7 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 	if err := config.PrepareEndpointTransports(&cfg.Endpoints[0], false); err != nil {
 		t.Fatalf("prepareEndpointTransports: %v", err)
 	}
-	registry := NewProxyRegistry(cfg)
+	registry := regpkg.NewProxyRegistry(cfg)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	srv := httptest.NewServer(r.server.Handler)
@@ -151,10 +153,10 @@ func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
 	certPath, keyPath := leaf.WriteFiles(t)
 
 	addr := freeTCPAddr(t)
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "a"}},
 	}, "")
-	router, err := StartRelayRouter([]string{addr}, []*ServerManager{mgr}, nil, nil, nil, certPath, keyPath)
+	router, err := StartRelayRouter([]string{addr}, []*servermanager.ServerManager{mgr}, nil, nil, nil, certPath, keyPath)
 	if err != nil {
 		t.Fatalf("StartRelayRouter: %v", err)
 	}
