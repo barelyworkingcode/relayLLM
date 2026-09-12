@@ -440,13 +440,13 @@ func detailedManagedRows(managers []*ServerManager, activeByManagedTarget map[st
 	instances := []detailedInstanceRow{}
 	catalog := []detailedCatalogRow{}
 	for _, mgr := range managers {
-		kind := mgr.profile.Kind
+		kind := mgr.Profile().Kind
 		for _, inst := range mgr.ListInstances() {
 			instances = append(instances, detailedInstanceRow{
 				ServerInstanceInfo: inst,
 				Kind:               kind,
 				// Matches exactly the target string routeManaged stores via
-				// conn.setTarget("managed", mgr.profile.Kind+":"+alias).
+				// conn.setTarget("managed", mgr.Profile().Kind+":"+alias).
 				ActiveRequests: activeByManagedTarget[kind+":"+inst.Alias],
 			})
 		}

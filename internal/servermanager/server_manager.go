@@ -1,4 +1,4 @@
-package main
+package servermanager
 
 import (
 	"bufio"
@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-var llamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
+var LlamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
 
 // mlx-serve (ddalcu/mlx-serve, Zig + mlx-c, zero Python) was chosen over two
 // alternatives for the MLX profile: mlx_lm.server (Apple's own) needs a
@@ -32,7 +32,7 @@ var llamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-ser
 // llama-server and takes local MLX model directories, which is what let
 // ServerManager generalize to both binaries via one config.ServerProfile instead of
 // a second ~500-line manager.
-var mlxProfile = config.ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
+var MlxProfile = config.ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
 
 // serverInstance tracks a running managed-server process.
 type serverInstance struct {
@@ -183,6 +183,115 @@ func NewServerManager(profile config.ServerProfile, cfg *config.ServerConfig, bi
 			"idleTimeout", m.idleTimeout)
 	}
 	return m
+}
+
+// Profile returns the manager's server profile (llama-server, mlx-serve, …).
+func (m *ServerManager) Profile() config.ServerProfile {
+	return m.profile
+}
+
+// SetClock overrides the manager's clock. Test-only seam for driving the
+// idle reaper / admission timeout deterministically with a testutil.FakeClock.
+func (m *ServerManager) SetClock(c clk.Clock) {
+	m.clock = c
+}
+
+// Config returns the manager's underlying model configuration.
+func (m *ServerManager) Config() *config.ServerConfig {
+	return m.config
+}
+
+// BinaryPath returns the resolved path (or PATH-relative name) of the
+// managed-server binary this manager launches.
+func (m *ServerManager) BinaryPath() string {
+	return m.binaryPath
+}
+
+// InjectReadyInstanceForTest fabricates a healthy, ready instance for alias
+// as if a launch had already completed on port, and registers it in the
+// manager. memoryBytes overrides the pre-computed estimate for this instance
+// when non-zero. Test-only seam: production code never needs to fabricate an
+// instance, only launchLocked does.
+func (m *ServerManager) InjectReadyInstanceForTest(alias string, port int, memoryBytes int64) {
+	if memoryBytes == 0 {
+		memoryBytes = m.memory[alias]
+	}
+	inst := &serverInstance{
+		config:    config.ServerModelConfig{Alias: alias},
+		port:      port,
+		ready:     make(chan struct{}),
+		startTime: m.clock.Now(),
+		lastUsed:  m.clock.Now(),
+		memory:    memoryBytes,
+	}
+	inst.healthy.Store(true)
+	close(inst.ready)
+
+	m.mu.Lock()
+	m.instances[alias] = inst
+	m.mu.Unlock()
+}
+
+// SetTrainedContextForTest overrides the cached native-context value for
+// alias, as if it had been read from the model's own metadata at
+// construction. Test-only seam for catalog metadata coverage without a real
+// GGUF/MLX config.json on disk.
+func (m *ServerManager) SetTrainedContextForTest(alias string, ctx int64) {
+	m.mu.Lock()
+	m.trainedContext[alias] = ctx
+	m.mu.Unlock()
+}
+
+// SetLoadErrorForTest records a fake StartLoad failure for alias, as if an
+// explicit load had just failed. Test-only seam for exercising ModelCatalog's
+// failed/error surfacing without driving a real failing launch.
+func (m *ServerManager) SetLoadErrorForTest(alias, msg string) {
+	m.mu.Lock()
+	m.loadErrors[alias] = msg
+	m.mu.Unlock()
+}
+
+// LoadErrorForTest returns the currently recorded load error for alias, if
+// any. Test-only seam.
+func (m *ServerManager) LoadErrorForTest(alias string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.loadErrors[alias]
+}
+
+// InjectInstanceForTest fabricates a healthy running instance for alias with
+// the given lease count and last-used time, and registers it in the manager.
+// leases > 0 marks it busy/mid-generation, exempt from idle eviction — used
+// to test admission control and the idle reaper without a real process.
+func (m *ServerManager) InjectInstanceForTest(alias string, leases int, lastUsed time.Time) {
+	inst := &serverInstance{
+		config:    config.ServerModelConfig{Alias: alias},
+		port:      9000,
+		ready:     make(chan struct{}),
+		startTime: lastUsed,
+		lastUsed:  lastUsed,
+		leases:    leases,
+		memory:    m.memory[alias],
+	}
+	inst.healthy.Store(true)
+	close(inst.ready)
+
+	m.mu.Lock()
+	m.instances[alias] = inst
+	m.mu.Unlock()
+}
+
+// InjectLoadingInstanceForTest registers a not-yet-healthy instance for
+// alias, as ModelCatalog reports mid-launch (status "loading"). The returned
+// func marks it healthy, simulating the health check completing. Test-only
+// seam: production code reaches this state through launchLocked/awaitReady,
+// never by direct construction.
+func (m *ServerManager) InjectLoadingInstanceForTest(alias string) func() {
+	inst := &serverInstance{ready: make(chan struct{}), lastUsed: m.clock.Now()}
+	m.mu.Lock()
+	m.instances[alias] = inst
+	m.mu.Unlock()
+	return func() { inst.healthy.Store(true) }
 }
 
 // GetOrLaunch returns a config.OpenAIEndpoint for the given model alias, holding no

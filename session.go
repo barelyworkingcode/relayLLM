@@ -170,10 +170,10 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	// advertises what the router actually serves.
 	seen := make(map[string]bool)
 	for _, mgr := range []*ServerManager{m.llamaManager, m.mlxManager} {
-		if mgr == nil || mgr.config == nil {
+		if mgr == nil || mgr.Config() == nil {
 			continue
 		}
-		for _, cfg := range mgr.config.Models {
+		for _, cfg := range mgr.Config().Models {
 			if seen[cfg.Alias] {
 				continue
 			}
@@ -214,7 +214,7 @@ func (m *SessionManager) llamaConfig() *config.ServerConfig {
 	if m.llamaManager == nil {
 		return nil
 	}
-	return m.llamaManager.config
+	return m.llamaManager.Config()
 }
 
 // mlxConfig returns the config.ServerConfig from the mlx manager, or nil if no
@@ -223,7 +223,7 @@ func (m *SessionManager) mlxConfig() *config.ServerConfig {
 	if m.mlxManager == nil {
 		return nil
 	}
-	return m.mlxManager.config
+	return m.mlxManager.Config()
 }
 
 func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {

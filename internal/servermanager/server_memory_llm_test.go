@@ -1,6 +1,6 @@
 //go:build llm
 
-package main
+package servermanager
 
 import (
 	"os"
@@ -45,7 +45,7 @@ func TestEstimateModelMemory_AgainstInstalledModels(t *testing.T) {
 			t.Errorf("%s: estimateLlamaMemory: %v", mc.Alias, err)
 			continue
 		}
-		est := estimateModelMemory(llamaProfile, mc, cfg.Llama.MemoryHeadroomPercent)
+		est := estimateModelMemory(LlamaProfile, mc, cfg.Llama.MemoryHeadroomPercent)
 		total += est
 
 		t.Logf("%-24s weights=%-9s kv=%-9s total=%-9s (with headroom %s)",

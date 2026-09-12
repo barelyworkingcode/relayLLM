@@ -57,7 +57,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				"id":           entry.Alias,
 				"object":       "model",
 				"created":      0,
-				"owned_by":     m.profile.Group,
+				"owned_by":     m.Profile().Group,
 				"status":       status,
 				"architecture": map[string]any{"input_modalities": modalities},
 			}

@@ -220,7 +220,7 @@ func main() {
 	if len(cfg.Llama.Models) > 0 {
 		llamaManager = NewServerManager(llamaProfile, cfg.Llama, *llamaServerPath)
 		llamaManager.StartIdleReaper()
-		slog.Info("llama models configured", "count", len(cfg.Llama.Models), "binary", llamaManager.binaryPath)
+		slog.Info("llama models configured", "count", len(cfg.Llama.Models), "binary", llamaManager.BinaryPath())
 	}
 	sessions.SetLlamaManager(llamaManager)
 
@@ -228,7 +228,7 @@ func main() {
 	if len(cfg.Mlx.Models) > 0 {
 		mlxManager = NewServerManager(mlxProfile, cfg.Mlx, *mlxServePath)
 		mlxManager.StartIdleReaper()
-		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.binaryPath)
+		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.BinaryPath())
 	}
 	sessions.SetMlxManager(mlxManager)
 
@@ -401,7 +401,7 @@ func warnAliasShadowing(managers []*ServerManager, endpoints []config.OpenAIEndp
 			for _, earlier := range managers[:i] {
 				if earlier.HasAlias(alias) {
 					slog.Warn("router: alias shadowed by a higher-priority manager; model unreachable via the router",
-						"alias", alias, "shadowed", mgr.profile.Kind, "wins", earlier.profile.Kind)
+						"alias", alias, "shadowed", mgr.Profile().Kind, "wins", earlier.Profile().Kind)
 					break
 				}
 			}
@@ -409,7 +409,7 @@ func warnAliasShadowing(managers []*ServerManager, endpoints []config.OpenAIEndp
 				for _, ep := range endpoints {
 					if ep.Name == prefix {
 						slog.Warn("router: managed alias would intercept an openai endpoint model id of the same name",
-							"alias", alias, "kind", mgr.profile.Kind, "endpoint", ep.Name)
+							"alias", alias, "kind", mgr.Profile().Kind, "endpoint", ep.Name)
 					}
 				}
 			}
@@ -440,7 +440,7 @@ func warnVirtualModelConfig(virtual *config.VirtualLLMConfig, managers []*Server
 				// handleProxy checks managers before virtuals, so this name
 				// can never reach the virtual branch.
 				slog.Warn("router: virtual model name matches a managed alias; dispatch checks managers first so the virtual is unreachable",
-					"name", v.Name, "shadowed-by-kind", mgr.profile.Kind)
+					"name", v.Name, "shadowed-by-kind", mgr.Profile().Kind)
 			}
 		}
 		if strings.Contains(v.Name, "/") {
@@ -519,7 +519,7 @@ func warnAnthropicModelMap(anthropic *config.AnthropicRouterConfig, managers []*
 		for _, mgr := range managers {
 			if mgr.HasAlias(key) {
 				slog.Warn("router: anthropic.modelMap key matches an existing managed alias; it will shadow that alias on every route, not just /v1/messages",
-					"key", key, "kind", mgr.profile.Kind)
+					"key", key, "kind", mgr.Profile().Kind)
 			}
 		}
 		if prefix, _, ok := strings.Cut(key, "/"); ok {
