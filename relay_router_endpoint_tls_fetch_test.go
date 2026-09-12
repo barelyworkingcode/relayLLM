@@ -16,9 +16,10 @@ import (
 	"testing"
 
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 )
 
-func newModelsTLSServer(t *testing.T, leaf testLeaf) *httptest.Server {
+func newModelsTLSServer(t *testing.T, leaf testutil.TestLeaf) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -26,18 +27,18 @@ func newModelsTLSServer(t *testing.T, leaf testLeaf) *httptest.Server {
 			"data": []map[string]any{{"id": "some-model"}},
 		})
 	}))
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf.tlsCert}}
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf.TLSCert}}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func TestFetchOpenAIModels_CAFile_TrustsServer(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := ca.issueLeaf(t, 2)
+	ca := testutil.NewTestCA(t)
+	leaf := ca.IssueLeaf(t, 2)
 	srv := newModelsTLSServer(t, leaf)
 
-	ep := config.OpenAIEndpoint{Name: "ep", BaseURL: srv.URL, CAFile: ca.writeCAFile(t)}
+	ep := config.OpenAIEndpoint{Name: "ep", BaseURL: srv.URL, CAFile: ca.WriteCAFile(t)}
 	if err := config.PrepareEndpointTransports(&ep, false); err != nil {
 		t.Fatalf("PrepareEndpointTransports: %v", err)
 	}
@@ -52,8 +53,8 @@ func TestFetchOpenAIModels_CAFile_TrustsServer(t *testing.T) {
 }
 
 func TestFetchOpenAIModels_NoCAFile_FailsVerification(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := ca.issueLeaf(t, 3)
+	ca := testutil.NewTestCA(t)
+	leaf := ca.IssueLeaf(t, 3)
 	srv := newModelsTLSServer(t, leaf)
 
 	ep := config.OpenAIEndpoint{Name: "ep", BaseURL: srv.URL}
@@ -67,15 +68,15 @@ func TestFetchOpenAIModels_NoCAFile_FailsVerification(t *testing.T) {
 }
 
 func TestFetchOpenAIModels_PinMatchesServedLeaf_Succeeds(t *testing.T) {
-	ca := newTestCA(t)
-	leaf1 := ca.issueLeaf(t, 4)
+	ca := testutil.NewTestCA(t)
+	leaf1 := ca.IssueLeaf(t, 4)
 	srv := newModelsTLSServer(t, leaf1)
 
 	ep := config.OpenAIEndpoint{
 		Name:      "ep",
 		BaseURL:   srv.URL,
-		CAFile:    ca.writeCAFile(t),
-		PinSHA256: []string{fingerprintSHA256(leaf1.cert)},
+		CAFile:    ca.WriteCAFile(t),
+		PinSHA256: []string{testutil.FingerprintSHA256(leaf1.Cert)},
 	}
 	if err := config.PrepareEndpointTransports(&ep, false); err != nil {
 		t.Fatalf("PrepareEndpointTransports: %v", err)
@@ -90,16 +91,16 @@ func TestFetchOpenAIModels_PinMatchesServedLeaf_Succeeds(t *testing.T) {
 // leaf1 (so plain chain verification alone would accept it), but the pin
 // names leaf1's fingerprint specifically. The connection must still fail.
 func TestFetchOpenAIModels_PinMismatch_ValidCertDifferentLeaf_Fails(t *testing.T) {
-	ca := newTestCA(t)
-	leaf1 := ca.issueLeaf(t, 5)
-	leaf2 := ca.issueLeaf(t, 6)
+	ca := testutil.NewTestCA(t)
+	leaf1 := ca.IssueLeaf(t, 5)
+	leaf2 := ca.IssueLeaf(t, 6)
 	srv := newModelsTLSServer(t, leaf2) // server presents leaf2...
 
 	ep := config.OpenAIEndpoint{
 		Name:      "ep",
 		BaseURL:   srv.URL,
-		CAFile:    ca.writeCAFile(t),
-		PinSHA256: []string{fingerprintSHA256(leaf1.cert)}, // ...but we pinned leaf1.
+		CAFile:    ca.WriteCAFile(t),
+		PinSHA256: []string{testutil.FingerprintSHA256(leaf1.Cert)}, // ...but we pinned leaf1.
 	}
 	if err := config.PrepareEndpointTransports(&ep, false); err != nil {
 		t.Fatalf("PrepareEndpointTransports: %v", err)

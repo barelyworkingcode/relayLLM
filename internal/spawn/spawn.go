@@ -1,19 +1,24 @@
-package main
+package spawn
 
 import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"relayllm/internal/relay"
+	"relayllm/internal/types"
 )
 
-// applyEnvPassthrough copies each key in keys from os.Environ() into env
-// (using setEnv to avoid duplicates). Shared by the PTY launcher and the
+// ApplyEnvPassthrough copies each key in keys from os.Environ() into env
+// (using SetEnv to avoid duplicates). Shared by the PTY launcher and the
 // LLM-pi provider so the same env_passthrough semantics apply to both.
-func applyEnvPassthrough(env []string, keys []string) []string {
+func ApplyEnvPassthrough(env []string, keys []string) []string {
 	for _, key := range keys {
 		if v := os.Getenv(key); v != "" {
-			env = setEnv(env, key, v)
+			env = SetEnv(env, key, v)
 		}
 	}
 	return env
@@ -25,37 +30,37 @@ func applyEnvPassthrough(env []string, keys []string) []string {
 // RELAY_PROJECT_TOKEN, injected explicitly. Inheriting the service token would
 // hand the child full bridge access; inheriting the frontend token would hand it
 // relay's front-door bearer. (relayLLM keeps these in its OWN env to call the
-// bridge — childBaseEnv only strips them from what we hand to children.)
+// bridge — ChildBaseEnv only strips them from what we hand to children.)
 var relaySecretEnvKeys = []string{
-	envServiceToken,       // RELAY_SERVICE_TOKEN — full bridge access
-	envServiceTokenLegacy, // RELAY_MCP_TOKEN — legacy alias of the above
-	envFrontendToken,      // RELAY_FRONTEND_TOKEN — relay front-door bearer (unused by relayLLM)
+	relay.EnvServiceToken,       // RELAY_SERVICE_TOKEN — full bridge access
+	relay.EnvServiceTokenLegacy, // RELAY_MCP_TOKEN — legacy alias of the above
+	relay.EnvFrontendToken,      // RELAY_FRONTEND_TOKEN — relay front-door bearer (unused by relayLLM)
 	// Project-token names too: relayLLM resolves and injects the correct
-	// per-child project token explicitly (setProjectTokenEnv). Stripping any
+	// per-child project token explicitly (SetProjectTokenEnv). Stripping any
 	// inherited value first means a stale/cross-project token in relayLLM's own
 	// env can never leak into a child we don't inject one for (e.g. an ad-hoc
 	// terminal).
-	envProjectToken,       // RELAY_PROJECT_TOKEN
-	envProjectTokenLegacy, // RELAY_TOKEN
+	relay.EnvProjectToken,       // RELAY_PROJECT_TOKEN
+	relay.EnvProjectTokenLegacy, // RELAY_TOKEN
 }
 
-// setProjectTokenEnv sets the project-scoped token on a child env under both the
+// SetProjectTokenEnv sets the project-scoped token on a child env under both the
 // current and legacy names. Dual-write is a transition shim (drop the legacy
 // name once nothing reads RELAY_TOKEN) that keeps existing user skills/scripts
 // referencing RELAY_TOKEN working. No-op for an empty token.
-func setProjectTokenEnv(env []string, token string) []string {
+func SetProjectTokenEnv(env []string, token string) []string {
 	if token == "" {
 		return env
 	}
-	env = setEnv(env, envProjectToken, token)
-	env = setEnv(env, envProjectTokenLegacy, token)
+	env = SetEnv(env, relay.EnvProjectToken, token)
+	env = SetEnv(env, relay.EnvProjectTokenLegacy, token)
 	return env
 }
 
-// childBaseEnv returns os.Environ() with relayLLM's own relay credentials
+// ChildBaseEnv returns os.Environ() with relayLLM's own relay credentials
 // stripped. Use it as the base environment for every spawned child instead of
 // os.Environ() directly, so relay secrets never leak into a shell/LLM/mcp child.
-func childBaseEnv() []string {
+func ChildBaseEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
@@ -127,7 +132,7 @@ func (r RelayManagedSpec) Resolve() (SpawnSubs, error) {
 		return SpawnSubs{ProjectPath: r.Directory}, nil
 	}
 
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
+	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{
 		ProjectID: r.ProjectID,
 		Directory: r.Directory,
 	})
@@ -152,7 +157,7 @@ func (r RelayManagedSpec) labelOrDefault() string {
 	return "spawn"
 }
 
-// resolveProjectToken returns the project-scoped token for a session, resolved
+// ResolveProjectToken returns the project-scoped token for a session, resolved
 // just-in-time from relay's bridge by project id. Relay is the sole token
 // authority: relayLLM never persists the token and never accepts it from eve —
 // it asks relay for it at spawn time, injects it, and discards it.
@@ -161,14 +166,14 @@ func (r RelayManagedSpec) labelOrDefault() string {
 // token in the env → standalone/dev run) or when resolution fails. Callers must
 // spawn without a token rather than substitute the full-access service token —
 // handing a child the service token would grant it god-mode bridge access.
-func resolveProjectToken(session *Session) string {
+func ResolveProjectToken(session *types.Session) string {
 	if session == nil {
 		return ""
 	}
-	if serviceToken() == "" {
+	if relay.ServiceToken() == "" {
 		return "" // standalone: no relay bridge to ask
 	}
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{
+	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{
 		ProjectID: session.ProjectID,
 		Directory: session.Directory,
 	})
@@ -178,4 +183,66 @@ func resolveProjectToken(session *Session) string {
 		return ""
 	}
 	return resp.RelayToken
+}
+
+// SetEnv sets or replaces an environment variable in a slice.
+func SetEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if len(e) >= len(prefix) && e[:len(prefix)] == prefix {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+// ResolveClaudePath finds the claude binary, checking well-known locations
+// before falling back to PATH lookup. Necessary when launched from minimal
+// environments (Raycast, launchd) that don't source shell profiles.
+func ResolveClaudePath() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "claude"),
+		filepath.Join(home, ".claude", "local", "claude"),
+		"/usr/local/bin/claude",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Fall back to PATH lookup.
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	return "claude"
+}
+
+// EnsurePath adds ~/.local/bin to PATH in the environment slice if not already present.
+func EnsurePath(env []string) []string {
+	home, _ := os.UserHomeDir()
+	localBin := filepath.Join(home, ".local", "bin")
+
+	for i, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			if !strings.Contains(e, localBin) {
+				env[i] = e + ":" + localBin
+			}
+			return env
+		}
+	}
+	// No PATH at all — set one.
+	return append(env, "PATH=/usr/local/bin:/usr/bin:/bin:"+localBin)
+}
+
+// HasArg reports whether args contains a flag matching name (case-insensitive).
+// Used so callers don't auto-append a flag if the user already put it in extraArgs.
+func HasArg(args []string, name string) bool {
+	for _, a := range args {
+		if strings.EqualFold(a, name) {
+			return true
+		}
+	}
+	return false
 }

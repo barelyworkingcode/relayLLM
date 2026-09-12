@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +160,7 @@ func TestMainTCPListener_SameRoutesAsSocket_DifferentAuth(t *testing.T) {
 
 	// /tmp rather than t.TempDir(): a sockaddr_un path is capped near 104
 	// bytes and the per-test temp path overflows it (same reason
-	// manifest_test.go's FakeBridge does this).
+	// manifest_test.go's testutil.FakeBridge does this).
 	dir, err := os.MkdirTemp("/tmp", "rl")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
@@ -221,14 +222,14 @@ func TestMainTCPListener_SameRoutesAsSocket_DifferentAuth(t *testing.T) {
 }
 
 func TestMainTCPListener_TLS(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := ca.issueLeaf(t, 20)
-	certFile, keyFile := leaf.writeFiles(t)
+	ca := testutil.NewTestCA(t)
+	leaf := ca.IssueLeaf(t, 20)
+	certFile, keyFile := leaf.WriteFiles(t)
 
 	_, base := startTestFront(t, certFile, keyFile, recoverMiddleware(echoMux()))
 
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca.pem) {
+	if !pool.AppendCertsFromPEM(ca.PEM) {
 		t.Fatal("append CA pem")
 	}
 	client := &http.Client{Transport: &http.Transport{

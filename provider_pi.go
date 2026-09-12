@@ -1230,14 +1230,3 @@ func resolvePiPath(configured string) string {
 func piModelString(provider, modelID string) string {
 	return strings.Join([]string{"pi", provider, modelID}, "/")
 }
-
-// hasArg reports whether args contains a flag matching name (case-insensitive).
-// Used so we don't auto-append --skill if the user already put it in extraArgs.
-func hasArg(args []string, name string) bool {
-	for _, a := range args {
-		if strings.EqualFold(a, name) {
-			return true
-		}
-	}
-	return false
-}

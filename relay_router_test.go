@@ -1291,7 +1291,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContextAbandonsAllCandidates(t *testi
 // checked the context" from "the backend happened to fail fast anyway" — a
 // pre-canceled context makes every endpoint candidate fail near-instantly
 // either way. This seeds a manager at its instance cap with a busy,
-// non-idle instance (leases > 0) on a FakeClock that is never advanced, so
+// non-idle instance (leases > 0) on a testutil.FakeClock that is never advanced, so
 // a real call to Acquire("wanted") would park in its admission wait
 // indefinitely (Acquire's own ctx parameter is bound to the *same*
 // pre-canceled context here, so this specifically pins the top-of-loop
@@ -1323,7 +1323,7 @@ func TestRouter_Proxy_VirtualModel_CanceledContext_NeverBlocksOnManagedAliasAdmi
 	case <-done:
 		// Good: the router bailed on the canceled context before ever
 		// calling Acquire("wanted"), which would otherwise have parked in
-		// the admission wait forever (the FakeClock here is never advanced
+		// the admission wait forever (the testutil.FakeClock here is never advanced
 		// and "busy" is never released).
 	case <-time.After(2 * time.Second):
 		t.Fatal("request never returned — the router appears stuck inside ServerManager.Acquire's admission wait for a response nobody will read")

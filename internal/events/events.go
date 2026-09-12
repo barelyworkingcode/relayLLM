@@ -1,10 +1,12 @@
-package main
+package events
 
 import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"relayllm/internal/types"
 )
 
 const (
@@ -214,7 +216,7 @@ type ResultErrorEvent struct {
 // one and call its methods rather than building JSON inline — the methods are
 // the single point that enforces the wire contract.
 type EventEmitter struct {
-	handler EventHandler
+	handler types.EventHandler
 	// mu serializes handler invocations. Progress now arrives on the MCP SDK's
 	// read goroutine (ToolProgress) concurrently with the main tool-loop
 	// goroutine (ToolResult etc.), so emits must be serialized here rather than
@@ -222,7 +224,7 @@ type EventEmitter struct {
 	mu sync.Mutex
 }
 
-func NewEventEmitter(handler EventHandler) *EventEmitter {
+func NewEventEmitter(handler types.EventHandler) *EventEmitter {
 	return &EventEmitter{handler: handler}
 }
 

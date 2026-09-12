@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"testing"
 	"time"
 )
@@ -75,7 +76,7 @@ func assertLlamaClientAccepts(t *testing.T, rows []catalogRow) {
 	}
 }
 
-func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *FakeClock) {
+func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *testutil.FakeClock) {
 	t.Helper()
 	cfg := &config.ServerConfig{}
 	mgr, clk := newBudgetManager(t, cfg, nil)

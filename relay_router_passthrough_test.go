@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -215,7 +216,7 @@ func TestPassthrough_WebSocketUpgradeRelayedAndMetered(t *testing.T) {
 	}
 
 	var row ProxyConnInfo
-	waitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 2*time.Second, func() bool {
 		active, _, _ := r.Metrics().Snapshot()
 		if len(active) != 1 {
 			return false
@@ -231,7 +232,7 @@ func TestPassthrough_WebSocketUpgradeRelayedAndMetered(t *testing.T) {
 	}
 
 	client.Close()
-	waitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 2*time.Second, func() bool {
 		active, _, recent := r.Metrics().Snapshot()
 		return len(active) == 0 && len(recent) == 1
 	})

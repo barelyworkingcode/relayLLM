@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 )
@@ -9,7 +10,7 @@ import (
 // resolveRelayProjectTemplate maps relay's bridge ProjectTemplate response into a
 // config.TerminalTemplate and carries (projectID, templateID) on the request.
 func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(RelayProjectTemplateResponse{
 		ID:          "ssh-box",
 		Name:        "Box SSH",
@@ -20,7 +21,7 @@ func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 		Icon:        "shell",
 	})
 	fb.SetResponse(relayBridgeResponse{Type: respProjectTemplate, Data: data})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	tmpl, err := resolveRelayProjectTemplate("proj-1", "ssh-box")
 	if err != nil {

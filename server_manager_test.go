@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"slices"
 	"strconv"
 	"strings"
@@ -405,7 +406,7 @@ func TestLogProcessOutput_DrainsLinesLargerThanDefaultScannerLimit(t *testing.T)
 	}
 	w.Close()
 
-	waitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 2*time.Second, func() bool {
 		return strings.Contains(out.String(), marker)
 	})
 }

@@ -932,16 +932,14 @@ func (p *ClaudeProvider) handleControlRequest(raw json.RawMessage) {
 	}
 
 	pending, ch := p.perms.CreateRequest(p.session.ID, req.Request.ToolName, toolInput, req.Request.ToolUseID)
-	if p.perms.sink != nil {
-		p.perms.sink.SendToSession(p.session.ID, map[string]interface{}{
-			"type":         WSMsgPermissionRequest,
-			"sessionId":    p.session.ID,
-			"permissionId": pending.ID,
-			"toolName":     req.Request.ToolName,
-			"toolInput":    toolInput,
-			"toolUseId":    req.Request.ToolUseID,
-		})
-	}
+	p.perms.NotifySession(p.session.ID, map[string]interface{}{
+		"type":         WSMsgPermissionRequest,
+		"sessionId":    p.session.ID,
+		"permissionId": pending.ID,
+		"toolName":     req.Request.ToolName,
+		"toolInput":    toolInput,
+		"toolUseId":    req.Request.ToolUseID,
+	})
 
 	// Resolution (a permission_response from Eve, a timeout, or a
 	// stop/kill's DenyAllForSession) arrives on ch from another goroutine;
@@ -1162,43 +1160,4 @@ func (p *ClaudeProvider) RestoreState(state json.RawMessage) {
 		p.claudeSessionID = s.ClaudeSessionID
 		p.mu.Unlock()
 	}
-}
-
-// resolveClaudePath finds the claude binary, checking well-known locations
-// before falling back to PATH lookup. Necessary when launched from minimal
-// environments (Raycast, launchd) that don't source shell profiles.
-func resolveClaudePath() string {
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, ".local", "bin", "claude"),
-		filepath.Join(home, ".claude", "local", "claude"),
-		"/usr/local/bin/claude",
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	// Fall back to PATH lookup.
-	if p, err := exec.LookPath("claude"); err == nil {
-		return p
-	}
-	return "claude"
-}
-
-// ensurePath adds ~/.local/bin to PATH in the environment slice if not already present.
-func ensurePath(env []string) []string {
-	home, _ := os.UserHomeDir()
-	localBin := filepath.Join(home, ".local", "bin")
-
-	for i, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			if !strings.Contains(e, localBin) {
-				env[i] = e + ":" + localBin
-			}
-			return env
-		}
-	}
-	// No PATH at all — set one.
-	return append(env, "PATH=/usr/local/bin:/usr/bin:/bin:"+localBin)
 }

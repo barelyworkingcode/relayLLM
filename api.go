@@ -363,21 +363,19 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *PermissionManager, sess
 
 		req, ch := perms.CreateRequest(body.SessionID, body.ToolName, body.ToolInput, body.ToolUseID)
 
-		if perms.sink != nil {
-			perms.sink.SendToSession(body.SessionID, map[string]interface{}{
-				"type":         WSMsgPermissionRequest,
-				"sessionId":    body.SessionID,
-				"permissionId": req.ID,
-				"toolName":     body.ToolName,
-				"toolInput":    body.ToolInput,
-				"toolUseId":    body.ToolUseID,
-			})
-		}
+		perms.NotifySession(body.SessionID, map[string]interface{}{
+			"type":         WSMsgPermissionRequest,
+			"sessionId":    body.SessionID,
+			"permissionId": req.ID,
+			"toolName":     body.ToolName,
+			"toolInput":    body.ToolInput,
+			"toolUseId":    body.ToolUseID,
+		})
 
 		select {
 		case decision := <-ch:
 			writeJSON(w, 200, decision)
-		case <-perms.clock.After(60 * time.Second):
+		case <-perms.Clock().After(60 * time.Second):
 			perms.Cleanup(req.ID)
 			writeJSON(w, 200, PermissionDecision{Decision: "deny", Reason: "timeout"})
 		}

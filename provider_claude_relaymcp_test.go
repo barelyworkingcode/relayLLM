@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"relayllm/internal/testutil"
 	"testing"
 )
 
@@ -68,10 +69,10 @@ func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 // Relay is the sole authority — there is no stored/eve-supplied token to prefer,
 // which makes this restart- and rotation-safe.
 func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(RelayPtyEnvResponse{RelayToken: "resolved-token-xyz", WorkingDir: "/proj"})
 	fb.SetResponse(relayBridgeResponse{Type: respPtyEnv, Data: data})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	p := &ClaudeProvider{session: &Session{ID: "s1", ProjectID: "proj-1", Directory: "/proj"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "resolved-token-xyz" {

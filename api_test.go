@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestAPI_PostStop_CallsProviderStop(t *testing.T) {
 	if httpResp.StatusCode != http.StatusOK {
 		t.Errorf("stop status: got %d", httpResp.StatusCode)
 	}
-	waitFor(t, 1*time.Second, func() bool { return fp.Stopped() })
+	testutil.WaitFor(t, 1*time.Second, func() bool { return fp.Stopped() })
 }
 
 func TestAPI_DeleteSession_EndsSession(t *testing.T) {
@@ -160,7 +161,7 @@ func TestAPI_DeleteSession_EndsSession(t *testing.T) {
 	if httpResp.StatusCode != http.StatusOK {
 		t.Errorf("delete: got %d", httpResp.StatusCode)
 	}
-	waitFor(t, 1*time.Second, func() bool { return fp.Killed() })
+	testutil.WaitFor(t, 1*time.Second, func() bool { return fp.Killed() })
 }
 
 func TestAPI_PutModel_RejectsNonPiSession(t *testing.T) {
@@ -240,7 +241,7 @@ func TestAPI_GetLlamaInstances_EmptyWhenNoManager(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestAPI_PostPermission_TimesOut_DeterministicallyWithFakeClock(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	srv := NewTestServer(t, &TestServerOptions{Clock: clock})
 	srv.SetFakeProvider()
 	sessionID := srv.CreateSession(nil)
@@ -270,7 +271,7 @@ func TestAPI_PostPermission_TimesOut_DeterministicallyWithFakeClock(t *testing.T
 	}()
 
 	// Wait until the handler has registered its select on the fake clock.
-	waitFor(t, 1*time.Second, func() bool { return clock.Waiters() > 0 })
+	testutil.WaitFor(t, 1*time.Second, func() bool { return clock.Waiters() > 0 })
 
 	clock.Advance(61 * time.Second)
 

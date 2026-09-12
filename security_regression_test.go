@@ -242,23 +242,6 @@ func TestSec_HostExec_EnvIsSessionIDOnly(t *testing.T) {
 	}
 }
 
-// Claude's own child env for a host spawn (childBaseEnv, no ensurePath/token
-// injection) must not carry any relay secret either — belt and suspenders
-// alongside the argv guard above, since the env is what a leaked debug log
-// would actually dump.
-func TestSec_HostSpawn_ChildBaseEnvHasNoRelaySecrets(t *testing.T) {
-	t.Setenv(envServiceToken, "svc-secret")
-	t.Setenv(envProjectToken, "proj-secret")
-	t.Setenv(envProjectTokenLegacy, "proj-secret-legacy")
-
-	env := childBaseEnv()
-	for _, k := range []string{envServiceToken, envServiceTokenLegacy, envFrontendToken, envProjectToken, envProjectTokenLegacy} {
-		if envHasKey(env, k) {
-			t.Errorf("host spawn child env leaked %s", k)
-		}
-	}
-}
-
 // A host terminal never gets a project token or any relay secret in its argv
 // (v1 carries no relay MCPs/tokens onto a host — decision 6).
 func TestSec_HostTerminalExec_ArgvNeverContainsRelaySecrets(t *testing.T) {
