@@ -1,6 +1,6 @@
 //go:build live
 
-package main
+package app
 
 import (
 	"bytes"
@@ -14,6 +14,7 @@ import (
 	"relayllm/internal/permission"
 	"relayllm/internal/session"
 	"relayllm/internal/terminal"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 	"time"
@@ -205,12 +206,12 @@ func createTestSession(t *testing.T, ts *testServer, projectID string) string {
 }
 
 // sendMessage sends a message via the sync HTTP endpoint and returns response + stats.
-func sendMessage(t *testing.T, ts *testServer, sessionID, text string) (string, SessionStats) {
+func sendMessage(t *testing.T, ts *testServer, sessionID, text string) (string, types.SessionStats) {
 	t.Helper()
 
 	var result struct {
-		Response string       `json:"response"`
-		Stats    SessionStats `json:"stats"`
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
 	}
 	resp := doJSON(t, "POST", ts.Server.URL+"/api/sessions/"+sessionID+"/message", map[string]string{
 		"text": text,

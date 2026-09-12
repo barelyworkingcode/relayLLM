@@ -1,4 +1,4 @@
-package main
+package app
 
 // Coverage for the optional TCP front on the main mux (--http-port /
 // --http-bind / --http-tls-cert / --http-tls-key) added so the /status
