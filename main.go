@@ -169,14 +169,14 @@ func main() {
 		sessionsDir := filepath.Join(*dataDir, "sessions")
 		piDir := filepath.Join(*dataDir, "pi-sessions")
 		for {
-			removed, livePi, err := sweepSessions(sessionsDir, headlessAge)
+			removed, livePi, err := SweepSessions(sessionsDir, headlessAge)
 			if err != nil {
 				slog.Warn("session sweep failed", "error", err)
 			} else if removed > 0 {
 				slog.Info("session sweep", "removed", removed)
 			}
 			if livePi != nil {
-				if removed, err := sweepOrphanedPiSessions(piDir, livePi, piOrphanAge); err != nil {
+				if removed, err := SweepOrphanedPiSessions(piDir, livePi, piOrphanAge); err != nil {
 					slog.Warn("pi orphan sweep failed", "error", err)
 				} else if removed > 0 {
 					slog.Info("pi orphan sweep", "removed", removed)
@@ -269,13 +269,13 @@ func main() {
 	}
 	sessions.SetRouterPort(*routerPort)
 	sessions.SetRouterHosts(routerBinds)
-	terminalMgr.SetPiOverlay(cfg.Pi, sessions.piOverlayInputs)
+	terminalMgr.SetPiOverlay(cfg.Pi, sessions.PiOverlayInputs)
 
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)
 	RegisterTerminalRoutes(mux, templateStore, terminalMgr)
 	RegisterPermissionRoutes(mux, perms, sessions)
-	RegisterModelRoutes(mux, *ollamaURL, proxyRegistry, llamaManager, mlxManager, cfg.Pi, sessions.piOverlayInputs)
+	RegisterModelRoutes(mux, *ollamaURL, proxyRegistry, llamaManager, mlxManager, cfg.Pi, sessions.PiOverlayInputs)
 	RegisterGeneratedImageRoutes(mux, *dataDir)
 	RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, mlxManager, startTime)
 	RegisterDetailedStatusRoutes(mux, DetailedStatusDeps{

@@ -1,16 +1,17 @@
-package main
+package session
 
 import (
 	"encoding/json"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 )
 
-// userMsg builds a Message with Role "user" and the given raw JSON content
+// userMsg builds a types.Message with Role "user" and the given raw JSON content
 // (already marshaled), mirroring how session.go stores user turns.
-func userMsg(t *testing.T, content string) Message {
+func userMsg(t *testing.T, content string) types.Message {
 	t.Helper()
-	return Message{Role: "user", Content: json.RawMessage(content), Timestamp: "2026-01-01T00:00:00Z"}
+	return types.Message{Role: "user", Content: json.RawMessage(content), Timestamp: "2026-01-01T00:00:00Z"}
 }
 
 func TestSessionPreview(t *testing.T) {
@@ -22,17 +23,17 @@ func TestSessionPreview(t *testing.T) {
 
 	tests := []struct {
 		name string
-		msgs []Message
+		msgs []types.Message
 		want string
 	}{
 		{
 			name: "plain string content",
-			msgs: []Message{userMsg(t, `"hello there"`)},
+			msgs: []types.Message{userMsg(t, `"hello there"`)},
 			want: "hello there",
 		},
 		{
 			name: "json-encoded string content with whitespace",
-			msgs: []Message{userMsg(t, `"  hello\n\tworld  "`)},
+			msgs: []types.Message{userMsg(t, `"  hello\n\tworld  "`)},
 			want: "hello world",
 		},
 		{
@@ -43,7 +44,7 @@ func TestSessionPreview(t *testing.T) {
 			// arrays (SendMessage always marshals a plain string), so this
 			// pins that fallback rather than exercising real data.
 			name: "block-array content falls back to raw JSON via extractTextContent",
-			msgs: []Message{
+			msgs: []types.Message{
 				{
 					Role:      "user",
 					Timestamp: "2026-01-01T00:00:00Z",
@@ -54,7 +55,7 @@ func TestSessionPreview(t *testing.T) {
 		},
 		{
 			name: "slash command skipped in favor of first real user turn",
-			msgs: []Message{
+			msgs: []types.Message{
 				userMsg(t, `"/compact"`),
 				{Role: "assistant", Timestamp: "2026-01-01T00:00:01Z", Content: json.RawMessage(`"ok"`)},
 				userMsg(t, `"actual question"`),
@@ -63,17 +64,17 @@ func TestSessionPreview(t *testing.T) {
 		},
 		{
 			name: "truncation at 120 runes, ascii",
-			msgs: []Message{userMsg(t, mustMarshal(t, longAscii))},
+			msgs: []types.Message{userMsg(t, mustMarshal(t, longAscii))},
 			want: wantLongAscii,
 		},
 		{
 			name: "truncation at 120 runes, multibyte",
-			msgs: []Message{userMsg(t, mustMarshal(t, longMulti))},
+			msgs: []types.Message{userMsg(t, mustMarshal(t, longMulti))},
 			want: wantLongMulti,
 		},
 		{
 			name: "no user message",
-			msgs: []Message{
+			msgs: []types.Message{
 				{Role: "assistant", Timestamp: "2026-01-01T00:00:00Z", Content: json.RawMessage(`"hi"`)},
 			},
 			want: "",
@@ -85,7 +86,7 @@ func TestSessionPreview(t *testing.T) {
 		},
 		{
 			name: "only slash commands",
-			msgs: []Message{userMsg(t, `"/help"`), userMsg(t, `"/compact"`)},
+			msgs: []types.Message{userMsg(t, `"/help"`), userMsg(t, `"/compact"`)},
 			want: "",
 		},
 	}
@@ -117,7 +118,7 @@ func mustMarshal(t *testing.T, s string) string {
 func TestLastMessageAt(t *testing.T) {
 	tests := []struct {
 		name string
-		msgs []Message
+		msgs []types.Message
 		want string
 	}{
 		{
@@ -127,12 +128,12 @@ func TestLastMessageAt(t *testing.T) {
 		},
 		{
 			name: "single message",
-			msgs: []Message{{Role: "user", Timestamp: "2026-01-01T00:00:00Z", Content: json.RawMessage(`"hi"`)}},
+			msgs: []types.Message{{Role: "user", Timestamp: "2026-01-01T00:00:00Z", Content: json.RawMessage(`"hi"`)}},
 			want: "2026-01-01T00:00:00Z",
 		},
 		{
 			name: "multiple messages returns last",
-			msgs: []Message{
+			msgs: []types.Message{
 				{Role: "user", Timestamp: "2026-01-01T00:00:00Z", Content: json.RawMessage(`"hi"`)},
 				{Role: "assistant", Timestamp: "2026-01-01T00:00:05Z", Content: json.RawMessage(`"hello"`)},
 				{Role: "user", Timestamp: "2026-01-01T00:00:10Z", Content: json.RawMessage(`"bye"`)},
@@ -143,8 +144,8 @@ func TestLastMessageAt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := lastMessageAt(tt.msgs); got != tt.want {
-				t.Errorf("lastMessageAt() = %q, want %q", got, tt.want)
+			if got := LastMessageAt(tt.msgs); got != tt.want {
+				t.Errorf("LastMessageAt() = %q, want %q", got, tt.want)
 			}
 		})
 	}

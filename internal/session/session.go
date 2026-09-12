@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"context"
@@ -10,6 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/events"
+	"relayllm/internal/mcp"
+	"relayllm/internal/permission"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/provider"
+	"relayllm/internal/registry"
+	"relayllm/internal/relay"
+	"relayllm/internal/servermanager"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"time"
@@ -29,40 +38,40 @@ func NewSessionStore(dir string) *SessionStore {
 // SessionManager manages all active sessions.
 type SessionManager struct {
 	mu           sync.RWMutex
-	sessions     map[string]*Session
+	sessions     map[string]*types.Session
 	collectors   map[string]*ResponseCollector // sessionID → active collector
 	sessionStore *SessionStore
-	perms        *PermissionManager
-	sink         EventSink
+	perms        *permission.PermissionManager
+	sink         types.EventSink
 	hookSocket   string
 	hookToken    string
 	ollamaURL    string
 	openaiConfig *config.OpenAIConfig
-	llamaManager *ServerManager
-	mlxManager   *ServerManager
+	llamaManager *servermanager.ServerManager
+	mlxManager   *servermanager.ServerManager
 	dataDir      string
 	piConfig     *config.PiConfig
 
 	routerPort    string
 	routerHosts   []string
-	proxyRegistry *ProxyRegistry
+	proxyRegistry *registry.ProxyRegistry
 
 	// providerFactory, when non-nil, fully replaces the built-in provider
 	// switch in initProvider. Test-only seam — production never sets this.
-	providerFactory func(session *Session, handler EventHandler) (Provider, error)
+	providerFactory func(session *types.Session, handler types.EventHandler) (types.Provider, error)
 
-	// mcpClientFactory, when non-nil, overrides the MCPClient that
-	// BaseChatProvider would otherwise build from session settings. Lets
+	// mcpClientFactory, when non-nil, overrides the mcp.MCPClient that
+	// provider.BaseChatProvider would otherwise build from session settings. Lets
 	// tests inject a FakeMCP without going through the settings JSON.
 	// Test-only seam — production never sets this.
-	mcpClientFactory func(session *Session) MCPClient
+	mcpClientFactory func(session *types.Session) mcp.MCPClient
 }
 
-// SetProviderFactory installs a function that constructs the Provider for a
+// SetProviderFactory installs a function that constructs the types.Provider for a
 // new session. When set, it short-circuits the built-in switch on
 // session.ProviderType. Test-only.
 //
-// This, SetMCPClientFactory, PermissionManager.SetClock, and the MCPClient
+// This, SetMCPClientFactory, permission.PermissionManager.SetClock, and the mcp.MCPClient
 // interface are the hermetic tier's only test seams — no DI framework, no
 // exec.Command factory (the live tier exercises real spawn instead), no
 // PTYSpawner abstraction (terminal tests spawn a real shell — fast enough),
@@ -71,28 +80,28 @@ type SessionManager struct {
 // piece, the seam is a small interface or setter rather than a DI rewrite,
 // and production's shape doesn't get worse — invisible unless invoked. If
 // you can't meet all three, the test belongs in the live or llm tier.
-func (m *SessionManager) SetProviderFactory(f func(*Session, EventHandler) (Provider, error)) {
+func (m *SessionManager) SetProviderFactory(f func(*types.Session, types.EventHandler) (types.Provider, error)) {
 	m.providerFactory = f
 }
 
-// SetMCPClientFactory installs a function that produces the MCPClient for
-// each chat-based session. When set, BaseChatProvider's settings-driven MCP
+// SetMCPClientFactory installs a function that produces the mcp.MCPClient for
+// each chat-based session. When set, provider.BaseChatProvider's settings-driven MCP
 // is replaced after construction. Test-only — see SetProviderFactory's
 // comment for the seam-design rule this and every other setter here follows.
-func (m *SessionManager) SetMCPClientFactory(f func(*Session) MCPClient) {
+func (m *SessionManager) SetMCPClientFactory(f func(*types.Session) mcp.MCPClient) {
 	m.mcpClientFactory = f
 }
 
-func NewSessionManager(sessionStore *SessionStore, perms *PermissionManager) *SessionManager {
+func NewSessionManager(sessionStore *SessionStore, perms *permission.PermissionManager) *SessionManager {
 	return &SessionManager{
-		sessions:     make(map[string]*Session),
+		sessions:     make(map[string]*types.Session),
 		collectors:   make(map[string]*ResponseCollector),
 		sessionStore: sessionStore,
 		perms:        perms,
 	}
 }
 
-func (m *SessionManager) SetEventSink(sink EventSink) {
+func (m *SessionManager) SetEventSink(sink types.EventSink) {
 	m.sink = sink
 }
 
@@ -118,13 +127,13 @@ func (m *SessionManager) SetOpenAIConfig(cfg *config.OpenAIConfig) {
 
 // SetLlamaManager injects the llama-server process manager. Pass nil to
 // disable the llama.cpp provider.
-func (m *SessionManager) SetLlamaManager(mgr *ServerManager) {
+func (m *SessionManager) SetLlamaManager(mgr *servermanager.ServerManager) {
 	m.llamaManager = mgr
 }
 
 // SetMlxManager injects the mlx-serve process manager. Pass nil to
 // disable the MLX provider.
-func (m *SessionManager) SetMlxManager(mgr *ServerManager) {
+func (m *SessionManager) SetMlxManager(mgr *servermanager.ServerManager) {
 	m.mlxManager = mgr
 }
 
@@ -151,15 +160,15 @@ func (m *SessionManager) SetRouterHosts(hosts []string) {
 	m.routerHosts = hosts
 }
 
-func (m *SessionManager) SetProxyRegistry(r *ProxyRegistry) {
+func (m *SessionManager) SetProxyRegistry(r *registry.ProxyRegistry) {
 	m.proxyRegistry = r
 }
 
 // piOverlayInputs snapshots the inputs the pi overlay needs at spawn time.
 // The Snapshot call may block ≤3s per stale endpoint after the registry's
 // 15s TTL has expired.
-func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
-	inputs := PiOverlayInputs{
+func (m *SessionManager) PiOverlayInputs() pioverlay.PiOverlayInputs {
+	inputs := pioverlay.PiOverlayInputs{
 		RouterPort:  m.routerPort,
 		RouterHosts: m.routerHosts,
 	}
@@ -169,7 +178,7 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 	// (router dispatch: llama before mlx) are skipped so the overlay only
 	// advertises what the router actually serves.
 	seen := make(map[string]bool)
-	for _, mgr := range []*ServerManager{m.llamaManager, m.mlxManager} {
+	for _, mgr := range []*servermanager.ServerManager{m.llamaManager, m.mlxManager} {
 		if mgr == nil || mgr.Config() == nil {
 			continue
 		}
@@ -182,7 +191,7 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 			// A configured mmproj is what makes the managed server accept
 			// images — same signal the router's catalog reports.
 			_, hasMmproj := cfg.Args["mmproj"]
-			inputs.RouterModels = append(inputs.RouterModels, PiRouterModel{
+			inputs.RouterModels = append(inputs.RouterModels, pioverlay.PiRouterModel{
 				ID:             cfg.Alias,
 				SupportsImages: hasMmproj,
 			})
@@ -198,7 +207,7 @@ func (m *SessionManager) piOverlayInputs() PiOverlayInputs {
 			for _, m := range status.Models {
 				// Only what the upstream advertised — plain OpenAI /v1/models
 				// has no modality field, so a quiet endpoint reads as text.
-				inputs.RouterModels = append(inputs.RouterModels, PiRouterModel{
+				inputs.RouterModels = append(inputs.RouterModels, pioverlay.PiRouterModel{
 					ID:             status.Endpoint.Name + "/" + m.ID,
 					SupportsImages: m.SupportsImages,
 				})
@@ -226,7 +235,7 @@ func (m *SessionManager) mlxConfig() *config.ServerConfig {
 	return m.mlxManager.Config()
 }
 
-func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*Session, error) {
+func (m *SessionManager) CreateSession(projectID, directory, name, model, systemPrompt string, appendClaudeMd bool, providerType string, settings json.RawMessage) (*types.Session, error) {
 	if directory == "" {
 		return nil, fmt.Errorf("directory is required")
 	}
@@ -236,7 +245,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		model = "sonnet"
 	}
 	if name == "" {
-		name = "New Session"
+		name = "New types.Session"
 	}
 
 	if providerType == "" {
@@ -249,9 +258,9 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	// effort: a bridge failure degrades to "not a host" rather than blocking
 	// every session create on relay's availability; a genuinely host-scoped
 	// session that can't actually resolve fails later, at provider Start.
-	var host *HostSpec
-	if projectID != "" && serviceToken() != "" {
-		if resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: projectID, Directory: dir}); err == nil {
+	var host *types.HostSpec
+	if projectID != "" && relay.ServiceToken() != "" {
+		if resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: projectID, Directory: dir}); err == nil {
 			host = resp.Host
 		} else {
 			slog.Warn("resolve host for session create failed", "project", projectID, "error", err)
@@ -279,9 +288,9 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	}
 
 	var parsedSettings struct {
-		Headless         bool              `json:"headless"`
-		PermissionMode   string            `json:"permissionMode"`
-		PermissionPolicy *PermissionPolicy `json:"permissionPolicy"`
+		Headless         bool                    `json:"headless"`
+		PermissionMode   string                  `json:"permissionMode"`
+		PermissionPolicy *types.PermissionPolicy `json:"permissionPolicy"`
 	}
 	if settings != nil {
 		json.Unmarshal(settings, &parsedSettings)
@@ -298,7 +307,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		mode = parsedSettings.PermissionPolicy.DefaultMode
 	}
 
-	session := &Session{
+	session := &types.Session{
 		ID:             uuid.New().String(),
 		ProjectID:      projectID,
 		Name:           name,
@@ -308,8 +317,8 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 		Settings:       settings,
 		SystemPrompt:   systemPrompt,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		Messages:       []Message{},
-		Stats:          SessionStats{},
+		Messages:       []types.Message{},
+		Stats:          types.SessionStats{},
 		Headless:       parsedSettings.Headless,
 		PermissionMode: mode,
 		Policy:         parsedSettings.PermissionPolicy,
@@ -362,26 +371,26 @@ func deriveProviderType(model string, openaiCfg *config.OpenAIConfig, llamaCfg, 
 	return "ollama"
 }
 
-func (m *SessionManager) initProvider(session *Session) error {
+func (m *SessionManager) initProvider(session *types.Session) error {
 	handler := func(eventType string, data json.RawMessage) {
 		m.handleProviderEvent(session, eventType, data)
 	}
 
 	if m.providerFactory != nil {
-		provider, err := m.providerFactory(session, handler)
+		prov, err := m.providerFactory(session, handler)
 		if err != nil {
 			return err
 		}
-		session.SetProvider(provider)
-		return provider.Start()
+		session.SetProvider(prov)
+		return prov.Start()
 	}
 
-	var provider Provider
+	var prov types.Provider
 
 	switch session.ProviderType {
 	case "ollama":
-		transport := NewOllamaChatTransport(m.ollamaURL, session.Model, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
+		transport := provider.NewOllamaChatTransport(m.ollamaURL, session.Model, session.Settings, nil)
+		prov = provider.NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "openai":
 		prefix, modelID, ok := strings.Cut(session.Model, "/")
@@ -392,8 +401,8 @@ func (m *SessionManager) initProvider(session *Session) error {
 		if endpoint == nil {
 			return fmt.Errorf("openai: unknown endpoint %q (model %q)", prefix, session.Model)
 		}
-		transport := NewOpenAIChatTransport(*endpoint, modelID, session.Settings, &http.Client{Transport: endpoint.Transport()})
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
+		transport := provider.NewOpenAIChatTransport(*endpoint, modelID, session.Settings, &http.Client{Transport: endpoint.Transport()})
+		prov = provider.NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "llama", "mlx":
 		mgr, kind := m.llamaManager, "llama"
@@ -425,8 +434,8 @@ func (m *SessionManager) initProvider(session *Session) error {
 			}
 			return *endpoint, release, nil
 		}
-		transport := NewManagedChatTransport(resolve, modelID, session.Settings, nil)
-		provider = NewBaseChatProvider(session, handler, transport, session.Settings, nil)
+		transport := provider.NewManagedChatTransport(resolve, modelID, session.Settings, nil)
+		prov = provider.NewBaseChatProvider(session, handler, transport, session.Settings, nil)
 
 	case "pi":
 		// Expected model format: pi/<provider>/<modelId>
@@ -436,7 +445,7 @@ func (m *SessionManager) initProvider(session *Session) error {
 			return fmt.Errorf("pi: model %q malformed (want pi/<provider>/<modelId>)", session.Model)
 		}
 		// Parse pi-specific session settings so thinkingLevel set on
-		// CreateSession lands on the Session before Start() reads it.
+		// CreateSession lands on the types.Session before Start() reads it.
 		if session.ThinkingLevel == "" && session.Settings != nil {
 			var s struct {
 				ThinkingLevel string `json:"thinkingLevel"`
@@ -445,11 +454,11 @@ func (m *SessionManager) initProvider(session *Session) error {
 				session.ThinkingLevel = s.ThinkingLevel
 			}
 		}
-		p := NewPiProvider(session, handler, upstreamProvider, modelID, m.dataDir, m.piConfig, m.piOverlayInputs())
+		p := provider.NewPiProvider(session, handler, upstreamProvider, modelID, m.dataDir, m.piConfig, m.PiOverlayInputs())
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
-		provider = p
+		prov = p
 
 	default: // "claude" or unset (backward compat)
 		// A host session has no PreToolUse hook (permissions ride the
@@ -461,23 +470,23 @@ func (m *SessionManager) initProvider(session *Session) error {
 				slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 			}
 		}
-		p := NewClaudeProvider(session, handler, m.hookSocket, m.hookToken, m.perms)
+		p := provider.NewClaudeProvider(session, handler, m.hookSocket, m.hookToken, m.perms)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}
-		provider = p
+		prov = p
 	}
 
 	// Test-only MCP injection: replace the settings-driven MCP client on
 	// chat-based providers before Start runs (Start dials MCP servers).
 	if m.mcpClientFactory != nil {
-		if bp, ok := provider.(*BaseChatProvider); ok {
+		if bp, ok := prov.(*provider.BaseChatProvider); ok {
 			bp.SetMCPClient(m.mcpClientFactory(session))
 		}
 	}
 
-	session.SetProvider(provider)
-	return provider.Start()
+	session.SetProvider(prov)
+	return prov.Start()
 }
 
 // ensureHookConfig writes .claude/settings.local.json in the project directory
@@ -554,19 +563,19 @@ func resolveHookPath() (string, error) {
 	return hookPath, nil
 }
 
-func (m *SessionManager) handleProviderEvent(session *Session, eventType string, data json.RawMessage) {
+func (m *SessionManager) handleProviderEvent(session *types.Session, eventType string, data json.RawMessage) {
 	var msg map[string]interface{}
 
 	switch eventType {
-	case HandlerLLMEvent:
+	case events.HandlerLLMEvent:
 		msg = map[string]interface{}{
-			"type":      HandlerLLMEvent,
+			"type":      events.HandlerLLMEvent,
 			"sessionId": session.ID,
 			"event":     json.RawMessage(data),
 		}
 
-	case HandlerStatsUpdate:
-		var stats SessionStats
+	case events.HandlerStatsUpdate:
+		var stats types.SessionStats
 		if err := json.Unmarshal(data, &stats); err != nil {
 			return
 		}
@@ -585,12 +594,12 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.Unlock()
 
 		msg = map[string]interface{}{
-			"type":      HandlerStatsUpdate,
+			"type":      events.HandlerStatsUpdate,
 			"sessionId": session.ID,
 			"stats":     currentStats,
 		}
 
-	case HandlerMessageComplete:
+	case events.HandlerMessageComplete:
 		session.SetProcessing(false)
 
 		// Contract: all providers persist their own assistant turns (chat-base
@@ -598,7 +607,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		// JSONL replayed by readClaudeHistory). message_complete data is
 		// always nil; there is no fallback save path.
 		msg = map[string]interface{}{
-			"type":      HandlerMessageComplete,
+			"type":      events.HandlerMessageComplete,
 			"sessionId": session.ID,
 		}
 
@@ -608,7 +617,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.SetProcessing(false)
 
 		msg = map[string]interface{}{
-			"type":      WSMsgProcessExited,
+			"type":      events.WSMsgProcessExited,
 			"sessionId": session.ID,
 		}
 
@@ -616,7 +625,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 
 	case "raw_output":
 		msg = map[string]interface{}{
-			"type":      WSMsgRawOutput,
+			"type":      events.WSMsgRawOutput,
 			"sessionId": session.ID,
 			"text":      string(data),
 		}
@@ -625,7 +634,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 		session.SetProcessing(false)
 
 		msg = map[string]interface{}{
-			"type":      WSMsgError,
+			"type":      events.WSMsgError,
 			"sessionId": session.ID,
 			"message":   string(data),
 		}
@@ -647,7 +656,7 @@ func (m *SessionManager) handleProviderEvent(session *Session, eventType string,
 	}
 }
 
-func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachment) error {
+func (m *SessionManager) SendMessage(sessionID, text string, files []types.FileAttachment) error {
 	session, ok := m.GetSession(sessionID)
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
@@ -668,7 +677,7 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 
 	contentJSON, _ := json.Marshal(text)
 	session.Lock()
-	session.Messages = append(session.Messages, Message{
+	session.Messages = append(session.Messages, types.Message{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Role:      "user",
 		Content:   contentJSON,
@@ -680,7 +689,7 @@ func (m *SessionManager) SendMessage(sessionID, text string, files []FileAttachm
 	// and transition to the "generating" UI state before the first LLM token.
 	if m.sink != nil {
 		m.sink.SendToSession(session.ID, map[string]interface{}{
-			"type":      WSMsgUserMessage,
+			"type":      events.WSMsgUserMessage,
 			"sessionId": session.ID,
 			"text":      text,
 		})
@@ -721,7 +730,7 @@ func (m *SessionManager) StopGeneration(sessionID string) error {
 	// provider.StopGeneration() already incremented the generation counter,
 	// so the old goroutine's events (including its own message_complete)
 	// are silently discarded — no double-delivery.
-	m.handleProviderEvent(session, HandlerMessageComplete, nil)
+	m.handleProviderEvent(session, events.HandlerMessageComplete, nil)
 	return nil
 }
 
@@ -731,12 +740,12 @@ var sendMessageSyncTimeout = 5 * time.Minute
 
 // SendMessageSync sends a message and waits for the complete response.
 // Used by HTTP API for non-streaming clients (relayTelegram, relayScheduler).
-func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAttachment) (string, SessionStats, error) {
+func (m *SessionManager) SendMessageSync(sessionID, text string, files []types.FileAttachment) (string, types.SessionStats, error) {
 	collector := NewResponseCollector()
 
 	// Ensure session is loaded (lazy-load from disk if needed).
 	if _, ok := m.GetSession(sessionID); !ok {
-		return "", SessionStats{}, fmt.Errorf("session not found: %s", sessionID)
+		return "", types.SessionStats{}, fmt.Errorf("session not found: %s", sessionID)
 	}
 
 	// Register collector for this session.
@@ -751,7 +760,7 @@ func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAtt
 	}()
 
 	if err := m.SendMessage(sessionID, text, files); err != nil {
-		return "", SessionStats{}, err
+		return "", types.SessionStats{}, err
 	}
 
 	result, stats, err := collector.Wait(sendMessageSyncTimeout)
@@ -766,7 +775,7 @@ func (m *SessionManager) SendMessageSync(sessionID, text string, files []FileAtt
 	return result, stats, err
 }
 
-func (m *SessionManager) GetSession(id string) (*Session, bool) {
+func (m *SessionManager) GetSession(id string) (*types.Session, bool) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
@@ -793,6 +802,25 @@ func (m *SessionManager) GetSession(id string) (*Session, bool) {
 	return s, true
 }
 
+// SnapshotSessions returns the live (in-memory), non-headless sessions —
+// the same set ListSessions walks — for callers outside this package that
+// need the *types.Session itself rather than ListSessions' display-oriented
+// map (e.g. a status dashboard reading providerType/stats/processing
+// directly). Each returned session's own fields must still be read under
+// its own Lock/Unlock; this only snapshots the manager's map.
+func (m *SessionManager) SnapshotSessions() []*types.Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*types.Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if s.Headless {
+			continue
+		}
+		list = append(list, s)
+	}
+	return list
+}
+
 func (m *SessionManager) ListSessions() []map[string]interface{} {
 	// Merge in-memory sessions with persisted sessions from disk.
 	m.mu.RLock()
@@ -811,7 +839,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 		s.Lock()
 		createdAt := s.CreatedAt
 		messageCount := len(s.Messages)
-		lastMsgAt := lastMessageAt(s.Messages)
+		lastMsgAt := LastMessageAt(s.Messages)
 		preview := sessionPreview(s.Messages)
 		host := s.Host
 		s.Unlock()
@@ -853,7 +881,7 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 				"active":        false,
 				"createdAt":     s.CreatedAt,
 				"messageCount":  len(s.Messages),
-				"lastMessageAt": lastMessageAt(s.Messages),
+				"lastMessageAt": LastMessageAt(s.Messages),
 				"preview":       sessionPreview(s.Messages),
 				"host":          s.Host,
 			})
@@ -868,12 +896,12 @@ func (m *SessionManager) ListSessions() []map[string]interface{} {
 // appended if truncated). Slash-command turns (e.g. "/compact") aren't
 // conversation content, so they're skipped in favor of the first real user
 // message. Returns "" if there is no such message.
-func sessionPreview(msgs []Message) string {
+func sessionPreview(msgs []types.Message) string {
 	for _, msg := range msgs {
 		if msg.Role != "user" {
 			continue
 		}
-		text := strings.TrimSpace(extractTextContent(msg))
+		text := strings.TrimSpace(types.ExtractTextContent(msg))
 		if text == "" || strings.HasPrefix(text, "/") {
 			continue
 		}
@@ -891,9 +919,9 @@ func truncatePreview(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// lastMessageAt returns the Timestamp of the last message in msgs, or "" if
+// LastMessageAt returns the Timestamp of the last message in msgs, or "" if
 // msgs is empty.
-func lastMessageAt(msgs []Message) string {
+func LastMessageAt(msgs []types.Message) string {
 	if len(msgs) == 0 {
 		return ""
 	}
@@ -957,8 +985,8 @@ func (m *SessionManager) ClearSession(id string) error {
 
 	provider := session.SwapProvider(nil)
 	session.Lock()
-	session.Messages = []Message{}
-	session.Stats = SessionStats{}
+	session.Messages = []types.Message{}
+	session.Stats = types.SessionStats{}
 	session.ProviderState = nil
 	session.Unlock()
 	session.SetProcessing(false)
@@ -975,16 +1003,16 @@ func (m *SessionManager) ClearSession(id string) error {
 
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      WSMsgClearMessages,
+			"type":      events.WSMsgClearMessages,
 			"sessionId": id,
 		})
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      HandlerStatsUpdate,
+			"type":      events.HandlerStatsUpdate,
 			"sessionId": id,
-			"stats":     SessionStats{},
+			"stats":     types.SessionStats{},
 		})
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      WSMsgSystemMessage,
+			"type":      events.WSMsgSystemMessage,
 			"sessionId": id,
 			"message":   "Conversation history cleared",
 		})
@@ -1005,7 +1033,7 @@ func (m *SessionManager) SetPiModel(id, upstreamProvider, modelID string) error 
 	if session.ProviderType != "pi" {
 		return fmt.Errorf("model switch is only supported for pi sessions")
 	}
-	pi, ok := session.Provider().(*PiProvider)
+	pi, ok := session.Provider().(*provider.PiProvider)
 	if !ok {
 		return fmt.Errorf("session has no live pi provider")
 	}
@@ -1015,7 +1043,7 @@ func (m *SessionManager) SetPiModel(id, upstreamProvider, modelID string) error 
 	m.saveSession(session)
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      WSMsgModelChanged,
+			"type":      events.WSMsgModelChanged,
 			"sessionId": id,
 			"model":     session.Model,
 		})
@@ -1032,7 +1060,7 @@ func (m *SessionManager) SetPiThinkingLevel(id, level string) error {
 	if session.ProviderType != "pi" {
 		return fmt.Errorf("thinking level is only supported for pi sessions")
 	}
-	pi, ok := session.Provider().(*PiProvider)
+	pi, ok := session.Provider().(*provider.PiProvider)
 	if !ok {
 		return fmt.Errorf("session has no live pi provider")
 	}
@@ -1042,7 +1070,7 @@ func (m *SessionManager) SetPiThinkingLevel(id, level string) error {
 	m.saveSession(session)
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":          WSMsgThinkingLevelChanged,
+			"type":          events.WSMsgThinkingLevelChanged,
 			"sessionId":     id,
 			"thinkingLevel": level,
 		})
@@ -1068,7 +1096,7 @@ func (m *SessionManager) RenameSession(id, name string) error {
 
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      WSMsgSessionRenamed,
+			"type":      events.WSMsgSessionRenamed,
 			"sessionId": id,
 			"name":      name,
 		})
@@ -1096,7 +1124,7 @@ func (m *SessionManager) SetSessionFolder(id, folder string) error {
 
 	if m.sink != nil {
 		m.sink.SendToSession(id, map[string]interface{}{
-			"type":      WSMsgSessionFolderChanged,
+			"type":      events.WSMsgSessionFolderChanged,
 			"sessionId": id,
 			"folder":    folder,
 		})
@@ -1108,7 +1136,7 @@ func (m *SessionManager) SetSessionFolder(id, folder string) error {
 
 func (m *SessionManager) StopAll() {
 	m.mu.Lock()
-	sessions := make([]*Session, 0, len(m.sessions))
+	sessions := make([]*types.Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)
 	}
@@ -1122,7 +1150,7 @@ func (m *SessionManager) StopAll() {
 	}
 }
 
-func (m *SessionManager) saveSession(session *Session) {
+func (m *SessionManager) saveSession(session *types.Session) {
 	if provider := session.Provider(); provider != nil {
 		state := provider.GetState()
 		session.Lock()
