@@ -1,4 +1,4 @@
-package main
+package provider
 
 // Regression coverage for the SendMessage/StopGeneration locking fix: stop
 // must be able to interrupt a SendMessage that is blocked inside a slow
@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"relayllm/internal/types"
 	"testing"
 	"time"
 )
@@ -46,7 +47,7 @@ func TestStopGeneration_DoesNotBlockOnSlowAcquire(t *testing.T) {
 	transport := newSlowAcquireTransport()
 	transport.QueueTextTurn("unused")
 
-	session := &Session{ID: "slow-acquire-test", Messages: []Message{}}
+	session := &types.Session{ID: "slow-acquire-test", Messages: []types.Message{}}
 	provider := NewBaseChatProvider(session, func(string, json.RawMessage) {}, transport, nil, nil)
 	if err := provider.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -95,7 +96,7 @@ func TestSendMessage_SupersededByStop_DoesNotSpawnToolLoop(t *testing.T) {
 	transport := newSlowAcquireTransport()
 	transport.QueueTextTurn("unused")
 
-	session := &Session{ID: "superseded-test", Messages: []Message{}}
+	session := &types.Session{ID: "superseded-test", Messages: []types.Message{}}
 	provider := NewBaseChatProvider(session, func(string, json.RawMessage) {}, transport, nil, nil)
 	if err := provider.Start(); err != nil {
 		t.Fatalf("start: %v", err)

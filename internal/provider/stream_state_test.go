@@ -1,7 +1,8 @@
-package main
+package provider
 
 import (
 	"encoding/json"
+	"relayllm/internal/events"
 	"strings"
 	"testing"
 )
@@ -21,9 +22,9 @@ func (c *captureEmitter) handler(eventType string, data json.RawMessage) {
 	c.events = append(c.events, ev)
 }
 
-func newCapture() (*captureEmitter, *EventEmitter) {
+func newCapture() (*captureEmitter, *events.EventEmitter) {
 	c := &captureEmitter{}
-	return c, NewEventEmitter(c.handler)
+	return c, events.NewEventEmitter(c.handler)
 }
 
 // TestStreamState_TextOnlyEmitsStartDeltaStop verifies the simplest path:
@@ -39,7 +40,7 @@ func TestStreamState_TextOnlyEmitsStartDeltaStop(t *testing.T) {
 	if len(cap.events) != 4 {
 		t.Fatalf("events = %d, want 4 (start, delta, delta, stop):\n%s", len(cap.events), dumpEvents(cap.events))
 	}
-	assertContentBlockStart(t, cap.events[0], 0, BlockText)
+	assertContentBlockStart(t, cap.events[0], 0, events.BlockText)
 	assertTextDelta(t, cap.events[1], 0, "Hello")
 	assertTextDelta(t, cap.events[2], 0, ", world")
 	assertBlockStop(t, cap.events[3], 0)
@@ -63,10 +64,10 @@ func TestStreamState_ThinkingThenTextClosesAndOpensBlocks(t *testing.T) {
 	if len(cap.events) != 6 {
 		t.Fatalf("events = %d, want 6:\n%s", len(cap.events), dumpEvents(cap.events))
 	}
-	assertContentBlockStart(t, cap.events[0], 0, BlockThinking)
+	assertContentBlockStart(t, cap.events[0], 0, events.BlockThinking)
 	assertThinkingDelta(t, cap.events[1], 0, "hmm")
 	assertBlockStop(t, cap.events[2], 0)
-	assertContentBlockStart(t, cap.events[3], 1, BlockText)
+	assertContentBlockStart(t, cap.events[3], 1, events.BlockText)
 	assertTextDelta(t, cap.events[4], 1, "ok")
 	assertBlockStop(t, cap.events[5], 1)
 }
@@ -89,7 +90,7 @@ func TestStreamState_ToolCallStartArgsStop(t *testing.T) {
 	// Start event with id, name, empty input.
 	start := cap.events[0]
 	cb := start["content_block"].(map[string]any)
-	if cb["type"] != BlockToolUse || cb["id"] != "call_abc" || cb["name"] != "search" {
+	if cb["type"] != events.BlockToolUse || cb["id"] != "call_abc" || cb["name"] != "search" {
 		t.Errorf("tool start = %+v", cb)
 	}
 	// Two input_json_delta events.
@@ -145,7 +146,7 @@ func TestStreamState_ToolWithoutIDSynthesizes(t *testing.T) {
 	if len(tools) != 1 {
 		t.Fatalf("tools = %d", len(tools))
 	}
-	want := SynthesizeToolUseID(0, "fetch")
+	want := events.SynthesizeToolUseID(0, "fetch")
 	if tools[0].ID != want {
 		t.Errorf("synthesized ID = %q, want %q", tools[0].ID, want)
 	}
@@ -266,7 +267,7 @@ func TestStreamState_DuplicateToolStartIgnored(t *testing.T) {
 	// Only one start event should have been emitted, plus deltas + stop.
 	starts := 0
 	for _, ev := range cap.events {
-		if cb, ok := ev["content_block"].(map[string]any); ok && cb["type"] == BlockToolUse {
+		if cb, ok := ev["content_block"].(map[string]any); ok && cb["type"] == events.BlockToolUse {
 			if _, isStop := ev["content_block_stop"]; !isStop {
 				starts++
 			}

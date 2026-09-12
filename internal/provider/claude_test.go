@@ -1,7 +1,8 @@
-package main
+package provider
 
 import (
 	"encoding/json"
+	"relayllm/internal/events"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func claudeTestProvider() (*ClaudeProvider, *[]capturedEvent) {
 	}
 	p := &ClaudeProvider{
 		handler: handler,
-		emitter: NewEventEmitter(handler),
+		emitter: events.NewEventEmitter(handler),
 	}
 	return p, captured
 }
@@ -44,9 +45,9 @@ func (c capturedEvent) llmEventSubtype() string {
 }
 
 // All emitted llm_events must carry v: 2.
-func assertVersion(t *testing.T, events []capturedEvent) {
+func assertVersion(t *testing.T, evs []capturedEvent) {
 	t.Helper()
-	for i, ev := range events {
+	for i, ev := range evs {
 		if ev.eventType != "llm_event" {
 			continue
 		}
@@ -56,8 +57,8 @@ func assertVersion(t *testing.T, events []capturedEvent) {
 			continue
 		}
 		// JSON numbers decode as float64.
-		if vf, ok := v.(float64); !ok || vf != float64(ProtocolVersionNum) {
-			t.Errorf("event #%d (%s/%s) has v=%v, want %d", i, ev.llmEventType(), ev.llmEventSubtype(), v, ProtocolVersionNum)
+		if vf, ok := v.(float64); !ok || vf != float64(events.ProtocolVersionNum) {
+			t.Errorf("event #%d (%s/%s) has v=%v, want %d", i, ev.llmEventType(), ev.llmEventSubtype(), v, events.ProtocolVersionNum)
 		}
 	}
 }
@@ -107,7 +108,7 @@ func TestClaudeTranslate_SystemInit(t *testing.T) {
 	}`)
 	p.processLine(raw)
 
-	// Session id must be captured for --resume.
+	// types.Session id must be captured for --resume.
 	if p.claudeSessionID != "sid_abc" {
 		t.Errorf("claudeSessionID = %q, want sid_abc", p.claudeSessionID)
 	}

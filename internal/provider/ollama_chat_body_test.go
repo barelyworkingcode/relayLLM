@@ -1,4 +1,4 @@
-package main
+package provider
 
 // Coverage for OllamaChatTransport.buildChatBody — the body Ollama actually
 // sees. The think flag must be explicit on every request (memory says

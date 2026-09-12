@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ data: [DONE]
 
 func TestOpenAIBuildMessages_TextUserOnly(t *testing.T) {
 	transport := &OpenAIChatTransport{}
-	msgs := []Message{
+	msgs := []types.Message{
 		{Role: "user", Content: json.RawMessage(`"Hi"`)},
 	}
 	out := transport.BuildMessages("be helpful", msgs)
@@ -165,11 +166,11 @@ func TestOpenAIBuildMessages_TextUserOnly(t *testing.T) {
 
 func TestOpenAIBuildMessages_UserWithImage(t *testing.T) {
 	transport := &OpenAIChatTransport{}
-	msgs := []Message{
+	msgs := []types.Message{
 		{
 			Role:    "user",
 			Content: json.RawMessage(`"what is this?"`),
-			Files: []FileAttachment{
+			Files: []types.FileAttachment{
 				{Name: "cat.png", MimeType: "image/png", Data: "abc123"},
 			},
 		},
@@ -200,12 +201,12 @@ func TestOpenAIBuildMessages_UserWithImage(t *testing.T) {
 func TestOpenAIBuildMessages_ToolCallRoundTrip(t *testing.T) {
 	transport := &OpenAIChatTransport{}
 	// Simulate a persisted session: user → assistant with tool_use blocks → tool result → follow-up.
-	// Tool calls are extracted from canonical content blocks via toolCallsFromContent.
+	// Tool calls are extracted from canonical content blocks via ToolCallsFromContent.
 	assistantBlocks, _ := json.Marshal([]map[string]any{
 		{"type": "text", "text": "looking it up"},
 		{"type": "tool_use", "id": "call_abc", "name": "search", "input": json.RawMessage(`{"q":"foo"}`)},
 	})
-	msgs := []Message{
+	msgs := []types.Message{
 		{Role: "user", Content: json.RawMessage(`"find foo"`)},
 		{Role: "assistant", Content: assistantBlocks},
 		{Role: "tool", ToolName: "search", Content: json.RawMessage(`"result: 42"`)},
@@ -316,61 +317,6 @@ func TestOpenAIConfigLoad_EmptyWhenNothingConfigured(t *testing.T) {
 	}
 }
 
-// --- Provider-type derivation ---
-
-func TestDeriveProviderType_OpenAIPrefix(t *testing.T) {
-	cfg := &config.OpenAIConfig{
-		Endpoints: []config.OpenAIEndpoint{
-			{Name: "lmstudio", BaseURL: "http://x/v1"},
-			{Name: "omlx", BaseURL: "http://y/v1"},
-		},
-	}
-	cases := []struct {
-		model string
-		want  string
-	}{
-		{"haiku", "claude"},
-		{"sonnet", "claude"},
-		{"opus", "claude"},
-		{"lmstudio/qwen-7b", "openai"},
-		{"omlx/llama3", "openai"},
-		{"unknown/qwen-7b", "ollama"}, // unknown prefix falls through
-		{"qwen:7b", "ollama"},         // no slash
-		{"gemma3:4b", "ollama"},
-		{"/leading", "ollama"}, // malformed
-	}
-	for _, tc := range cases {
-		got := deriveProviderType(tc.model, cfg, nil, nil)
-		if got != tc.want {
-			t.Errorf("deriveProviderType(%q) = %q, want %q", tc.model, got, tc.want)
-		}
-	}
-}
-
-func TestDeriveProviderType_MlxAlias(t *testing.T) {
-	cfg := &config.OpenAIConfig{
-		Endpoints: []config.OpenAIEndpoint{
-			{Name: "lmstudio", BaseURL: "http://x/v1"},
-		},
-	}
-	mlxCfg := &config.ServerConfig{
-		Models: []config.ServerModelConfig{{Alias: "foo"}},
-	}
-	cases := []struct {
-		model string
-		want  string
-	}{
-		{"mlx/foo", "mlx"},     // configured mlx alias
-		{"mlx/nope", "ollama"}, // unknown mlx alias with non-nil config → falls through
-	}
-	for _, tc := range cases {
-		got := deriveProviderType(tc.model, cfg, nil, mlxCfg)
-		if got != tc.want {
-			t.Errorf("deriveProviderType(%q) = %q, want %q", tc.model, got, tc.want)
-		}
-	}
-}
-
 // --- End-to-end transport round-trip with httptest ---
 
 // TestOpenAIChatTransport_Roundtrip exercises the whole PostChat →
@@ -411,7 +357,7 @@ data: [DONE]
 		t.Fatalf("ping: %v", err)
 	}
 
-	msgs := transport.BuildMessages("", []Message{
+	msgs := transport.BuildMessages("", []types.Message{
 		{Role: "user", Content: json.RawMessage(`"hi"`)},
 	})
 	resp, err := transport.PostChat(context.Background(), msgs, nil)
@@ -468,7 +414,7 @@ data: [DONE]
 	endpoint := config.OpenAIEndpoint{Name: "test", BaseURL: srv.URL}
 	transport := NewOpenAIChatTransport(endpoint, "test-model", nil, srv.Client())
 
-	msgs := transport.BuildMessages("", []Message{
+	msgs := transport.BuildMessages("", []types.Message{
 		{Role: "user", Content: json.RawMessage(`"search for foo"`)},
 	})
 

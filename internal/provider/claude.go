@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bufio"
@@ -15,7 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"relayllm/internal/events"
+	"relayllm/internal/permission"
+	"relayllm/internal/relay"
+	"relayllm/internal/spawn"
 	"relayllm/internal/sshhost"
+	"relayllm/internal/types"
 )
 
 var emptyJSONObject = []byte("{}")
@@ -30,12 +35,12 @@ const claudeIdleTimeout = 15 * time.Minute
 // inline content is split into bare-start + delta.
 //
 // Persistence: Claude CLI owns the JSONL history file under ~/.claude/
-// projects/<dir>/<sid>.jsonl, replayed on session join by readClaudeHistory.
+// projects/<dir>/<sid>.jsonl, replayed on session join by ReadClaudeHistory.
 // This provider does not accumulate into session.Messages.
 type ClaudeProvider struct {
-	session *Session
-	handler EventHandler
-	emitter *EventEmitter
+	session *types.Session
+	handler types.EventHandler
+	emitter *events.EventEmitter
 
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
@@ -53,7 +58,7 @@ type ClaudeProvider struct {
 	// without one (existing tests, non-host sessions with no policy match)
 	// simply can't register/deny requests — control_request handling checks
 	// before use.
-	perms *PermissionManager
+	perms *permission.PermissionManager
 
 	lastActivity atomic.Int64  // unix timestamp of last activity
 	stopIdle     chan struct{} // signals idle watcher to stop
@@ -74,11 +79,11 @@ type ClaudeProvider struct {
 	snapNextIdx   int    // next global block index to assign
 }
 
-func NewClaudeProvider(session *Session, handler EventHandler, hookSocket, hookToken string, perms *PermissionManager) *ClaudeProvider {
+func NewClaudeProvider(session *types.Session, handler types.EventHandler, hookSocket, hookToken string, perms *permission.PermissionManager) *ClaudeProvider {
 	return &ClaudeProvider{
 		session:    session,
 		handler:    handler,
-		emitter:    NewEventEmitter(handler),
+		emitter:    events.NewEventEmitter(handler),
 		model:      session.Model,
 		directory:  session.Directory,
 		hookSocket: hookSocket,
@@ -117,7 +122,7 @@ func (p *ClaudeProvider) relayMCPConfigJSON(projectToken string) string {
 // on a stored/eve-supplied token. Returns "" when not relay-managed; callers
 // degrade (they never fall back to the full-access service token).
 func (p *ClaudeProvider) resolveMCPToken() string {
-	return resolveProjectToken(p.session)
+	return spawn.ResolveProjectToken(p.session)
 }
 
 // refreshHostSpec re-resolves the session's Host via relay's bridge before
@@ -135,10 +140,10 @@ func (p *ClaudeProvider) resolveMCPToken() string {
 // terminal the way there is for a headless CLI restart — re-resolving on
 // every keystroke would buy nothing a session actually needs.
 func (p *ClaudeProvider) refreshHostSpec() {
-	if serviceToken() == "" {
+	if relay.ServiceToken() == "" {
 		return
 	}
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: p.session.ProjectID, Directory: p.directory})
+	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: p.session.ProjectID, Directory: p.directory})
 	if err != nil {
 		slog.Warn("resolve host at spawn failed, using stored value", "session", p.session.ID, "error", err)
 		return
@@ -239,11 +244,11 @@ func (p *ClaudeProvider) buildClaudeArgs(mcpCfg string) []string {
 }
 
 // buildClaudeEnv assembles the child environment. base is the inherited
-// environment (childBaseEnv after ensurePath); mcpToken is the resolved
+// environment (spawn.ChildBaseEnv after spawn.EnsurePath); mcpToken is the resolved
 // project-scoped relay token — "" when the session is not relay-managed.
 //
 // Fail-closed contract: an empty mcpToken sets NO project-token var (never the
-// full-access service token — see setProjectTokenEnv). RELAY_LLM_HEADLESS is
+// full-access service token — see spawn.SetProjectTokenEnv). RELAY_LLM_HEADLESS is
 // set if and only if the effective permission mode is bypassPermissions, so the
 // hook's auto-approve only ever fires for a session that is actually headless.
 func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string {
@@ -260,7 +265,7 @@ func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string
 	// model to invoke `relay mcp call ...` via Bash; that path needs
 	// RELAY_PROJECT_TOKEN in Claude's own environment to authenticate.
 	// Dual-written under the legacy RELAY_TOKEN name for existing skills.
-	env = setProjectTokenEnv(env, mcpToken)
+	env = spawn.SetProjectTokenEnv(env, mcpToken)
 
 	if p.effectivePermissionMode() == "bypassPermissions" {
 		env = append(env, "RELAY_LLM_HEADLESS=true")
@@ -275,7 +280,7 @@ func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string
 // bridge call, no exec, hermetically testable. env is caller-built so the
 // security invariant — RELAY_LLM_SESSION_ID only, never the hook socket/token
 // or any relay token (decision 6) — is visible at the call site too.
-func buildHostExec(spec *HostSpec, dir string, args []string, env map[string]string) (name string, argv []string) {
+func buildHostExec(spec *types.HostSpec, dir string, args []string, env map[string]string) (name string, argv []string) {
 	remote := sshhost.RemoteCommand(dir, append([]string{spec.ClaudePath}, args...), env)
 	name = spec.SSHArgv[0]
 	argv = append(append([]string{}, spec.SSHArgv[1:]...), "-T", "--", remote)
@@ -297,7 +302,7 @@ func (p *ClaudeProvider) Start() error {
 		// cmd.Dir stays the console's cwd — irrelevant, since the working
 		// directory that matters (dir) is applied by RemoteCommand's `cd` on
 		// the host side.
-		cmd.Env = childBaseEnv()
+		cmd.Env = spawn.ChildBaseEnv()
 	} else {
 		// Resolve the relay project token once and reuse it for both the
 		// --mcp-config child and Claude's own env. Resilient to a relayLLM
@@ -307,10 +312,10 @@ func (p *ClaudeProvider) Start() error {
 
 		args := p.buildClaudeArgs(mcpCfg)
 
-		claudePath := resolveClaudePath()
+		claudePath := spawn.ResolveClaudePath()
 		cmd = exec.Command(claudePath, args...)
 		cmd.Dir = p.directory
-		cmd.Env = p.buildClaudeEnv(ensurePath(childBaseEnv()), mcpToken)
+		cmd.Env = p.buildClaudeEnv(spawn.EnsurePath(spawn.ChildBaseEnv()), mcpToken)
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -412,13 +417,13 @@ func (p *ClaudeProvider) processLine(raw json.RawMessage) {
 	}
 
 	switch envelope.Type {
-	case EvtSystem:
+	case events.EvtSystem:
 		p.translateSystem(envelope.Subtype, raw)
-	case EvtAssistant:
+	case events.EvtAssistant:
 		p.translateAssistant(raw)
 	case "user":
 		p.translateUser(raw)
-	case EvtResult:
+	case events.EvtResult:
 		p.translateResult(raw)
 	case "control_request":
 		p.handleControlRequest(raw)
@@ -458,7 +463,7 @@ func claudeMCPServerNames(entries []json.RawMessage) []string {
 
 func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 	switch subtype {
-	case SystemInitSubtype:
+	case events.SystemInitSubtype:
 		var init struct {
 			SessionID  string            `json:"session_id"`
 			Model      string            `json:"model"`
@@ -485,7 +490,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.SystemInit(model, cwd, init.Tools, claudeMCPServerNames(init.MCPServers))
 
-	case SystemPermissionRequestSubtype:
+	case events.SystemPermissionRequestSubtype:
 		var req struct {
 			PermissionID string          `json:"permission_id"`
 			ToolName     string          `json:"tool_name"`
@@ -498,7 +503,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.PermissionRequest(req.PermissionID, req.ToolName, req.ToolUseID, req.ToolInput)
 
-	case SystemQuestionSubtype:
+	case events.SystemQuestionSubtype:
 		var q struct {
 			Prompt   string          `json:"prompt"`
 			Metadata json.RawMessage `json:"metadata"`
@@ -509,7 +514,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.SystemQuestion(q.Prompt, q.Metadata)
 
-	case SystemStatusSubtype:
+	case events.SystemStatusSubtype:
 		var s struct {
 			Message string `json:"message"`
 		}
@@ -519,7 +524,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.SystemStatus(s.Message)
 
-	case SystemAPIErrorSubtype:
+	case events.SystemAPIErrorSubtype:
 		var s struct {
 			Message  string `json:"message"`
 			Retrying bool   `json:"retrying"`
@@ -530,7 +535,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.SystemAPIError(s.Message, s.Retrying)
 
-	case SystemBridgeStatusSubtype:
+	case events.SystemBridgeStatusSubtype:
 		var s struct {
 			Status string `json:"status"`
 			Detail string `json:"detail"`
@@ -541,7 +546,7 @@ func (p *ClaudeProvider) translateSystem(subtype string, raw json.RawMessage) {
 		}
 		p.emitter.SystemBridgeStatus(s.Status, s.Detail)
 
-	case SystemStopHookSummarySubtype:
+	case events.SystemStopHookSummarySubtype:
 		var s struct {
 			Summary string `json:"summary"`
 			IsError bool   `json:"is_error"`
@@ -638,21 +643,21 @@ func (p *ClaudeProvider) translateAssistantSnapshot(messageRaw json.RawMessage) 
 		idx := p.snapNextIdx
 		p.snapNextIdx++
 		switch block.Type {
-		case BlockText:
+		case events.BlockText:
 			p.emitter.TextBlockStart(idx)
 			if block.Text != "" {
 				p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
 				p.emitter.TextDelta(idx, block.Text)
 			}
 			p.emitter.BlockStop(idx)
-		case BlockThinking:
+		case events.BlockThinking:
 			p.emitter.ThinkingBlockStart(idx)
 			if block.Thinking != "" {
 				p.firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
 				p.emitter.ThinkingDelta(idx, block.Thinking)
 			}
 			p.emitter.BlockStop(idx)
-		case BlockToolUse:
+		case events.BlockToolUse:
 			p.emitter.ToolUseBlockStart(idx, block.ID, block.Name)
 			input := block.Input
 			if len(input) > 0 && !bytes.Equal(input, emptyJSONObject) {
@@ -679,17 +684,17 @@ func (p *ClaudeProvider) translateBlockStart(index int, blockRaw json.RawMessage
 	}
 
 	switch cb.Type {
-	case BlockText:
+	case events.BlockText:
 		p.emitter.TextBlockStart(index)
 		if cb.Text != "" {
 			p.emitter.TextDelta(index, cb.Text)
 		}
-	case BlockThinking:
+	case events.BlockThinking:
 		p.emitter.ThinkingBlockStart(index)
 		if cb.Thinking != "" {
 			p.emitter.ThinkingDelta(index, cb.Thinking)
 		}
-	case BlockToolUse:
+	case events.BlockToolUse:
 		p.emitter.ToolUseBlockStart(index, cb.ID, cb.Name)
 		if len(cb.Input) > 0 && string(cb.Input) != "{}" {
 			p.emitter.InputJsonDelta(index, string(cb.Input))
@@ -708,11 +713,11 @@ func (p *ClaudeProvider) translateBlockDelta(index int, deltaRaw json.RawMessage
 		return
 	}
 	switch d.Type {
-	case DeltaText:
+	case events.DeltaText:
 		p.emitter.TextDelta(index, d.Text)
-	case DeltaThinking:
+	case events.DeltaThinking:
 		p.emitter.ThinkingDelta(index, d.Thinking)
-	case DeltaInputJSON:
+	case events.DeltaInputJSON:
 		p.emitter.InputJsonDelta(index, d.PartialJSON)
 	}
 }
@@ -728,7 +733,7 @@ func (p *ClaudeProvider) translateBlockStop(index int, blockRaw *json.RawMessage
 		Name  string          `json:"name,omitempty"`
 		Input json.RawMessage `json:"input,omitempty"`
 	}
-	if err := json.Unmarshal(*blockRaw, &cb); err != nil || cb.Type != BlockToolUse {
+	if err := json.Unmarshal(*blockRaw, &cb); err != nil || cb.Type != events.BlockToolUse {
 		p.emitter.BlockStop(index)
 		return
 	}
@@ -759,12 +764,12 @@ func (p *ClaudeProvider) translateUser(raw json.RawMessage) {
 		if block.Type != "tool_result" {
 			continue
 		}
-		p.emitter.ToolResult(block.ToolUseID, block.ToolName, flattenTextBlocks(block.Content), block.IsError)
+		p.emitter.ToolResult(block.ToolUseID, block.ToolName, types.FlattenTextBlocks(block.Content), block.IsError)
 	}
 }
 
 // translateResult handles the terminal `result` event: extracts usage into
-// SessionStats, emits stats_update, then emits message_complete with nil data
+// types.SessionStats, emits stats_update, then emits message_complete with nil data
 // (Claude CLI owns assistant persistence via its JSONL file — the session
 // layer's fallback-save branch must not fire).
 func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
@@ -778,7 +783,7 @@ func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
 		TotalCostUsd float64 `json:"total_cost_usd"`
 	}
 	if err := json.Unmarshal(raw, &result); err == nil && result.Usage != nil {
-		stats := SessionStats{
+		stats := types.SessionStats{
 			InputTokens:         result.Usage.InputTokens,
 			OutputTokens:        result.Usage.OutputTokens,
 			CacheReadTokens:     result.Usage.CacheReadInputTokens,
@@ -798,9 +803,9 @@ func (p *ClaudeProvider) translateResult(raw json.RawMessage) {
 		}
 
 		statsData, _ := json.Marshal(stats)
-		p.handler(HandlerStatsUpdate, statsData)
+		p.handler(events.HandlerStatsUpdate, statsData)
 	}
-	p.handler(HandlerMessageComplete, nil)
+	p.handler(events.HandlerMessageComplete, nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -916,11 +921,11 @@ func (p *ClaudeProvider) handleControlRequest(raw json.RawMessage) {
 	// Evaluate the session's policy exactly as /api/permission does: deny,
 	// then allow, before ever bothering a viewer.
 	if policy := p.session.Policy; policy != nil {
-		if MatchToolRule(req.Request.ToolName, toolInput, policy.DeniedTools) {
+		if permission.MatchToolRule(req.Request.ToolName, toolInput, policy.DeniedTools) {
 			p.writeControlResponse(buildControlResponseDeny(req.RequestID, "denied by project policy"))
 			return
 		}
-		if MatchToolRule(req.Request.ToolName, toolInput, policy.AllowedTools) {
+		if permission.MatchToolRule(req.Request.ToolName, toolInput, policy.AllowedTools) {
 			p.writeControlResponse(buildControlResponseAllow(req.RequestID, req.Request.Input))
 			return
 		}
@@ -933,7 +938,7 @@ func (p *ClaudeProvider) handleControlRequest(raw json.RawMessage) {
 
 	pending, ch := p.perms.CreateRequest(p.session.ID, req.Request.ToolName, toolInput, req.Request.ToolUseID)
 	p.perms.NotifySession(p.session.ID, map[string]interface{}{
-		"type":         WSMsgPermissionRequest,
+		"type":         events.WSMsgPermissionRequest,
 		"sessionId":    p.session.ID,
 		"permissionId": pending.ID,
 		"toolName":     req.Request.ToolName,
@@ -972,7 +977,7 @@ func (p *ClaudeProvider) writeControlResponse(data []byte) {
 	}
 }
 
-func (p *ClaudeProvider) SendMessage(text string, files []FileAttachment) error {
+func (p *ClaudeProvider) SendMessage(text string, files []types.FileAttachment) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

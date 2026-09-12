@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bytes"
@@ -9,6 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"relayllm/internal/events"
+	"relayllm/internal/mcp"
+	"relayllm/internal/relay"
+	"relayllm/internal/spawn"
+	"relayllm/internal/tools"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +34,7 @@ type ChatTransport interface {
 
 	// BuildMessages converts session history into the transport's wire format,
 	// prepending the system prompt if non-empty.
-	BuildMessages(systemPrompt string, msgs []Message) []map[string]any
+	BuildMessages(systemPrompt string, msgs []types.Message) []map[string]any
 
 	// PostChat sends a streaming chat request and returns the HTTP response.
 	// The caller owns closing the response body (via StreamChunks).
@@ -64,7 +70,7 @@ type NormalizedToolCall struct {
 // persistence.
 type NormalizedStreamResult struct {
 	FullText string
-	Stats    SessionStats
+	Stats    types.SessionStats
 	Err      error
 }
 
@@ -100,15 +106,15 @@ type ToolArgsEvent struct {
 // BaseChatSettings holds the common knobs shared between Ollama and OpenAI.
 // Transport-specific settings (Ollama's think/num_ctx) embed this.
 type BaseChatSettings struct {
-	Temperature       *float64                   `json:"temperature,omitempty"`
-	TopP              *float64                   `json:"top_p,omitempty"`
-	TopK              *int                       `json:"top_k,omitempty"`
-	MinP              *float64                   `json:"min_p,omitempty"`
-	RepetitionPenalty *float64                   `json:"repetition_penalty,omitempty"`
-	PresencePenalty   *float64                   `json:"presence_penalty,omitempty"`
-	MaxTokens         *int                       `json:"max_tokens,omitempty"`
-	UseRelayTools     *bool                      `json:"useRelayTools,omitempty"`
-	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	Temperature       *float64                       `json:"temperature,omitempty"`
+	TopP              *float64                       `json:"top_p,omitempty"`
+	TopK              *int                           `json:"top_k,omitempty"`
+	MinP              *float64                       `json:"min_p,omitempty"`
+	RepetitionPenalty *float64                       `json:"repetition_penalty,omitempty"`
+	PresencePenalty   *float64                       `json:"presence_penalty,omitempty"`
+	MaxTokens         *int                           `json:"max_tokens,omitempty"`
+	UseRelayTools     *bool                          `json:"useRelayTools,omitempty"`
+	MCPServers        map[string]mcp.MCPServerConfig `json:"mcpServers,omitempty"`
 }
 
 // parseBaseSettings extracts BaseChatSettings from a raw JSON blob. See
@@ -126,7 +132,7 @@ func parseBaseSettings(raw json.RawMessage) BaseChatSettings {
 // fixupMCPServersString handles the case where mcpServers arrives as a
 // JSON-encoded string (Eve's text-input field sends it that way) instead of
 // a parsed object. No-op if the target is already populated.
-func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConfig) {
+func fixupMCPServersString(raw json.RawMessage, target *map[string]mcp.MCPServerConfig) {
 	if len(*target) > 0 {
 		return
 	}
@@ -144,7 +150,7 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 	}
 }
 
-// resolveRelayMCPServer builds the MCPServerConfig that fronts every
+// resolveRelayMCPServer builds the mcp.MCPServerConfig that fronts every
 // relay-registered MCP behind one entry point. The caller has already decided
 // relay tools are wanted; this returns (config, true) only when
 // RELAY_MCP_COMMAND is in env AND a non-empty project-scoped token was
@@ -154,22 +160,22 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]MCPServerConf
 // Fails closed: an empty projectToken yields ok=false. We never fall back to
 // the full-access service token — that would hand the spawned `relay mcp`
 // child god-mode bridge access instead of the project's scoped permissions.
-func resolveRelayMCPServer(projectToken string) (MCPServerConfig, bool) {
+func resolveRelayMCPServer(projectToken string) (mcp.MCPServerConfig, bool) {
 	cmd := os.Getenv("RELAY_MCP_COMMAND")
 	if cmd == "" {
 		slog.Warn("relay tools enabled but RELAY_MCP_COMMAND not set")
-		return MCPServerConfig{}, false
+		return mcp.MCPServerConfig{}, false
 	}
 	if projectToken == "" {
 		slog.Warn("relay tools enabled but no project token resolved; spawning without relay MCP")
-		return MCPServerConfig{}, false
+		return mcp.MCPServerConfig{}, false
 	}
-	return MCPServerConfig{
+	return mcp.MCPServerConfig{
 		Command: cmd,
 		Args:    []string{"mcp"},
 		// Dual-write the legacy RELAY_TOKEN name alongside the new one so skills
 		// that still reference it keep working during the transition.
-		Env: map[string]string{envProjectToken: projectToken, envProjectTokenLegacy: projectToken},
+		Env: map[string]string{relay.EnvProjectToken: projectToken, relay.EnvProjectTokenLegacy: projectToken},
 	}, true
 }
 
@@ -177,13 +183,13 @@ func resolveRelayMCPServer(projectToken string) (MCPServerConfig, bool) {
 // configured (tool calling disabled). When the session opts into relay tools,
 // the project token is resolved just-in-time from relay's bridge by project id
 // (never stored, never taken from eve).
-func buildMCPManagerFromSettings(s BaseChatSettings, session *Session) MCPClient {
+func buildMCPManagerFromSettings(s BaseChatSettings, session *types.Session) mcp.MCPClient {
 	servers := s.MCPServers
 	use := s.UseRelayTools != nil && *s.UseRelayTools
 	if use {
-		if relay, ok := resolveRelayMCPServer(resolveProjectToken(session)); ok {
+		if relay, ok := resolveRelayMCPServer(spawn.ResolveProjectToken(session)); ok {
 			if servers == nil {
-				servers = make(map[string]MCPServerConfig)
+				servers = make(map[string]mcp.MCPServerConfig)
 			}
 			servers["relay"] = relay
 		}
@@ -191,31 +197,31 @@ func buildMCPManagerFromSettings(s BaseChatSettings, session *Session) MCPClient
 	if len(servers) == 0 {
 		return nil
 	}
-	return NewMCPManager(servers)
+	return mcp.NewMCPManager(servers)
 }
 
-// BaseChatProvider implements the Provider interface by delegating all
+// BaseChatProvider implements the types.Provider interface by delegating all
 // format-specific work to a ChatTransport. It owns the provider lifecycle,
 // the tool-calling loop, event emission, and MCP orchestration.
 type BaseChatProvider struct {
-	session      *Session
-	handler      EventHandler
+	session      *types.Session
+	handler      types.EventHandler
 	transport    ChatTransport
-	mcpManager   MCPClient
-	builtinTools *BuiltinToolRegistry
+	mcpManager   mcp.MCPClient
+	builtinTools *tools.BuiltinToolRegistry
 
 	mu         sync.Mutex
 	started    atomic.Bool
 	cancelFn   context.CancelFunc
-	activeBody io.Closer        // resp.Body of the in-flight stream; closed on stop
-	generation atomic.Uint64    // incremented on send/stop to discard stale goroutine events
-	lastFiles  []FileAttachment // files from the most recent user message, available to built-in tools
+	activeBody io.Closer              // resp.Body of the in-flight stream; closed on stop
+	generation atomic.Uint64          // incremented on send/stop to discard stale goroutine events
+	lastFiles  []types.FileAttachment // files from the most recent user message, available to built-in tools
 }
 
 // NewBaseChatProvider constructs a provider around a transport. The mcpManager
 // is derived from the session's raw settings JSON; pass nil to disable MCP
 // entirely regardless of settings. builtinTools may be nil.
-func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatTransport, settings json.RawMessage, builtinTools *BuiltinToolRegistry) *BaseChatProvider {
+func NewBaseChatProvider(session *types.Session, handler types.EventHandler, transport ChatTransport, settings json.RawMessage, builtinTools *tools.BuiltinToolRegistry) *BaseChatProvider {
 	return &BaseChatProvider{
 		session:      session,
 		handler:      handler,
@@ -228,7 +234,7 @@ func NewBaseChatProvider(session *Session, handler EventHandler, transport ChatT
 // SetMCPClient replaces the MCP client built from session settings. Test-only
 // seam — production never calls this. Used by SessionManager.mcpClientFactory
 // to substitute a fake MCP that doesn't spawn real subprocesses.
-func (p *BaseChatProvider) SetMCPClient(c MCPClient) {
+func (p *BaseChatProvider) SetMCPClient(c mcp.MCPClient) {
 	p.mcpManager = c
 }
 
@@ -261,7 +267,7 @@ func (p *BaseChatProvider) Start() error {
 	return nil
 }
 
-func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) error {
+func (p *BaseChatProvider) SendMessage(text string, files []types.FileAttachment) error {
 	if !p.started.Load() {
 		return fmt.Errorf("%s: provider not started", p.transport.Name())
 	}
@@ -330,10 +336,10 @@ func (p *BaseChatProvider) SendMessage(text string, files []FileAttachment) erro
 // copyHistory snapshots the session's message history under the session lock.
 // Transports must not reach into session.Messages directly — they receive a
 // copy via BuildMessages so the tool loop can mutate its working set safely.
-func (p *BaseChatProvider) copyHistory() []Message {
+func (p *BaseChatProvider) copyHistory() []types.Message {
 	p.session.Lock()
 	defer p.session.Unlock()
-	msgs := make([]Message, len(p.session.Messages))
+	msgs := make([]types.Message, len(p.session.Messages))
 	copy(msgs, p.session.Messages)
 	return msgs
 }
@@ -375,7 +381,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		}
 		p.handler(eventType, data)
 	}
-	guardedEmitter := NewEventEmitter(func(eventType string, data json.RawMessage) {
+	guardedEmitter := events.NewEventEmitter(func(eventType string, data json.RawMessage) {
 		if stale() {
 			return
 		}
@@ -385,7 +391,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 	const maxIterations = 10
 	const maxToolResultLen = 8192
 
-	var toolMessages []Message
+	var toolMessages []types.Message
 
 	// All tool-loop iterations are one assistant turn from the client's POV,
 	// so emit message_start + system.init once at the top.
@@ -461,10 +467,10 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		// Terminal condition: no more tool calls, no tool handlers, or cap hit.
 		if len(toolCalls) == 0 || (p.mcpManager == nil && p.builtinTools == nil) || iteration == maxIterations {
 			statsData, _ := json.Marshal(result.Stats)
-			guardedHandler(HandlerStatsUpdate, statsData)
+			guardedHandler(events.HandlerStatsUpdate, statsData)
 
 			if len(state.blocks) > 0 {
-				toolMessages = append(toolMessages, Message{
+				toolMessages = append(toolMessages, types.Message{
 					Timestamp: timeNow(),
 					Role:      "assistant",
 					Content:   mustJSON(state.blocks),
@@ -478,7 +484,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 
 			// Nil payload tells session.go's handler to skip its fallback
 			// text-only save — we already persisted the canonical blocks above.
-			guardedHandler(HandlerMessageComplete, nil)
+			guardedHandler(events.HandlerMessageComplete, nil)
 			return
 		}
 
@@ -486,8 +492,8 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 		// blocks. state.blocks is guaranteed non-empty here — toolCalls came
 		// from onToolStart, which appends a tool_use block via closeOpen.
 		// Tool calls are extracted from these blocks on history replay (see
-		// toolCallsFromContent); no separate persistence field needed.
-		toolMessages = append(toolMessages, Message{
+		// ToolCallsFromContent); no separate persistence field needed.
+		toolMessages = append(toolMessages, types.Message{
 			Timestamp: timeNow(),
 			Role:      "assistant",
 			Content:   mustJSON(state.blocks),
@@ -529,7 +535,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 			guardedEmitter.ToolResult(tc.ID, tc.Name, toolResult, isError)
 
 			resultContent, _ := json.Marshal(toolResult)
-			toolMessages = append(toolMessages, Message{
+			toolMessages = append(toolMessages, types.Message{
 				Timestamp: timeNow(),
 				Role:      "tool",
 				Content:   resultContent,
@@ -603,13 +609,13 @@ func mustJSON(v any) json.RawMessage {
 	return data
 }
 
-// toolCallsFromContent extracts tool calls from a persisted assistant
-// Message.Content. Tool calls live inside canonical content blocks as
+// ToolCallsFromContent extracts tool calls from a persisted assistant
+// types.Message.Content. Tool calls live inside canonical content blocks as
 // tool_use entries — single source of truth on history replay.
 //
 // The bytes.Contains precheck rejects text-only assistant turns (the common
 // case) without paying for a full unmarshal of the content blob.
-func toolCallsFromContent(content json.RawMessage) []NormalizedToolCall {
+func ToolCallsFromContent(content json.RawMessage) []NormalizedToolCall {
 	if len(content) == 0 || !bytes.Contains(content, toolUseMarker) {
 		return nil
 	}
@@ -624,7 +630,7 @@ func toolCallsFromContent(content json.RawMessage) []NormalizedToolCall {
 	}
 	var out []NormalizedToolCall
 	for _, b := range blocks {
-		if b.Type != BlockToolUse || b.Name == "" {
+		if b.Type != events.BlockToolUse || b.Name == "" {
 			continue
 		}
 		args := b.Input
@@ -653,7 +659,7 @@ var toolUseMarker = []byte(`"tool_use"`)
 // any point. The only invariant is that each block_start has a matching
 // block_stop before the next start at the same kind.
 type turnStreamState struct {
-	emitter *EventEmitter
+	emitter *events.EventEmitter
 
 	// Per-turn block index counter. Resets each turn (each StreamChunks call).
 	nextBlockIdx int
@@ -680,7 +686,7 @@ type turnStreamState struct {
 	fullText strings.Builder
 
 	// Resolved canonical content blocks for this turn, in stream order.
-	// Persisted as the assistant Message.Content so thinking and tool_use
+	// Persisted as the assistant types.Message.Content so thinking and tool_use
 	// blocks survive a page refresh.
 	blocks []json.RawMessage
 }
@@ -701,7 +707,7 @@ type toolBlockState struct {
 	args     strings.Builder
 }
 
-func newTurnStreamState(emitter *EventEmitter) *turnStreamState {
+func newTurnStreamState(emitter *events.EventEmitter) *turnStreamState {
 	return &turnStreamState{
 		emitter: emitter,
 		tools:   make(map[int]*toolBlockState),
@@ -747,7 +753,7 @@ func (s *turnStreamState) onToolStart(ev *ToolStartEvent) {
 	s.closeOpen()
 	id := ev.ID
 	if id == "" {
-		id = SynthesizeToolUseID(ev.Index, ev.Name)
+		id = events.SynthesizeToolUseID(ev.Index, ev.Name)
 	}
 	tb := &toolBlockState{
 		blockIdx: s.nextBlockIdx,
@@ -781,9 +787,9 @@ func (s *turnStreamState) onToolArgs(ev *ToolArgsEvent) {
 func (s *turnStreamState) closeOpen() {
 	switch s.openKind {
 	case blockOpenText, blockOpenThinking:
-		blockType, contentKey := BlockText, "text"
+		blockType, contentKey := events.BlockText, "text"
 		if s.openKind == blockOpenThinking {
-			blockType, contentKey = BlockThinking, "thinking"
+			blockType, contentKey = events.BlockThinking, "thinking"
 		}
 		if text := s.openBlockText.String(); text != "" {
 			block, _ := json.Marshal(map[string]any{"type": blockType, contentKey: text})
@@ -797,7 +803,7 @@ func (s *turnStreamState) closeOpen() {
 				args = "{}"
 			}
 			block, _ := json.Marshal(map[string]any{
-				"type":  BlockToolUse,
+				"type":  events.BlockToolUse,
 				"id":    tb.id,
 				"name":  tb.name,
 				"input": json.RawMessage(args),

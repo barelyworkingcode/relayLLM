@@ -1,4 +1,4 @@
-package main
+package provider
 
 // Exhaustive golden tests for provider_pi.go's translate(). The translation
 // layer maps pi.dev's RPC event stream to relay's canonical Claude-shaped
@@ -12,6 +12,9 @@ package main
 
 import (
 	"encoding/json"
+	"relayllm/internal/events"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/types"
 	"slices"
 	"strings"
 	"sync"
@@ -64,11 +67,11 @@ func (c *piEventCapture) inner(i int) map[string]any {
 func newPiTranslateHarness(t *testing.T) *piTranslateHarness {
 	t.Helper()
 	cap := &piEventCapture{}
-	handler := EventHandler(func(eventType string, data json.RawMessage) {
+	handler := types.EventHandler(func(eventType string, data json.RawMessage) {
 		cap.push(eventType, data)
 	})
-	sess := &Session{ID: "pi-translate-test", Directory: "/tmp/test"}
-	p := NewPiProvider(sess, handler, "anthropic", "claude-sonnet-4", "", nil, PiOverlayInputs{})
+	sess := &types.Session{ID: "pi-translate-test", Directory: "/tmp/test"}
+	p := NewPiProvider(sess, handler, "anthropic", "claude-sonnet-4", "", nil, pioverlay.PiOverlayInputs{})
 	return &piTranslateHarness{provider: p, captured: cap}
 }
 
@@ -227,7 +230,7 @@ func TestPiTranslate_ToolCallDelta_EmitsInputJsonDelta(t *testing.T) {
 
 	rows := h.captured.snapshot()
 	combined := strings.Join(rowTypes(rows), ",")
-	// The exact delta type label comes from EventEmitter; what we care about
+	// The exact delta type label comes from events.EventEmitter; what we care about
 	// is that at least one delta carries a non-empty partial.
 	if !pickEventHas(rows, "input_json_delta") {
 		t.Errorf("no input_json_delta emitted; got %s", combined)
@@ -380,7 +383,7 @@ func rowTypes(rows []piEventRow) []string {
 // Canonical envelopes: "system" / "assistant" / "result".
 func pickEventType(rows []piEventRow, want string) bool {
 	for _, r := range rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var m map[string]any
@@ -400,7 +403,7 @@ func pickEventType(rows []piEventRow, want string) bool {
 // "content_block_stop" (has .content_block_stop).
 func pickAssistantSubtype(rows []piEventRow, want string) bool {
 	for _, r := range rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var m map[string]any
@@ -440,7 +443,7 @@ func pickAssistantSubtype(rows []piEventRow, want string) bool {
 // with the given subtype.
 func pickResultSubtype(rows []piEventRow, want string) bool {
 	for _, r := range rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var m struct {
@@ -466,7 +469,7 @@ func pickResultSubtype(rows []piEventRow, want string) bool {
 // emitted" without committing to the exact envelope shape.
 func pickEventHas(rows []piEventRow, substr string) bool {
 	for _, r := range rows {
-		if r.Type == HandlerLLMEvent && strings.Contains(string(r.Raw), substr) {
+		if r.Type == events.HandlerLLMEvent && strings.Contains(string(r.Raw), substr) {
 			return true
 		}
 	}
@@ -494,7 +497,7 @@ type assistantBlockShape struct {
 // decodeAssistant returns the shape if the row is an assistant llm_event,
 // else ok=false. Saves boilerplate at call sites.
 func decodeAssistant(row piEventRow) (s assistantBlockShape, ok bool) {
-	if row.Type != HandlerLLMEvent {
+	if row.Type != events.HandlerLLMEvent {
 		return s, false
 	}
 	if err := json.Unmarshal(row.Raw, &s); err != nil {
@@ -543,7 +546,7 @@ func findToolUseStart(rows []piEventRow) (id, name string, ok bool) {
 		if !dok || s.ContentBlock == nil || s.ContentBlockStop {
 			continue
 		}
-		if s.ContentBlock.Type == BlockToolUse {
+		if s.ContentBlock.Type == events.BlockToolUse {
 			return s.ContentBlock.ID, s.ContentBlock.Name, true
 		}
 	}
@@ -552,7 +555,7 @@ func findToolUseStart(rows []piEventRow) (id, name string, ok bool) {
 
 func findToolResult(rows []piEventRow) (id, content string, isErr, ok bool) {
 	for _, r := range rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var m struct {

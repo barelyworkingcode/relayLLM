@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bufio"
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"relayllm/internal/sshhost"
+	"relayllm/internal/types"
 )
 
 // encodeClaudeProjectDir applies Claude CLI's project-directory encoding
@@ -44,7 +45,7 @@ var runSSHCommand = func(argv []string, timeout time.Duration) ([]byte, error) {
 	return cmd.Output()
 }
 
-// readClaudeHistory reads conversation history from Claude CLI's JSONL
+// ReadClaudeHistory reads conversation history from Claude CLI's JSONL
 // session file. Claude persists complete conversations at
 // ~/.claude/projects/<encoded-dir>/<sessionID>.jsonl. When host is non-nil,
 // directory lives on that SSH host instead of the console: the file is
@@ -52,7 +53,7 @@ var runSSHCommand = func(argv []string, timeout time.Duration) ([]byte, error) {
 // EvalSymlinks'd (a host path can't be resolved from here — see
 // ../relay/docs/ssh-hosts.md's containment rule), and any failure yields
 // empty history rather than a failed join.
-func readClaudeHistory(directory string, host *HostSpec, claudeSessionID string) ([]Message, error) {
+func ReadClaudeHistory(directory string, host *types.HostSpec, claudeSessionID string) ([]types.Message, error) {
 	if claudeSessionID == "" {
 		return nil, fmt.Errorf("no claude session ID")
 	}
@@ -91,7 +92,7 @@ func readClaudeHistory(directory string, host *HostSpec, claudeSessionID string)
 // `cat` over ssh instead of a local file read. Sub-agent transcripts are not
 // fetched this way (v1 scope, ../relay/docs/ssh-hosts.md) — the sidechain
 // queue is always empty for a host session.
-func readClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string) ([]Message, error) {
+func readClaudeHistoryOverSSH(host *types.HostSpec, directory, claudeSessionID string) ([]types.Message, error) {
 	if len(host.SSHArgv) == 0 {
 		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
 	}
@@ -111,7 +112,7 @@ func readClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string)
 // `rm -f` over ssh. Best-effort: the caller (ClaudeProvider.DeleteSession via
 // SessionManager.DeleteSession) already deletes relayLLM's own local session
 // record regardless of whether this succeeds.
-func deleteClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID string) error {
+func deleteClaudeHistoryOverSSH(host *types.HostSpec, directory, claudeSessionID string) error {
 	if len(host.SSHArgv) == 0 {
 		return fmt.Errorf("host %q has no ssh_argv", host.Name)
 	}
@@ -127,7 +128,7 @@ func deleteClaudeHistoryOverSSH(host *HostSpec, directory, claudeSessionID strin
 // parseClaudeHistoryJSONL parses a Claude CLI JSONL transcript from r,
 // grouping assistant messages by message ID. sidechainQueue may be nil (a
 // host session fetches no sub-agent transcripts).
-func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue *claudeSidechainQueue) ([]Message, error) {
+func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue *claudeSidechainQueue) ([]types.Message, error) {
 	type jsonlEntry struct {
 		Type      string `json:"type"`
 		SessionID string `json:"sessionId"`
@@ -146,7 +147,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 		blocks    []json.RawMessage
 	}
 
-	var messages []Message
+	var messages []types.Message
 	assistantGroups := make(map[string]*assistantGroup)
 	var assistantOrder []string
 
@@ -189,7 +190,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 		}
 
 		content, _ := json.Marshal(expanded)
-		messages = append(messages, Message{
+		messages = append(messages, types.Message{
 			Timestamp: g.timestamp,
 			Role:      "assistant",
 			Content:   content,
@@ -232,7 +233,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 
 			// If content is a string, it's a real user message.
 			if content[0] == '"' {
-				messages = append(messages, Message{
+				messages = append(messages, types.Message{
 					Timestamp: entry.Timestamp,
 					Role:      "user",
 					Content:   content,
@@ -242,7 +243,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 
 			// If content is an array, it may carry tool_result blocks (Claude
 			// emits these after each tool_use), text blocks (real user input
-			// with rich content), or a mix. Emit one Message per tool_result
+			// with rich content), or a mix. Emit one types.Message per tool_result
 			// block so Eve can pair each back to its tool_use block by id.
 			// Text blocks are joined into a single user message as before.
 			if content[0] == '[' {
@@ -270,7 +271,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 						if len(resultContent) == 0 {
 							resultContent = json.RawMessage(`""`)
 						}
-						messages = append(messages, Message{
+						messages = append(messages, types.Message{
 							Timestamp: entry.Timestamp,
 							Role:      "tool",
 							Content:   resultContent,
@@ -281,7 +282,7 @@ func parseClaudeHistoryJSONL(r io.Reader, claudeSessionID string, sidechainQueue
 				if len(textParts) > 0 {
 					combined := strings.Join(textParts, "\n")
 					contentJSON, _ := json.Marshal(combined)
-					messages = append(messages, Message{
+					messages = append(messages, types.Message{
 						Timestamp: entry.Timestamp,
 						Role:      "user",
 						Content:   contentJSON,

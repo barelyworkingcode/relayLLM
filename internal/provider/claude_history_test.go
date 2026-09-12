@@ -1,9 +1,10 @@
-package main
+package provider
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func writeJSONL(t *testing.T, path string, lines []map[string]any) {
 }
 
 // withFakeClaudeHome redirects $HOME for the duration of the test so
-// readClaudeHistory looks at our fixture rather than the user's real
+// ReadClaudeHistory looks at our fixture rather than the user's real
 // ~/.claude/projects directory. Returns the path to the project dir
 // under the fake home.
 func withFakeClaudeHome(t *testing.T) string {
@@ -40,7 +41,7 @@ func withFakeClaudeHome(t *testing.T) string {
 	return tmp
 }
 
-// projectDirFor mirrors readClaudeHistory's path encoding: EvalSymlinks the
+// projectDirFor mirrors ReadClaudeHistory's path encoding: EvalSymlinks the
 // directory (so /var/... becomes /private/var/... on macOS) and then replace
 // "/" with "-".
 func projectDirFor(t *testing.T, home, dir string) string {
@@ -55,7 +56,7 @@ func projectDirFor(t *testing.T, home, dir string) string {
 
 func TestReadClaudeHistory_PreservesThinkingBlocks(t *testing.T) {
 	home := withFakeClaudeHome(t)
-	dir := t.TempDir() // any real existing path; readClaudeHistory calls EvalSymlinks
+	dir := t.TempDir() // any real existing path; ReadClaudeHistory calls EvalSymlinks
 	projectDir := projectDirFor(t, home, dir)
 	sessionID := "test-session-001"
 
@@ -76,9 +77,9 @@ func TestReadClaudeHistory_PreservesThinkingBlocks(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, nil, sessionID)
+	msgs, err := ReadClaudeHistory(dir, nil, sessionID)
 	if err != nil {
-		t.Fatalf("readClaudeHistory: %v", err)
+		t.Fatalf("ReadClaudeHistory: %v", err)
 	}
 
 	if len(msgs) != 2 {
@@ -131,9 +132,9 @@ func TestReadClaudeHistory_SurfacesToolResultsAsRoleTool(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, nil, sessionID)
+	msgs, err := ReadClaudeHistory(dir, nil, sessionID)
 	if err != nil {
-		t.Fatalf("readClaudeHistory: %v", err)
+		t.Fatalf("ReadClaudeHistory: %v", err)
 	}
 
 	// Expect: user, assistant, tool. Three messages.
@@ -197,9 +198,9 @@ func TestReadClaudeHistory_EmbedsSidechainTranscriptOnAgentToolUse(t *testing.T)
 	now := time.Now()
 	_ = os.Chtimes(subPath, now, now)
 
-	msgs, err := readClaudeHistory(dir, nil, sessionID)
+	msgs, err := ReadClaudeHistory(dir, nil, sessionID)
 	if err != nil {
-		t.Fatalf("readClaudeHistory: %v", err)
+		t.Fatalf("ReadClaudeHistory: %v", err)
 	}
 
 	// Expect: user, assistant (with Agent tool_use AND agent_transcript), tool_result.
@@ -249,9 +250,9 @@ func TestReadClaudeHistory_NoSidechainsLeavesAssistantUntouched(t *testing.T) {
 		}},
 	})
 
-	msgs, err := readClaudeHistory(dir, nil, sessionID)
+	msgs, err := ReadClaudeHistory(dir, nil, sessionID)
 	if err != nil {
-		t.Fatalf("readClaudeHistory: %v", err)
+		t.Fatalf("ReadClaudeHistory: %v", err)
 	}
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %d, want 1", len(msgs))
@@ -266,7 +267,7 @@ func TestReadClaudeHistory_NoSidechainsLeavesAssistantUntouched(t *testing.T) {
 }
 
 // summarize gives a compact string describing a message slice for failure logs.
-func summarize(msgs []Message) string {
+func summarize(msgs []types.Message) string {
 	parts := make([]string, len(msgs))
 	for i, m := range msgs {
 		parts[i] = m.Role

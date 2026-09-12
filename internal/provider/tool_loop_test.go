@@ -1,4 +1,4 @@
-package main
+package provider
 
 // Tool loop coverage. Drives BaseChatProvider.runToolLoop against a
 // scripted FakeChatTransport + testutil.FakeMCPClient, with no real subprocess or
@@ -11,7 +11,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"relayllm/internal/events"
 	"relayllm/internal/testutil"
+	"relayllm/internal/tools"
+	"relayllm/internal/types"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +73,7 @@ func (f *FakeChatTransport) QueueToolCallTurn(id, name string, args string) {
 
 func (f *FakeChatTransport) Name() string                   { return "fake" }
 func (f *FakeChatTransport) Ping(ctx context.Context) error { return nil }
-func (f *FakeChatTransport) BuildMessages(_ string, msgs []Message) []map[string]any {
+func (f *FakeChatTransport) BuildMessages(_ string, msgs []types.Message) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, map[string]any{"role": m.Role, "content": string(m.Content)})
@@ -152,7 +155,7 @@ func (c *toolLoopEvents) hasToolResult(toolUseID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, r := range c.rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var ev struct {
@@ -173,15 +176,15 @@ func (c *toolLoopEvents) hasToolResult(toolUseID string) bool {
 func newToolLoopHarness(t *testing.T, mcpTools ...testutil.FakeTool) *toolLoopHarness {
 	t.Helper()
 	events := &toolLoopEvents{}
-	handler := EventHandler(func(eventType string, data json.RawMessage) {
+	handler := types.EventHandler(func(eventType string, data json.RawMessage) {
 		events.push(eventType, data)
 	})
 	transport := NewFakeChatTransport()
 	mcp := testutil.NewFakeMCPClient(mcpTools...)
 
-	session := &Session{
+	session := &types.Session{
 		ID:       "tool-loop-test",
-		Messages: []Message{},
+		Messages: []types.Message{},
 	}
 
 	provider := &BaseChatProvider{
@@ -207,7 +210,7 @@ func (h *toolLoopHarness) runOneMessage(t *testing.T, text string) {
 	}
 	testutil.WaitFor(t, 2*time.Second, func() bool {
 		for _, ty := range h.events.types() {
-			if ty == HandlerMessageComplete {
+			if ty == events.HandlerMessageComplete {
 				return true
 			}
 		}
@@ -277,9 +280,9 @@ func TestToolLoop_BuiltinTool_DispatchedBeforeMCP(t *testing.T) {
 	// by registering both for the same name and verifying the built-in
 	// handler is the one invoked.
 	builtinCalled := atomic.Int32{}
-	registry := NewBuiltinToolRegistry()
-	registry.Register(BuiltinToolDef{Name: "generate_image", Description: "test"},
-		func(_ context.Context, _ json.RawMessage, _ []FileAttachment, _ string, _ *EventEmitter) (string, error) {
+	registry := tools.NewBuiltinToolRegistry()
+	registry.Register(tools.BuiltinToolDef{Name: "generate_image", Description: "test"},
+		func(_ context.Context, _ json.RawMessage, _ []types.FileAttachment, _ string, _ *events.EventEmitter) (string, error) {
 			builtinCalled.Add(1)
 			return "fake-image-url", nil
 		})
@@ -355,7 +358,7 @@ func TestToolLoop_MCPErrorPropagatesAsErrorResult(t *testing.T) {
 	found := false
 	h.events.mu.Lock()
 	for _, r := range h.events.rows {
-		if r.Type != HandlerLLMEvent {
+		if r.Type != events.HandlerLLMEvent {
 			continue
 		}
 		var ev struct {

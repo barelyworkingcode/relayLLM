@@ -1,4 +1,4 @@
-package main
+package provider
 
 // SettingField describes a single configurable parameter for a provider.
 type SettingField struct {

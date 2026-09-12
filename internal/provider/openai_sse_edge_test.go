@@ -1,4 +1,4 @@
-package main
+package provider
 
 // Additional SSE parsing coverage for OpenAIChatTransport.StreamChunks.
 // Builds on the existing TestOpenAISSEParsing_* tests; focuses on the

@@ -184,7 +184,7 @@ func RegisterModelRoutes(mux *http.ServeMux, ollamaURL string, registry *ProxyRe
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ollama = fetchOllamaModels(ollamaURL)
+				ollama = FetchOllamaModels(ollamaURL)
 			}()
 		}
 

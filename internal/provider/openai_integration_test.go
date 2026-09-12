@@ -1,11 +1,12 @@
 //go:build live
 
-package main
+package provider
 
 import (
 	"encoding/json"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/types"
 	"strings"
 	"sync"
 	"testing"
@@ -40,7 +41,7 @@ const (
 type capturingHandler struct {
 	mu          sync.Mutex
 	text        strings.Builder
-	stats       SessionStats
+	stats       types.SessionStats
 	gotComplete chan struct{}
 	gotError    string
 }
@@ -132,16 +133,16 @@ func runChatRoundtrip(t *testing.T, endpoint config.OpenAIEndpoint, modelFilter 
 
 	// Build a minimal session + provider by hand — no SessionManager or
 	// HTTP server needed. This keeps the test focused on the provider stack.
-	session := &Session{
+	session := &types.Session{
 		ID:           "test-" + endpoint.Name,
 		Model:        modelID,
 		ProviderType: "openai",
-		Messages:     []Message{},
+		Messages:     []types.Message{},
 	}
 	// Seed the user message into session history the same way the session
 	// layer does before calling SendMessage.
 	userContent, _ := json.Marshal("Say hi in exactly three words.")
-	session.Messages = append(session.Messages, Message{
+	session.Messages = append(session.Messages, types.Message{
 		Timestamp: timeNow(),
 		Role:      "user",
 		Content:   userContent,
