@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"relayllm/internal/spawn"
 )
 
 // MCPServerConfig mirrors the JSON config format for a single MCP server.
@@ -117,7 +119,7 @@ func (m *MCPManager) Start(ctx context.Context) error {
 		// Inherit environment (minus relay's own credentials), then overlay
 		// config-specific vars. childBaseEnv strips the service/frontend tokens
 		// so the relay mcp child gets only the project token we set in cfg.Env.
-		cmd.Env = childBaseEnv()
+		cmd.Env = spawn.ChildBaseEnv()
 		for k, v := range cfg.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}

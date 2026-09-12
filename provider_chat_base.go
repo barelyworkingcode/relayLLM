@@ -395,9 +395,7 @@ func (p *BaseChatProvider) runToolLoop(ctx context.Context, cancel context.Cance
 	if !stale() {
 		var toolNames []string
 		if p.builtinTools != nil {
-			for _, def := range p.builtinTools.tools {
-				toolNames = append(toolNames, def.Name)
-			}
+			toolNames = append(toolNames, p.builtinTools.ToolNames()...)
 		}
 		var mcpNames []string
 		if p.mcpManager != nil && p.mcpManager.HasTools() {

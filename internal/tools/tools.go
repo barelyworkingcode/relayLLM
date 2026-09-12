@@ -1,9 +1,12 @@
-package main
+package tools
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"relayllm/internal/events"
+	"relayllm/internal/types"
 )
 
 // BuiltinToolHandler executes a built-in tool. files contains the user's
@@ -17,8 +20,8 @@ import (
 // mechanism for any future in-process tool that needs a progress emitter MCP
 // tools can't provide.
 type BuiltinToolHandler func(ctx context.Context, args json.RawMessage,
-	files []FileAttachment,
-	toolUseID string, emitter *EventEmitter) (string, error)
+	files []types.FileAttachment,
+	toolUseID string, emitter *events.EventEmitter) (string, error)
 
 // BuiltinToolDef is the static definition of a built-in tool, used both for
 // ChatToolDefs() export and for the handler registry.
@@ -52,6 +55,15 @@ func (r *BuiltinToolRegistry) Register(def BuiltinToolDef, handler BuiltinToolHa
 	r.handlers[def.Name] = handler
 }
 
+// ToolNames returns the registered tool names in registration order.
+func (r *BuiltinToolRegistry) ToolNames() []string {
+	names := make([]string, len(r.tools))
+	for i, t := range r.tools {
+		names[i] = t.Name
+	}
+	return names
+}
+
 // Has returns true if the named tool is built-in.
 func (r *BuiltinToolRegistry) Has(name string) bool {
 	_, ok := r.handlers[name]
@@ -61,7 +73,7 @@ func (r *BuiltinToolRegistry) Has(name string) bool {
 // Call executes a built-in tool by name. files are the user's message
 // attachments from the current conversation turn.
 func (r *BuiltinToolRegistry) Call(ctx context.Context, name string, args json.RawMessage,
-	files []FileAttachment, toolUseID string, emitter *EventEmitter) (string, error) {
+	files []types.FileAttachment, toolUseID string, emitter *events.EventEmitter) (string, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
 		return "", fmt.Errorf("unknown built-in tool: %s", name)
