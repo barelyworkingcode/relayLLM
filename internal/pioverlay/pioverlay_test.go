@@ -1,4 +1,4 @@
-package main
+package pioverlay
 
 import (
 	"encoding/json"
@@ -35,7 +35,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 	cfg := &config.PiConfig{
 		ProjectOverlay: config.PiProjectOverlay{
 			Mode:            config.AutoRegenAlways,
-			DefaultProvider: piRelayRouterProvider,
+			DefaultProvider: RelayRouterProvider,
 			DefaultModel:    "qwen3-8b",
 			DefaultThinking: "medium",
 		},
@@ -70,7 +70,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 		} `json:"providers"`
 	}
 	mustReadJSON(t, filepath.Join(overlayDir, "models.json"), &models)
-	for _, want := range []string{piRelayRouterProvider, "user-ollama"} {
+	for _, want := range []string{RelayRouterProvider, "user-ollama"} {
 		if _, ok := models.Providers[want]; !ok {
 			t.Errorf("models.json missing provider %q", want)
 		}
@@ -78,7 +78,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 	if _, ok := models.Providers["lmstudio"]; ok {
 		t.Errorf("per-endpoint provider leaked into overlay; expected consolidation under relay-router")
 	}
-	router := models.Providers[piRelayRouterProvider]
+	router := models.Providers[RelayRouterProvider]
 	if router.BaseURL != "http://localhost:8091/v1" {
 		t.Errorf("relay-router baseUrl=%q", router.BaseURL)
 	}
@@ -94,7 +94,7 @@ func TestPiOverlayMaterialize(t *testing.T) {
 
 	var settings map[string]any
 	mustReadJSON(t, filepath.Join(overlayDir, "settings.json"), &settings)
-	if settings["defaultProvider"] != piRelayRouterProvider {
+	if settings["defaultProvider"] != RelayRouterProvider {
 		t.Errorf("defaultProvider=%v", settings["defaultProvider"])
 	}
 	if settings["defaultModel"] != "qwen3-8b" {
@@ -208,7 +208,7 @@ func TestPiOverlay_ModelsCarryInputModalities(t *testing.T) {
 	mustReadJSON(t, filepath.Join(overlayDir, "models.json"), &models)
 
 	got := map[string][]string{}
-	for _, m := range models.Providers[piRelayRouterProvider].Models {
+	for _, m := range models.Providers[RelayRouterProvider].Models {
 		got[m.ID] = m.Input
 	}
 	if want := []string{"text", "image"}; !reflect.DeepEqual(got["vision-model"], want) {
@@ -247,8 +247,8 @@ func TestRouterOverlayHost(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := routerOverlayHost(tc.binds); got != tc.want {
-				t.Errorf("routerOverlayHost(%v) = %q, want %q", tc.binds, got, tc.want)
+			if got := RouterOverlayHost(tc.binds); got != tc.want {
+				t.Errorf("RouterOverlayHost(%v) = %q, want %q", tc.binds, got, tc.want)
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-package main
+package registry
 
 import (
 	"relayllm/internal/config"
@@ -147,6 +147,20 @@ func (r *ProxyRegistry) LookupModel(ctx context.Context, modelID string) (config
 		return config.OpenAIEndpoint{}, "", false
 	}
 	return *ep, upstreamID, true
+}
+
+// SetStatusForTest seeds a status entry directly, bypassing a real network
+// probe. Test-only seam for callers that need specific online/offline states
+// without waiting out the registry's real TTL.
+func (r *ProxyRegistry) SetStatusForTest(ep config.OpenAIEndpoint, online bool, models ...UpstreamModel) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.status[ep.Name] = &EndpointStatus{
+		Endpoint:    ep,
+		Online:      online,
+		Models:      models,
+		LastChecked: time.Now(),
+	}
 }
 
 func (r *ProxyRegistry) isFresh(name string) bool {

@@ -1,4 +1,4 @@
-package main
+package registry
 
 // Coverage for ProxyRegistry.LookupModel's on-demand probing (the
 // registry-lookup-cold-start fix). Before this fix, LookupModel only ever

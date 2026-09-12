@@ -1,4 +1,4 @@
-package main
+package pioverlay
 
 import (
 	"encoding/json"
@@ -11,6 +11,7 @@ import (
 
 	"relayllm/internal/config"
 	"relayllm/internal/netutil"
+	"relayllm/internal/spawn"
 )
 
 // PiOverlayInputs bundles everything MaterializePiOverlay needs to translate
@@ -24,11 +25,11 @@ import (
 type PiOverlayInputs struct {
 	ServerModels []config.ServerModelConfig // consumed by provider_pi_models.go to synthesize Eve picker entries
 	RouterPort   string                     // empty disables the relay-router provider entry
-	RouterHosts  []string                   // --router-bind value(s), comma-split; see routerOverlayHost
+	RouterHosts  []string                   // --router-bind value(s), comma-split; see RouterOverlayHost
 	RouterModels []PiRouterModel
 }
 
-// routerOverlayHost returns the host pi (a subprocess on this same machine)
+// RouterOverlayHost returns the host pi (a subprocess on this same machine)
 // should dial to reach the relay-router, given every bind address the
 // router is actually listening on. Scans in bind order:
 //
@@ -43,7 +44,7 @@ type PiOverlayInputs struct {
 //   - no wildcard or loopback bind found (every entry is a specific
 //     non-loopback address, or the list is empty) → the first bind
 //     verbatim, or "localhost" if there is no first bind at all.
-func routerOverlayHost(binds []string) string {
+func RouterOverlayHost(binds []string) string {
 	for _, b := range binds {
 		switch b {
 		case "", "0.0.0.0", "::", "[::]":
@@ -73,22 +74,22 @@ type PiRouterModel struct {
 // can hold API keys when IncludeUserProviders=true copies them over.
 const piOverlayFileMode = 0o600
 
-// piRelayRouterProvider is the canonical name relayLLM registers for its
+// RelayRouterProvider is the canonical name relayLLM registers for its
 // router in the overlay's models.json. Exposed as a constant so
 // settings.DefaultProvider can be set to this without typos.
-const piRelayRouterProvider = "relay-router"
+const RelayRouterProvider = "relay-router"
 
-// applyPiOverlayEnv materializes the overlay and, when one is written, sets
+// ApplyPiOverlayEnv materializes the overlay and, when one is written, sets
 // PI_CODING_AGENT_DIR in env. Returned env replaces the caller's. Single
 // hook used by both LLM RPC spawns (provider_pi.go) and PTY spawns
 // (terminal_session.go) so the two surfaces stay in sync.
-func applyPiOverlayEnv(env []string, projectDir string, cfg *config.PiConfig, inputs PiOverlayInputs) ([]string, error) {
+func ApplyPiOverlayEnv(env []string, projectDir string, cfg *config.PiConfig, inputs PiOverlayInputs) ([]string, error) {
 	overlayDir, err := MaterializePiOverlay(projectDir, cfg, inputs)
 	if err != nil {
 		return env, err
 	}
 	if overlayDir != "" {
-		env = setEnv(env, "PI_CODING_AGENT_DIR", overlayDir)
+		env = spawn.SetEnv(env, "PI_CODING_AGENT_DIR", overlayDir)
 	}
 	return env, nil
 }
@@ -222,12 +223,12 @@ func buildPiModelsJSON(inputs PiOverlayInputs, overlay config.PiProjectOverlay, 
 			}
 			models = append(models, map[string]any{"id": rm.ID, "input": input})
 		}
-		providers[piRelayRouterProvider] = map[string]any{
+		providers[RelayRouterProvider] = map[string]any{
 			// net.JoinHostPort rather than a bare fmt.Sprintf("%s:%s", ...):
-			// an IPv6 host (routerOverlayHost can return one, e.g. a
+			// an IPv6 host (RouterOverlayHost can return one, e.g. a
 			// --router-bind of "::1") needs bracketing or the result is an
 			// unparseable "http://::1:8180/v1".
-			"baseUrl": fmt.Sprintf("http://%s/v1", net.JoinHostPort(routerOverlayHost(inputs.RouterHosts), inputs.RouterPort)),
+			"baseUrl": fmt.Sprintf("http://%s/v1", net.JoinHostPort(RouterOverlayHost(inputs.RouterHosts), inputs.RouterPort)),
 			"api":     "openai-completions",
 			"apiKey":  "none",
 			"models":  models,

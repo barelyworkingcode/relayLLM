@@ -860,14 +860,7 @@ func newCountingChatUpstream(t *testing.T, calls *atomic.Int64, modelID string) 
 // the time a request's response has been read, nothing else can be touching
 // this map.
 func seedEndpointStatus(registry *ProxyRegistry, ep config.OpenAIEndpoint, online bool, models ...UpstreamModel) {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	registry.status[ep.Name] = &EndpointStatus{
-		Endpoint:    ep,
-		Online:      online,
-		Models:      models,
-		LastChecked: time.Now(),
-	}
+	registry.SetStatusForTest(ep, online, models...)
 }
 
 // Requirement 1: pin survives a reachability flip. "primary" starts offline
