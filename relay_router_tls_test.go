@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +41,8 @@ import (
 // the request all the way to the real upstream dial — isolating the
 // assertion to the proxy path's transport, not the catalog probe.
 func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := ca.issueLeaf(t, 10)
+	ca := testutil.NewTestCA(t)
+	leaf := ca.IssueLeaf(t, 10)
 
 	var seenAuth string
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +59,7 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 			w.WriteHeader(404)
 		}
 	}))
-	upstream.TLS = &tls.Config{Certificates: []tls.Certificate{leaf.tlsCert}}
+	upstream.TLS = &tls.Config{Certificates: []tls.Certificate{leaf.TLSCert}}
 	upstream.StartTLS()
 	defer upstream.Close()
 
@@ -68,8 +69,8 @@ func TestRouter_Proxy_EndpointModel_PinnedTLSUpstream(t *testing.T) {
 				Name:      "fakeep",
 				BaseURL:   upstream.URL + "/v1",
 				APIKey:    "upstream-key",
-				CAFile:    ca.writeCAFile(t),
-				PinSHA256: []string{fingerprintSHA256(leaf.cert)},
+				CAFile:    ca.WriteCAFile(t),
+				PinSHA256: []string{testutil.FingerprintSHA256(leaf.Cert)},
 			},
 		},
 	}
@@ -145,9 +146,9 @@ func waitForTLSHandshake(t *testing.T, addr string, trust *x509.CertPool) {
 // goroutines start — see StartRelayRouter's doc comment) makes the listener
 // speak TLS, and a plain http request to that same port no longer works.
 func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := ca.issueLeaf(t, 30)
-	certPath, keyPath := leaf.writeFiles(t)
+	ca := testutil.NewTestCA(t)
+	leaf := ca.IssueLeaf(t, 30)
+	certPath, keyPath := leaf.WriteFiles(t)
 
 	addr := freeTCPAddr(t)
 	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
@@ -163,7 +164,7 @@ func TestRelayRouter_TLSListener_ServesHTTPSAndRejectsPlainHTTP(t *testing.T) {
 	defer router.Close()
 
 	pool := x509.NewCertPool()
-	pool.AddCert(ca.cert)
+	pool.AddCert(ca.Cert)
 	waitForTLSHandshake(t, addr, pool)
 
 	client := &http.Client{Transport: &http.Transport{

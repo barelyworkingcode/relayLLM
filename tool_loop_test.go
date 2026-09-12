@@ -1,7 +1,7 @@
 package main
 
 // Tool loop coverage. Drives BaseChatProvider.runToolLoop against a
-// scripted FakeChatTransport + FakeMCPClient, with no real subprocess or
+// scripted FakeChatTransport + testutil.FakeMCPClient, with no real subprocess or
 // network. Each test queues one or more "turns" of streamed deltas; the
 // fake transport replays them when StreamChunks is called.
 
@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"relayllm/internal/testutil"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,7 +116,7 @@ func (f *FakeChatTransport) CallCount() int { return int(f.called.Load()) }
 type toolLoopHarness struct {
 	provider  *BaseChatProvider
 	transport *FakeChatTransport
-	mcp       *FakeMCPClient
+	mcp       *testutil.FakeMCPClient
 	events    *toolLoopEvents
 }
 
@@ -169,14 +170,14 @@ func (c *toolLoopEvents) hasToolResult(toolUseID string) bool {
 	return false
 }
 
-func newToolLoopHarness(t *testing.T, mcpTools ...FakeTool) *toolLoopHarness {
+func newToolLoopHarness(t *testing.T, mcpTools ...testutil.FakeTool) *toolLoopHarness {
 	t.Helper()
 	events := &toolLoopEvents{}
 	handler := EventHandler(func(eventType string, data json.RawMessage) {
 		events.push(eventType, data)
 	})
 	transport := NewFakeChatTransport()
-	mcp := NewFakeMCPClient(mcpTools...)
+	mcp := testutil.NewFakeMCPClient(mcpTools...)
 
 	session := &Session{
 		ID:       "tool-loop-test",
@@ -204,7 +205,7 @@ func (h *toolLoopHarness) runOneMessage(t *testing.T, text string) {
 	if err := h.provider.SendMessage(text, nil); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	waitFor(t, 2*time.Second, func() bool {
+	testutil.WaitFor(t, 2*time.Second, func() bool {
 		for _, ty := range h.events.types() {
 			if ty == HandlerMessageComplete {
 				return true
@@ -235,7 +236,7 @@ func TestToolLoop_NoTools_OneTurnTextOnly(t *testing.T) {
 
 func TestToolLoop_ToolUse_DispatchesToMCP_AndContinues(t *testing.T) {
 	addCalled := atomic.Int32{}
-	tool := FakeTool{
+	tool := testutil.FakeTool{
 		Name:        "add",
 		Description: "Add two numbers",
 		Handler: func(args json.RawMessage) (string, error) {
@@ -284,7 +285,7 @@ func TestToolLoop_BuiltinTool_DispatchedBeforeMCP(t *testing.T) {
 		})
 
 	mcpCalled := atomic.Int32{}
-	mcpTool := FakeTool{
+	mcpTool := testutil.FakeTool{
 		Name: "generate_image", // intentional collision
 		Handler: func(_ json.RawMessage) (string, error) {
 			mcpCalled.Add(1)
@@ -314,7 +315,7 @@ func TestToolLoop_IterationCap_StopsAfter10Tools(t *testing.T) {
 	// another tool call.
 	const maxIters = 10
 	callCount := atomic.Int32{}
-	tool := FakeTool{
+	tool := testutil.FakeTool{
 		Name: "loop_forever",
 		Handler: func(_ json.RawMessage) (string, error) {
 			callCount.Add(1)
@@ -336,7 +337,7 @@ func TestToolLoop_IterationCap_StopsAfter10Tools(t *testing.T) {
 }
 
 func TestToolLoop_MCPErrorPropagatesAsErrorResult(t *testing.T) {
-	tool := FakeTool{
+	tool := testutil.FakeTool{
 		Name: "broken",
 		Handler: func(_ json.RawMessage) (string, error) {
 			return "", errors.New("boom")

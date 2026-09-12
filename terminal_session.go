@@ -476,18 +476,6 @@ func (b *scrollBuffer) Bytes() []byte {
 	return out
 }
 
-// setEnv sets or replaces an environment variable in a slice.
-func setEnv(env []string, key, value string) []string {
-	prefix := key + "="
-	for i, e := range env {
-		if len(e) >= len(prefix) && e[:len(prefix)] == prefix {
-			env[i] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
-}
-
 // isPiCommand reports whether command's basename is "pi". Used to gate the
 // project-overlay only on templates that actually launch the pi CLI, leaving
 // shell / claude / opencode templates untouched.

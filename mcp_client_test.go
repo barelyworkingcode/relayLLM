@@ -10,7 +10,7 @@ import (
 )
 
 // Hermetic coverage for the real MCPManager (previously 0% — only the
-// FakeMCPClient was exercised). The subprocess Start() path stays in the
+// testutil.FakeMCPClient was exercised). The subprocess Start() path stays in the
 // //go:build live tier (mcp_integration_test.go); here we drive the actual
 // CallTool / progress-routing / tool-def-shaping logic against an in-process
 // MCP server over the SDK's in-memory transport, so a regression in tool

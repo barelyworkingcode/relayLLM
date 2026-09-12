@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"bufio"
@@ -27,42 +27,42 @@ const (
 	// own injection in service_registry.go. Constants live here (the bridge
 	// client) so both consumers (PTY env resolution, manifest registration)
 	// reference them through the same channel.
-	envBridgeSocket = "RELAY_BRIDGE_SOCKET"
-	envServiceID    = "RELAY_SERVICE_ID"
+	EnvBridgeSocket = "RELAY_BRIDGE_SOCKET"
+	EnvServiceID    = "RELAY_SERVICE_ID"
 
-	// envFrontendToken is relay's front-door bearer. relay injects it into every
+	// EnvFrontendToken is relay's front-door bearer. relay injects it into every
 	// spawned service, but relayLLM never uses it (it's a backend, not a frontend
 	// consumer) — it must be stripped from child env so it never leaks into a
 	// shell. Mirrors relay/bridge.EnvFrontendToken.
-	envFrontendToken = "RELAY_FRONTEND_TOKEN"
+	EnvFrontendToken = "RELAY_FRONTEND_TOKEN"
 
-	// envServiceToken is the full-access service token used to authenticate
+	// EnvServiceToken is the full-access service token used to authenticate
 	// bridge calls (ResolvePtyEnv, RegisterManifest). Mirrors
 	// relay/bridge.EnvServiceToken. It is NOT a project token and must never
-	// be injected into a spawned child shell. envServiceTokenLegacy is the
+	// be injected into a spawned child shell. EnvServiceTokenLegacy is the
 	// pre-rename name, accepted as a transition fallback; drop once relay
 	// stops setting it.
-	envServiceToken       = "RELAY_SERVICE_TOKEN"
-	envServiceTokenLegacy = "RELAY_MCP_TOKEN"
+	EnvServiceToken       = "RELAY_SERVICE_TOKEN"
+	EnvServiceTokenLegacy = "RELAY_MCP_TOKEN"
 
-	// envProjectToken is the project-scoped token relayLLM injects into spawned
+	// EnvProjectToken is the project-scoped token relayLLM injects into spawned
 	// children (an LLM CLI, the `relay mcp` subprocess, a project-scoped
-	// terminal). Mirrors relay/bridge.EnvProjectToken. envProjectTokenLegacy is
+	// terminal). Mirrors relay/bridge.EnvProjectToken. EnvProjectTokenLegacy is
 	// the pre-rename name; we dual-write it into children during the transition
 	// so existing user skills/scripts that reference RELAY_TOKEN keep working,
 	// and strip it from the inherited base env so a stale one can't leak.
-	envProjectToken       = "RELAY_PROJECT_TOKEN"
-	envProjectTokenLegacy = "RELAY_TOKEN"
+	EnvProjectToken       = "RELAY_PROJECT_TOKEN"
+	EnvProjectTokenLegacy = "RELAY_TOKEN"
 
 	// Bridge request/response type values. Must stay in sync with
 	// relay/bridge/types.go.
-	reqResolvePtyEnv          = "ResolvePtyEnv"
-	reqResolveProjectTemplate = "ResolveProjectTemplate"
-	reqRegisterManifest       = "RegisterManifest"
-	respError                 = "Error"
-	respPtyEnv                = "PtyEnv"
-	respProjectTemplate       = "ProjectTemplate"
-	respOK                    = "OK"
+	ReqResolvePtyEnv          = "ResolvePtyEnv"
+	ReqResolveProjectTemplate = "ResolveProjectTemplate"
+	ReqRegisterManifest       = "RegisterManifest"
+	RespError                 = "Error"
+	RespPtyEnv                = "PtyEnv"
+	RespProjectTemplate       = "ProjectTemplate"
+	RespOK                    = "OK"
 )
 
 // RelayPtyEnvRequest mirrors relay/bridge.PtyEnvRequest. Kept inline to
@@ -103,15 +103,15 @@ type RelayProjectTemplateResponse struct {
 	Icon        string            `json:"icon,omitempty"`
 }
 
-// relayBridgeRequest is the on-wire request envelope.
-type relayBridgeRequest struct {
+// BridgeRequest is the on-wire request envelope.
+type BridgeRequest struct {
 	Type      string          `json:"type"`
 	Token     string          `json:"token,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// relayBridgeResponse is the on-wire response envelope.
-type relayBridgeResponse struct {
+// BridgeResponse is the on-wire response envelope.
+type BridgeResponse struct {
 	Type    string          `json:"type"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Code    int             `json:"code,omitempty"`
@@ -123,7 +123,7 @@ type relayBridgeResponse struct {
 // falls back to the conventional location so direct invocations (tests,
 // debug runs) still work without env setup.
 func relayBridgeSocketPath() string {
-	if p := os.Getenv(envBridgeSocket); p != "" {
+	if p := os.Getenv(EnvBridgeSocket); p != "" {
 		return p
 	}
 	configDir, err := os.UserConfigDir()
@@ -133,18 +133,18 @@ func relayBridgeSocketPath() string {
 	return filepath.Join(configDir, "relay", relayBridgeSocketName)
 }
 
-// serviceToken returns the full-access service token relay injected at spawn,
+// ServiceToken returns the full-access service token relay injected at spawn,
 // preferring the current env name and falling back to the legacy name during
 // the cross-repo rename window. Empty when this process was not spawned by
 // relay (standalone/dev runs).
-func serviceToken() string {
-	if t := os.Getenv(envServiceToken); t != "" {
+func ServiceToken() string {
+	if t := os.Getenv(EnvServiceToken); t != "" {
 		return t
 	}
-	return os.Getenv(envServiceTokenLegacy)
+	return os.Getenv(EnvServiceTokenLegacy)
 }
 
-// sendBridgeRequest dials relay's bridge socket, writes one request, reads
+// SendBridgeRequest dials relay's bridge socket, writes one request, reads
 // one response, returns the parsed envelope. Authentication is read from
 // the RELAY_SERVICE_TOKEN env (the service token relay issued at spawn),
 // falling back to the legacy name during the cross-repo rename window.
@@ -152,65 +152,65 @@ func serviceToken() string {
 // Shared by every bridge-consuming call site (PTY env resolution, manifest
 // registration) so the dial / write / scan / parse machinery lives in
 // exactly one place.
-func sendBridgeRequest(reqType string, args json.RawMessage) (relayBridgeResponse, error) {
-	token := serviceToken()
+func SendBridgeRequest(reqType string, args json.RawMessage) (BridgeResponse, error) {
+	token := ServiceToken()
 	if token == "" {
-		return relayBridgeResponse{}, fmt.Errorf("%s not set in environment (relay-managed callers require a service token)", envServiceToken)
+		return BridgeResponse{}, fmt.Errorf("%s not set in environment (relay-managed callers require a service token)", EnvServiceToken)
 	}
 
-	payload, err := json.Marshal(relayBridgeRequest{
+	payload, err := json.Marshal(BridgeRequest{
 		Type:      reqType,
 		Token:     token,
 		Arguments: args,
 	})
 	if err != nil {
-		return relayBridgeResponse{}, fmt.Errorf("marshal envelope: %w", err)
+		return BridgeResponse{}, fmt.Errorf("marshal envelope: %w", err)
 	}
 
 	sockPath := relayBridgeSocketPath()
 	conn, err := net.DialTimeout("unix", sockPath, relayBridgeTimeout)
 	if err != nil {
-		return relayBridgeResponse{}, fmt.Errorf("dial relay bridge at %s: %w (is Relay tray app running?)", sockPath, err)
+		return BridgeResponse{}, fmt.Errorf("dial relay bridge at %s: %w (is Relay tray app running?)", sockPath, err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(relayBridgeTimeout))
 
 	if _, err := conn.Write(append(payload, '\n')); err != nil {
-		return relayBridgeResponse{}, fmt.Errorf("write to relay bridge: %w", err)
+		return BridgeResponse{}, fmt.Errorf("write to relay bridge: %w", err)
 	}
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return relayBridgeResponse{}, fmt.Errorf("read from relay bridge: %w", err)
+			return BridgeResponse{}, fmt.Errorf("read from relay bridge: %w", err)
 		}
-		return relayBridgeResponse{}, fmt.Errorf("relay bridge closed connection without responding")
+		return BridgeResponse{}, fmt.Errorf("relay bridge closed connection without responding")
 	}
 
-	var resp relayBridgeResponse
+	var resp BridgeResponse
 	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-		return relayBridgeResponse{}, fmt.Errorf("parse relay response: %w", err)
+		return BridgeResponse{}, fmt.Errorf("parse relay response: %w", err)
 	}
-	if resp.Type == respError {
+	if resp.Type == RespError {
 		return resp, fmt.Errorf("relay bridge error (code %d): %s", resp.Code, resp.Message)
 	}
 	return resp, nil
 }
 
-// resolveRelayPtyEnv calls relay's bridge ResolvePtyEnv. Returns an error
+// ResolvePtyEnv calls relay's bridge ResolvePtyEnv. Returns an error
 // if relay is not running, the project cannot be resolved, or the auth
 // token is missing.
-func resolveRelayPtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
+func ResolvePtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 	args, err := json.Marshal(req)
 	if err != nil {
 		return RelayPtyEnvResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
-	resp, err := sendBridgeRequest(reqResolvePtyEnv, args)
+	resp, err := SendBridgeRequest(ReqResolvePtyEnv, args)
 	if err != nil {
 		return RelayPtyEnvResponse{}, err
 	}
-	if resp.Type != respPtyEnv {
+	if resp.Type != RespPtyEnv {
 		return RelayPtyEnvResponse{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
 	}
 	var out RelayPtyEnvResponse
@@ -220,23 +220,23 @@ func resolveRelayPtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 	return out, nil
 }
 
-// resolveRelayProjectTemplate calls relay's bridge ResolveProjectTemplate to
+// ResolveProjectTemplate calls relay's bridge ResolveProjectTemplate to
 // fetch a project-scoped shell template definition by (projectID, templateID),
 // mapping the response into a config.TerminalTemplate so the existing launch path is
 // unchanged. Returns an error if relay is not running, the service token is
 // missing, or the project/template cannot be resolved — the caller fails closed
 // and never spawns a guessed command. The response carries no token; the
 // project token is injected separately by the existing ResolvePtyEnv path.
-func resolveRelayProjectTemplate(projectID, templateID string) (config.TerminalTemplate, error) {
+func ResolveProjectTemplate(projectID, templateID string) (config.TerminalTemplate, error) {
 	args, err := json.Marshal(RelayProjectTemplateRequest{ProjectID: projectID, TemplateID: templateID})
 	if err != nil {
 		return config.TerminalTemplate{}, fmt.Errorf("marshal request: %w", err)
 	}
-	resp, err := sendBridgeRequest(reqResolveProjectTemplate, args)
+	resp, err := SendBridgeRequest(ReqResolveProjectTemplate, args)
 	if err != nil {
 		return config.TerminalTemplate{}, err
 	}
-	if resp.Type != respProjectTemplate {
+	if resp.Type != RespProjectTemplate {
 		return config.TerminalTemplate{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
 	}
 	var out RelayProjectTemplateResponse

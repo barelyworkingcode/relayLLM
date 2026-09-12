@@ -11,6 +11,7 @@ import (
 	"time"
 
 	clk "relayllm/internal/clock"
+	"relayllm/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ func newTestProxyMetrics(clock clk.Clock) *ProxyMetrics {
 }
 
 func TestProxyMetrics_BeginEndLifecycle(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	m := newTestProxyMetrics(clock)
 
 	rec := httptest.NewRecorder()
@@ -114,7 +115,7 @@ func TestProxyMetrics_BeginEndLifecycle(t *testing.T) {
 }
 
 func TestProxyMetrics_RecentRingBounded(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	m := newTestProxyMetrics(clock)
 
 	for i := 0; i < 200; i++ {
@@ -192,7 +193,7 @@ func TestProxyConn_StallClassification(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMeteredResponseWriter_CountsActualBytes(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	m := newTestProxyMetrics(clock)
 
 	rec := httptest.NewRecorder()
@@ -227,7 +228,7 @@ func (m *mockShortWriter) Write(b []byte) (int, error) {
 }
 
 func TestMeteredResponseWriter_CreditsShortWriteCount(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	m := newTestProxyMetrics(clock)
 	rec := &mockShortWriter{ResponseRecorder: httptest.NewRecorder(), report: 4}
 
@@ -256,7 +257,7 @@ type flushRecorder struct {
 func (f *flushRecorder) Flush() { f.flushed = true }
 
 func TestMeteredResponseWriter_FlushPassthrough(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	m := newTestProxyMetrics(clock)
 	inner := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 

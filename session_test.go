@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"relayllm/internal/testutil"
 	"strconv"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ import (
 )
 
 // newTestSessionManager returns a SessionManager wired to a temp-dir store
-// with a per-session FakeProvider factory. Each CreateSession call produces
+// with a per-session testutil.FakeProvider factory. Each CreateSession call produces
 // a fresh provider so killing one doesn't cascade across sessions.
 func newTestSessionManager(t *testing.T) *SessionManager {
 	t.Helper()
@@ -25,7 +26,7 @@ func newTestSessionManager(t *testing.T) *SessionManager {
 	mgr := NewSessionManager(store, perms)
 	mgr.SetDataDir(dir)
 	mgr.SetProviderFactory(func(_ *Session, h EventHandler) (Provider, error) {
-		return NewFakeProvider(h), nil
+		return testutil.NewFakeProvider(h), nil
 	})
 	t.Cleanup(mgr.StopAll)
 	return mgr
@@ -470,10 +471,10 @@ func TestSession_CreateSession_GeneratesUniqueIDs(t *testing.T) {
 
 func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
 	mgr := newTestSessionManager(t)
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	host := &HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	fb.SetHostPtyEnv("/home/admin/proj", host)
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	sess, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "fake/m1", "", false, "fake", nil)
 	if err != nil {
@@ -489,9 +490,9 @@ func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
 
 func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	sess, err := mgr.CreateSession("", t.TempDir(), "s", "fake/m1", "", false, "fake", nil)
 	if err != nil {
@@ -509,9 +510,9 @@ func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
 // console's home — neither exists on a host.
 func TestSession_CreateSession_RefusesPiOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	_, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "pi/anthropic/claude-sonnet-4", "", false, "pi", nil)
 	if err == nil {
@@ -534,9 +535,9 @@ func TestSession_CreateSession_PiAllowedOnConsole(t *testing.T) {
 // no-op for a host session even when a same-named local file happens to exist.
 func TestSession_CreateSession_SkipsClaudeMdReadOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("", &HostSpec{ID: "h1", Name: "devbox"})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("local secrets"), 0o644); err != nil {
@@ -572,9 +573,9 @@ func TestSendMessageSync_TimeoutStopsGeneration(t *testing.T) {
 		t.Fatal("expected a timeout error")
 	}
 
-	fake, ok := sess.Provider().(*FakeProvider)
+	fake, ok := sess.Provider().(*testutil.FakeProvider)
 	if !ok {
-		t.Fatalf("provider = %T, want *FakeProvider", sess.Provider())
+		t.Fatalf("provider = %T, want *testutil.FakeProvider", sess.Provider())
 	}
 	if !fake.Stopped() {
 		t.Error("SendMessageSync timeout must call StopGeneration so the lease and session.processing don't leak forever")

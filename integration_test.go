@@ -39,7 +39,7 @@ func newTestServer(t *testing.T) *testServer {
 	terminalMgr := NewTerminalManager(templateStore, "")
 	wsHub := NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
-	perms.sink = wsHub
+	perms.SetEventSink(wsHub)
 
 	mux := http.NewServeMux()
 	RegisterSessionRoutes(mux, sessions)

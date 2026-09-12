@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"relayllm/internal/sshhost"
+	"relayllm/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -98,10 +99,10 @@ func TestBuildHostTerminalExec_OtherTemplate_RunsThroughInteractiveShell(t *test
 // ---------------------------------------------------------------------------
 
 func TestResolveTerminalHost_ResolvesFromBridge(t *testing.T) {
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	host := &HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	fb.SetHostPtyEnv("/home/admin/proj", host)
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	got := resolveTerminalHost("proj-1", "/home/admin/proj")
 	if got == nil || got.Name != "devbox" {
@@ -110,9 +111,9 @@ func TestResolveTerminalHost_ResolvesFromBridge(t *testing.T) {
 }
 
 func TestResolveTerminalHost_NoProjectIDNeverContactsBridge(t *testing.T) {
-	fb := NewFakeBridge(t)
+	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
-	withBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	if got := resolveTerminalHost("", "/tmp/scratch"); got != nil {
 		t.Errorf("resolveTerminalHost = %+v, want nil for an ad-hoc terminal", got)

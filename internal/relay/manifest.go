@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"encoding/json"
@@ -78,18 +78,18 @@ type FieldDecl struct {
 	Rest     bool        `json:"rest,omitempty"`
 }
 
-// registerManifestRequest is the Arguments payload for ReqRegisterManifest.
-type registerManifestRequest struct {
+// RegisterManifestRequest is the Arguments payload for ReqRegisterManifest.
+type RegisterManifestRequest struct {
 	ServiceID      string   `json:"serviceId"`
 	Manifest       Manifest `json:"manifest"`
 	InternalSocket string   `json:"internalSocket"`
 	InternalToken  string   `json:"internalToken"`
 }
 
-// buildManifest declares the routes, status endpoint, user actions, and the
+// BuildManifest declares the routes, status endpoint, user actions, and the
 // editable config file (with a schema relay renders a form from) that relayLLM
 // wants relay to dispatch / surface. See ../relay/plans/service-manifest-spec.md.
-func buildManifest(dataDir string) Manifest {
+func BuildManifest(dataDir string) Manifest {
 	return Manifest{
 		Routes: []string{
 			"/api/sessions",
@@ -281,25 +281,25 @@ func settingsSchema() []FieldDecl {
 	}
 }
 
-// maybeRegisterManifest tells relay where to dispatch front-door traffic
+// MaybeRegisterManifest tells relay where to dispatch front-door traffic
 // for this service. Standalone runs (no RELAY_BRIDGE_SOCKET set) are a
 // clean no-op — direct clients still reach the listener.
 //
 // Failure is logged and swallowed: the listener is already up, so missing
 // the relay-dispatch path is a partial degradation, not a hard error.
-func maybeRegisterManifest(dataDir, internalSocket, internalToken string) {
-	if os.Getenv(envBridgeSocket) == "" {
+func MaybeRegisterManifest(dataDir, internalSocket, internalToken string) {
+	if os.Getenv(EnvBridgeSocket) == "" {
 		slog.Info("standalone mode — skipping manifest registration")
 		return
 	}
-	serviceID := os.Getenv(envServiceID)
+	serviceID := os.Getenv(EnvServiceID)
 	if serviceID == "" {
-		slog.Warn("bridge socket set but service ID missing — skipping manifest registration", "env", envServiceID)
+		slog.Warn("bridge socket set but service ID missing — skipping manifest registration", "env", EnvServiceID)
 		return
 	}
 
-	manifest := buildManifest(dataDir)
-	args, err := json.Marshal(registerManifestRequest{
+	manifest := BuildManifest(dataDir)
+	args, err := json.Marshal(RegisterManifestRequest{
 		ServiceID:      serviceID,
 		Manifest:       manifest,
 		InternalSocket: internalSocket,
@@ -309,7 +309,7 @@ func maybeRegisterManifest(dataDir, internalSocket, internalToken string) {
 		slog.Error("marshal manifest registration failed", "error", err)
 		return
 	}
-	if _, err := sendBridgeRequest(reqRegisterManifest, args); err != nil {
+	if _, err := SendBridgeRequest(ReqRegisterManifest, args); err != nil {
 		slog.Error("manifest registration failed; running without relay dispatch", "error", err)
 		return
 	}

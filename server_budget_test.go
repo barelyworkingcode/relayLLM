@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 // newBudgetManager builds a manager with the given caps and aliases. Every
 // alias gets an explicit memoryGB so estimation never touches the filesystem.
-func newBudgetManager(t *testing.T, cfg *config.ServerConfig, sizes map[string]float64) (*ServerManager, *FakeClock) {
+func newBudgetManager(t *testing.T, cfg *config.ServerConfig, sizes map[string]float64) (*ServerManager, *testutil.FakeClock) {
 	t.Helper()
 	for alias, gb := range sizes {
 		cfg.Models = append(cfg.Models, config.ServerModelConfig{
@@ -28,7 +29,7 @@ func newBudgetManager(t *testing.T, cfg *config.ServerConfig, sizes map[string]f
 	// real llama-server on PATH does not get a 120s health poll against a
 	// process spawned with a nonexistent model file.
 	m := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
-	clk := NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
+	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
 	m.clock = clk
 	return m, clk
 }
@@ -343,7 +344,7 @@ func TestAcquire_ProceedsWhenBusyInstanceGoesIdle(t *testing.T) {
 
 // waitForWaiters blocks until the fake clock has at least n outstanding
 // waiters, so a test can advance time knowing the goroutine is parked.
-func waitForWaiters(t *testing.T, clk *FakeClock, n int) {
+func waitForWaiters(t *testing.T, clk *testutil.FakeClock, n int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

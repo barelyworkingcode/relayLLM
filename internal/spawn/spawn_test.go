@@ -1,4 +1,4 @@
-package main
+package spawn
 
 import (
 	"testing"
@@ -34,16 +34,16 @@ func TestRelayManagedSpec_NotManaged(t *testing.T) {
 }
 
 func TestHasArg(t *testing.T) {
-	if !hasArg([]string{"--skill", "/x"}, "--skill") {
-		t.Error("hasArg should find --skill")
+	if !HasArg([]string{"--skill", "/x"}, "--skill") {
+		t.Error("HasArg should find --skill")
 	}
-	if !hasArg([]string{"--SKILL", "/x"}, "--skill") {
-		t.Error("hasArg should be case-insensitive")
+	if !HasArg([]string{"--SKILL", "/x"}, "--skill") {
+		t.Error("HasArg should be case-insensitive")
 	}
-	if hasArg([]string{"--other"}, "--skill") {
-		t.Error("hasArg false positive")
+	if HasArg([]string{"--other"}, "--skill") {
+		t.Error("HasArg false positive")
 	}
-	if hasArg(nil, "--skill") {
-		t.Error("hasArg on nil should return false")
+	if HasArg(nil, "--skill") {
+		t.Error("HasArg on nil should return false")
 	}
 }

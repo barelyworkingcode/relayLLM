@@ -67,15 +67,11 @@ func readOneLine(t *testing.T, pr *io.PipeReader) []byte {
 // request registered in perms, failing the test if there isn't exactly one.
 func firstPendingPermissionID(t *testing.T, perms *PermissionManager) string {
 	t.Helper()
-	perms.mu.Lock()
-	defer perms.mu.Unlock()
-	if len(perms.pending) != 1 {
-		t.Fatalf("pending permission requests = %d, want 1", len(perms.pending))
+	ids := perms.PendingIDs()
+	if len(ids) != 1 {
+		t.Fatalf("pending permission requests = %d, want 1", len(ids))
 	}
-	for id := range perms.pending {
-		return id
-	}
-	return ""
+	return ids[0]
 }
 
 func controlRequestLine(requestID, toolName, input, toolUseID string) []byte {
@@ -161,9 +157,7 @@ func TestControlRequest_PolicyDenyShortCircuits(t *testing.T) {
 		t.Errorf("control_response =\n%s\nwant\n%s", got, want)
 	}
 
-	perms.mu.Lock()
-	n := len(perms.pending)
-	perms.mu.Unlock()
+	n := perms.PendingCount()
 	if n != 0 {
 		t.Errorf("policy-denied request must not register a pending entry, got %d", n)
 	}

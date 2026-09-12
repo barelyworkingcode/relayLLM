@@ -3,11 +3,12 @@ package main
 // WebSocket protocol coverage. Each subtest exercises one inbound message
 // type and asserts the resulting server-side state changes + outbound events.
 // Drives the full relayLLM stack via TestServer; the only fake is the LLM
-// provider (FakeProvider) so we can script event sequences deterministically.
+// provider (testutil.FakeProvider) so we can script event sequences deterministically.
 
 import (
 	"encoding/base64"
 	"encoding/json"
+	"relayllm/internal/testutil"
 	"slices"
 	"strings"
 	"testing"
@@ -106,7 +107,7 @@ func TestWS_StopGeneration_CallsProviderStop(t *testing.T) {
 	conn := srv.DialWS()
 	WSSend(t, conn, map[string]interface{}{"type": "stop_generation", "sessionId": sessionID})
 
-	waitFor(t, 1*time.Second, func() bool { return fp.Stopped() })
+	testutil.WaitFor(t, 1*time.Second, func() bool { return fp.Stopped() })
 }
 
 func TestWS_RenameSession_UpdatesName(t *testing.T) {
@@ -119,7 +120,7 @@ func TestWS_RenameSession_UpdatesName(t *testing.T) {
 		"type": "rename_session", "sessionId": sessionID, "name": "renamed",
 	})
 
-	waitFor(t, 1*time.Second, func() bool {
+	testutil.WaitFor(t, 1*time.Second, func() bool {
 		sess, ok := srv.Sessions.GetSession(sessionID)
 		if !ok {
 			return false
@@ -141,7 +142,7 @@ func TestWS_EndSession_StopsProvider(t *testing.T) {
 	WSSend(t, conn, map[string]interface{}{"type": "end_session", "sessionId": sessionID})
 
 	// EndSession kills the provider — wait for that to land.
-	waitFor(t, 1*time.Second, func() bool { return fp.Killed() })
+	testutil.WaitFor(t, 1*time.Second, func() bool { return fp.Killed() })
 }
 
 func TestWS_DeleteSession_RemovesSessionAndNotifies(t *testing.T) {
@@ -178,7 +179,7 @@ func TestWS_ClearSession_WipesHistory(t *testing.T) {
 	conn := srv.DialWS()
 	WSSend(t, conn, map[string]interface{}{"type": "clear_session", "sessionId": sessionID})
 
-	waitFor(t, 1*time.Second, func() bool {
+	testutil.WaitFor(t, 1*time.Second, func() bool {
 		sess.Lock()
 		defer sess.Unlock()
 		return len(sess.Messages) == 0
@@ -311,7 +312,7 @@ func TestWS_TerminalCreate_AndInput_AndClose(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWSConn_CountersAndIdle(t *testing.T) {
-	clock := NewFakeClock(time.Unix(1_700_000_000, 0))
+	clock := testutil.NewFakeClock(time.Unix(1_700_000_000, 0))
 	srv := NewTestServer(t, &TestServerOptions{Clock: clock})
 	srv.SetFakeProvider()
 	sessionID := srv.CreateSession(nil)
@@ -322,7 +323,7 @@ func TestWSConn_CountersAndIdle(t *testing.T) {
 
 	// join_session's read plus session_joined's write must both be counted —
 	// give the server goroutine a moment to process the read before polling.
-	waitFor(t, time.Second, func() bool {
+	testutil.WaitFor(t, time.Second, func() bool {
 		snap := srv.WSHub.SnapshotConnections()
 		return len(snap) == 1 && snap[0].BytesIn > 0 && snap[0].BytesOut > 0
 	})
@@ -367,7 +368,7 @@ func TestWSHub_SnapshotBindings(t *testing.T) {
 	terminalID := strOf(joined["terminalId"])
 	ReadUntilType(t, conn, "terminal_created", 2*time.Second)
 
-	waitFor(t, time.Second, func() bool {
+	testutil.WaitFor(t, time.Second, func() bool {
 		snap := srv.WSHub.SnapshotConnections()
 		return len(snap) == 1 && len(snap[0].Sessions) == 1 && len(snap[0].Terminals) == 1
 	})
@@ -385,7 +386,7 @@ func TestWSHub_SnapshotBindings(t *testing.T) {
 
 	// Leave the session; the terminal binding must survive independently.
 	WSSend(t, conn, map[string]interface{}{"type": "leave_session", "sessionId": sessionID})
-	waitFor(t, time.Second, func() bool {
+	testutil.WaitFor(t, time.Second, func() bool {
 		snap := srv.WSHub.SnapshotConnections()
 		return len(snap) == 1 && len(snap[0].Sessions) == 0
 	})
@@ -396,7 +397,7 @@ func TestWSHub_SnapshotBindings(t *testing.T) {
 
 	// Disconnecting entirely must drop the connection (and so its bindings).
 	conn.Close()
-	waitFor(t, time.Second, func() bool {
+	testutil.WaitFor(t, time.Second, func() bool {
 		return len(srv.WSHub.SnapshotConnections()) == 0
 	})
 }
@@ -410,15 +411,11 @@ func TestWSHub_SnapshotBindings(t *testing.T) {
 // CreateRequest without exposing internal map state to every test.
 func (s *TestServer) pendingPermissionID(t *testing.T) string {
 	t.Helper()
-	s.Perms.mu.Lock()
-	defer s.Perms.mu.Unlock()
-	if len(s.Perms.pending) != 1 {
-		t.Fatalf("expected exactly 1 pending permission, got %d", len(s.Perms.pending))
+	ids := s.Perms.PendingIDs()
+	if len(ids) != 1 {
+		t.Fatalf("expected exactly 1 pending permission, got %d", len(ids))
 	}
-	for id := range s.Perms.pending {
-		return id
-	}
-	return ""
+	return ids[0]
 }
 
 func strOf(v interface{}) string {

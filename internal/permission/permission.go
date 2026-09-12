@@ -1,4 +1,4 @@
-package main
+package permission
 
 import (
 	"strings"
@@ -90,8 +90,27 @@ func (m *PermissionManager) SetClock(c clk.Clock) {
 	m.clock = c
 }
 
+// Clock returns the clock used for permission timeouts, for callers (e.g.
+// the HTTP hook handler) that need to select on it directly alongside their
+// own response-writing logic instead of going through WaitForDecision.
+func (m *PermissionManager) Clock() clk.Clock {
+	return m.clock
+}
+
 func (m *PermissionManager) SetEventSink(sink types.EventSink) {
 	m.sink = sink
+}
+
+// NotifySession forwards msg to sessionID via the configured event sink, if
+// any. Returns false when no sink is configured (e.g. a headless session or
+// a manager under test) so callers can distinguish "not sent" without
+// reaching into the unexported sink field themselves.
+func (m *PermissionManager) NotifySession(sessionID string, msg map[string]any) bool {
+	if m.sink == nil {
+		return false
+	}
+	m.sink.SendToSession(sessionID, msg)
+	return true
 }
 
 // CreateRequest creates a pending permission request and returns the request
@@ -129,6 +148,27 @@ func (m *PermissionManager) Resolve(permissionID string, decision PermissionDeci
 
 	p.ch <- decision
 	return true
+}
+
+// PendingCount returns the number of currently-outstanding requests. Test
+// seam for asserting registration/cleanup without reaching into the
+// unexported pending map.
+func (m *PermissionManager) PendingCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pending)
+}
+
+// PendingIDs returns the ids of every currently-outstanding request. Test
+// seam; production code never needs to enumerate pending ids.
+func (m *PermissionManager) PendingIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.pending))
+	for id := range m.pending {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Cleanup removes a pending request (e.g., on timeout).

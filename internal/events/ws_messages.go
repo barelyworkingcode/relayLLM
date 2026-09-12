@@ -1,4 +1,4 @@
-package main
+package events
 
 // WSMsg* are the type-tags on the WebSocket wire envelope (the JSON `"type"`
 // field). Inbound values drive the dispatch switch in WSHub.HandleUpgrade;

@@ -8,6 +8,7 @@ package main
 
 import (
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -111,12 +112,12 @@ func TestResolvedVirtualTarget_LabelIncludesUpstreamModel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// virtualAffinityStore — TTL + LRU cap bounds, driven with a FakeClock so
+// virtualAffinityStore — TTL + LRU cap bounds, driven with a testutil.FakeClock so
 // nothing here sleeps.
 // ---------------------------------------------------------------------------
 
 func TestVirtualAffinityStore_RecordThenLookupRoundTrips(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "conv-1", "endpoint:remote")
@@ -126,7 +127,7 @@ func TestVirtualAffinityStore_RecordThenLookupRoundTrips(t *testing.T) {
 }
 
 func TestVirtualAffinityStore_LookupMissWhenNoKeyEverRecorded(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 	if got := store.lookup("vCode", "conv-1"); got != "" {
 		t.Errorf("lookup = %q, want empty (nothing recorded)", got)
@@ -139,7 +140,7 @@ func TestVirtualAffinityStore_LookupMissWhenNoKeyEverRecorded(t *testing.T) {
 // An empty conversation key means "no affinity key present in the request" —
 // record must never store anything for it, and lookup must always miss.
 func TestVirtualAffinityStore_EmptyConversationKeyIsNeverStored(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "", "endpoint:remote")
@@ -154,7 +155,7 @@ func TestVirtualAffinityStore_EmptyConversationKeyIsNeverStored(t *testing.T) {
 // Two virtual models sharing a conversation key must not collide — the
 // affinity namespace is (virtual, conversation), not conversation alone.
 func TestVirtualAffinityStore_ScopedPerVirtualModel(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "conv-1", "endpoint:remote")
@@ -169,7 +170,7 @@ func TestVirtualAffinityStore_ScopedPerVirtualModel(t *testing.T) {
 }
 
 func TestVirtualAffinityStore_TTLExpiry(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "conv-1", "endpoint:remote")
@@ -188,7 +189,7 @@ func TestVirtualAffinityStore_TTLExpiry(t *testing.T) {
 // A lookup that refreshes activity (via a subsequent record) must not expire
 // on the original TTL window.
 func TestVirtualAffinityStore_RecordRefreshesTTL(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "conv-1", "endpoint:remote")
@@ -205,7 +206,7 @@ func TestVirtualAffinityStore_RecordRefreshesTTL(t *testing.T) {
 // only — see the store's doc comment) — this proves an expired entry doesn't
 // silently take up permanent room once another key is written.
 func TestVirtualAffinityStore_ExpiredEntrySweptOnNextWrite(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 
 	store.record("vCode", "conv-1", "endpoint:remote")
@@ -221,7 +222,7 @@ func TestVirtualAffinityStore_ExpiredEntrySweptOnNextWrite(t *testing.T) {
 }
 
 func TestVirtualAffinityStore_LRUCapEvictsLeastRecentlyUsed(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 	store.cap = 3 // shrink for the test rather than writing 1024 entries
 
@@ -252,7 +253,7 @@ func TestVirtualAffinityStore_LRUCapEvictsLeastRecentlyUsed(t *testing.T) {
 // Refreshing an existing key must never itself trigger LRU eviction — only
 // inserting a genuinely new key can push the store over its cap.
 func TestVirtualAffinityStore_RefreshDoesNotTriggerEviction(t *testing.T) {
-	clock := NewFakeClock(time.Unix(0, 0))
+	clock := testutil.NewFakeClock(time.Unix(0, 0))
 	store := newVirtualAffinityStore(clock)
 	store.cap = 2
 

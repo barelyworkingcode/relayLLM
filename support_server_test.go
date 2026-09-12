@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	clk "relayllm/internal/clock"
+	"relayllm/internal/testutil"
 )
 
 const supportBearerToken = "test-bearer-token"
@@ -34,7 +35,7 @@ type TestServer struct {
 	Terminals    *TerminalManager
 	WSHub        *WSHub
 	Token        string
-	FakeProvider *FakeProvider // set if ProviderFromFake is used
+	FakeProvider *testutil.FakeProvider // set if ProviderFromFake is used
 }
 
 // TestServerOptions controls how the server is wired.
@@ -51,11 +52,11 @@ type TestServerOptions struct {
 }
 
 // NewTestServer spins up a minimal relayLLM HTTP+WS stack. Defaults are
-// chosen so a test that just wants to drive sessions through a FakeProvider
+// chosen so a test that just wants to drive sessions through a testutil.FakeProvider
 // gets working endpoints with one line:
 //
 //	srv := NewTestServer(t, nil)
-//	srv.SetFakeProvider() // installs a FakeProvider; returns it
+//	srv.SetFakeProvider() // installs a testutil.FakeProvider; returns it
 func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	t.Helper()
 	if opts == nil {
@@ -142,11 +143,11 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 }
 
 // SetFakeProvider installs a SessionManager provider factory that constructs
-// the same shared FakeProvider for every session — convenient when a test
-// only opens one session. Returns the FakeProvider so the test can script it.
-func (s *TestServer) SetFakeProvider() *FakeProvider {
+// the same shared testutil.FakeProvider for every session — convenient when a test
+// only opens one session. Returns the testutil.FakeProvider so the test can script it.
+func (s *TestServer) SetFakeProvider() *testutil.FakeProvider {
 	s.t.Helper()
-	fp := NewFakeProvider(nil)
+	fp := testutil.NewFakeProvider(nil)
 	s.Sessions.SetProviderFactory(func(_ *Session, h EventHandler) (Provider, error) {
 		fp.SetHandler(h)
 		return fp, nil

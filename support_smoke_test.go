@@ -1,18 +1,19 @@
 package main
 
 // Smoke test for the testsupport infrastructure itself. If this fails, every
-// downstream test using TestServer/FakeProvider/etc. is broken — keep it
+// downstream test using TestServer/testutil.FakeProvider/etc. is broken — keep it
 // minimal and quick.
 
 import (
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/testutil"
 	"testing"
 	"time"
 )
 
 func TestSupport_FakeClock_AdvanceFiresAfter(t *testing.T) {
-	c := NewFakeClock(time.Unix(0, 0))
+	c := testutil.NewFakeClock(time.Unix(0, 0))
 	ch := c.After(100 * time.Millisecond)
 	select {
 	case <-ch:
@@ -35,7 +36,7 @@ func TestSupport_FakeClock_AdvanceFiresAfter(t *testing.T) {
 
 func TestSupport_FakeProvider_EmitsScriptedEvents(t *testing.T) {
 	var got []string
-	p := NewFakeProvider(func(eventType string, _ json.RawMessage) {
+	p := testutil.NewFakeProvider(func(eventType string, _ json.RawMessage) {
 		got = append(got, eventType)
 	})
 	p.ScriptText("hi")

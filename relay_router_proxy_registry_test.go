@@ -129,7 +129,7 @@ func TestProxyRegistry_LookupModel_OfflineWithinTTL_NotReprobed(t *testing.T) {
 // Requirement 5: once the cached status goes stale (TTL expired), a
 // previously-offline endpoint that has since come back online is probed
 // again and resolves. Drives "time passing" by setting the registry's ttl
-// field directly (no FakeClock seam on ProxyRegistry) rather than sleeping.
+// field directly (no testutil.FakeClock seam on ProxyRegistry) rather than sleeping.
 func TestProxyRegistry_LookupModel_ReprobesAfterTTLExpiry(t *testing.T) {
 	var reqCount atomic.Int64
 	healthy := &atomic.Bool{}

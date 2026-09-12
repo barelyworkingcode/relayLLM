@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/testutil"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -190,7 +191,7 @@ func TestLlamaLive_ToolCall_RoundTripsWithFakeMCP(t *testing.T) {
 	// JSON args; the fake returns "42", and we assert the model's next turn
 	// references it.
 	addCalls := atomic.Int32{}
-	tool := FakeTool{
+	tool := testutil.FakeTool{
 		Name:        "add",
 		Description: "Adds two integers and returns their sum",
 		Schema: map[string]interface{}{
@@ -206,7 +207,7 @@ func TestLlamaLive_ToolCall_RoundTripsWithFakeMCP(t *testing.T) {
 			return "42", nil
 		},
 	}
-	fakeMCP := NewFakeMCPClient(tool)
+	fakeMCP := testutil.NewFakeMCPClient(tool)
 
 	srv := newLiveTestServer(t)
 	srv.Sessions.SetMCPClientFactory(func(*Session) MCPClient { return fakeMCP })
