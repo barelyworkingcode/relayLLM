@@ -1,10 +1,11 @@
 //go:build live
 
-package main
+package app
 
 import (
 	"encoding/json"
 	"os"
+	"relayllm/internal/mcp"
 	"relayllm/internal/provider"
 	"strings"
 	"testing"
@@ -151,7 +152,7 @@ func TestIntegration_MCPToolDiscovery(t *testing.T) {
 		t.Skip("RELAY_PROJECT_TOKEN not set")
 	}
 
-	configs := map[string]MCPServerConfig{
+	configs := map[string]mcp.MCPServerConfig{
 		"relay": {
 			Command: relayBinary,
 			Args:    []string{"mcp"},
@@ -159,7 +160,7 @@ func TestIntegration_MCPToolDiscovery(t *testing.T) {
 		},
 	}
 
-	mgr := NewMCPManager(configs)
+	mgr := mcp.NewMCPManager(configs)
 	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("start MCP manager: %v", err)
 	}

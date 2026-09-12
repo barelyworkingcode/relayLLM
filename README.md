@@ -12,7 +12,7 @@ status — nothing else.
 ## Build
 
 ```bash
-go build -o relayllm .
+go build -o relayllm ./cmd/relayllm
 go build -o cmd/hook/hook ./cmd/hook    # PreToolUse permission hook
 ```
 
@@ -54,7 +54,7 @@ and registers a manifest (see [Service manifest](#service-manifest)).
 | `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. `127.0.0.1,192.168.64.1`); include `0.0.0.0` to accept connections from other hosts |
 
 Provider configuration lives in `{data-dir}/settings.json`. See
-[Providers](#providers) and the inline schema in `config.go`.
+[Providers](#providers) and the inline schema in `internal/config/config.go`.
 
 ## Providers
 
@@ -79,7 +79,7 @@ first use, poll `/health` until ready, and are shared across sessions.
 (`http://127.0.0.1:N/v1` by default — see `--router-bind` above) that fronts
 every managed-server alias and every reachable OpenAI endpoint, so any OpenAI
 client can reach all local models through one URL. Details in
-[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+[CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
 
 Configure `virtual-llms` in `settings.json` to expose a stable model name backed
 by an ordered list of fallback targets. An endpoint target reuses a name from
@@ -114,12 +114,12 @@ keeps sending the same `prompt_cache_key` (or `user`, if that's absent), and
 a pinned target always wins over the preference ordering above — a
 reachability wobble must not hop an established conversation to a different
 backend, since two backends encode reasoning differently and cannot share a
-transcript (see [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo) for the
+transcript (see [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo) for the
 full incompatibility matrix behind this).
 No client identifier means no pin — same behavior as before this existed. A
 pin expires after an hour of disuse, or falls back to the remaining
 candidates immediately if its target has since been removed from config.
-Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+Details in [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
 
 Configure `router.reasoningEffortMap` in `settings.json` to rewrite a
 `reasoning_effort` value before it reaches a backend, e.g. `{"minimal":
@@ -137,7 +137,7 @@ false}}`, merges that object into the body's top-level
 matches a configured key, without clobbering any key the client's own body
 already sets. Configure both knobs together for a value that reliably turns
 reasoning off across both backend families. Also absent/empty by default.
-Details in [CLAUDE.md](CLAUDE.md#relay-router-relay_routergo).
+Details in [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
 
 Configure `router.anthropic` to let Claude Code (the `claude` CLI) point at
 the router via `ANTHROPIC_BASE_URL` — real Claude models proxy through to
@@ -161,9 +161,9 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude -p "hi"
 ANTHROPIC_BASE_URL=http://127.0.0.1:8180 claude --model vCode -p "hi"
 ```
 
-See `relay_router_anthropic_translate.go`'s file header for what's
+See `internal/router/router_anthropic_translate.go`'s file header for what's
 translated and what's deliberately out of scope, and
-[CLAUDE.md](CLAUDE.md#relay-router-relay_routergo) for the full config
+[CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo) for the full config
 reference including the `ANTHROPIC_CUSTOM_MODEL_OPTION` client-side setting
 needed to make a redirected model selectable in Claude Code's own `/model`
 picker.
@@ -174,7 +174,7 @@ The API is a Unix-socket HTTP + WebSocket surface. Treat it as a public API for
 direct (standalone) callers; through relay, Eve reaches it via the front-door
 dispatcher. The authoritative wire contract is
 [`docs/event-protocol.md`](docs/event-protocol.md) and the route/message
-constants in `api.go` / `ws_messages.go`.
+constants in `internal/api/api.go` / `internal/events/ws_messages.go`.
 
 **HTTP** (all JSON):
 
@@ -189,7 +189,7 @@ constants in `api.go` / `ws_messages.go`.
 `permission_response` / terminal ops; the server streams `llm_event` (a
 **canonical, provider-agnostic** stream event — not raw Claude output),
 `stats_update`, `message_complete`, `permission_request`, terminal frames, etc.
-Full catalog: `ws_messages.go` + [`docs/event-protocol.md`](docs/event-protocol.md).
+Full catalog: `internal/events/ws_messages.go` + [`docs/event-protocol.md`](docs/event-protocol.md).
 
 ### Permission flow
 
@@ -222,8 +222,8 @@ go test -tags=llm ./...    # opt-in: real llama-server against an installed GGUF
 
 The hermetic tier covers the WS protocol, HTTP API, session lifecycle, tool-call
 loop, pi event translation, and manifest registration via fakes
-(`support_test.go` / `support_server_test.go`). Install the pre-commit hook once:
-`git config core.hooksPath .githooks`.
+(`internal/testutil` / `internal/api/testserver_test.go`). Install the pre-commit
+hook once: `git config core.hooksPath .githooks`.
 
 ## Service manifest
 

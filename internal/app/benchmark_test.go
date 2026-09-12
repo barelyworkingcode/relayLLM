@@ -1,6 +1,6 @@
 //go:build live
 
-package main
+package app
 
 import (
 	"encoding/json"
