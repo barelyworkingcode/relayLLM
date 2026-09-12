@@ -1,0 +1,116 @@
+package types
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+// Provider abstracts an LLM backend (Claude CLI, Gemini CLI, LM Studio HTTP).
+type Provider interface {
+	// Start spawns the provider process or initializes the connection.
+	Start() error
+
+	// SendMessage sends a user message. Events stream via the EventHandler.
+	SendMessage(text string, files []FileAttachment) error
+
+	// StopGeneration aborts the in-flight response without killing the provider.
+	StopGeneration()
+
+	// Kill terminates the provider process.
+	Kill()
+
+	// DeleteSession removes provider-specific session data from disk.
+	DeleteSession() error
+
+	// Alive returns true if the provider process is running.
+	Alive() bool
+
+	// GetState returns provider-specific state for persistence.
+	GetState() json.RawMessage
+
+	// RestoreState restores provider-specific state after reload.
+	RestoreState(state json.RawMessage)
+}
+
+// FileAttachment represents an attached file in a message.
+type FileAttachment struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64 encoded
+}
+
+// Message represents a persisted chat message.
+//
+// Assistant messages with tool calls store the calls as tool_use blocks
+// inside Content — see toolCallsFromContent for the extraction path used on
+// history replay. There is no separate tool-calls field.
+type Message struct {
+	Timestamp string           `json:"timestamp"`
+	Role      string           `json:"role"` // "user", "assistant", or "tool"
+	Content   json.RawMessage  `json:"content"`
+	Files     []FileAttachment `json:"files,omitempty"`
+	ToolName  string           `json:"toolName,omitempty"`  // set when Role="tool"
+	ToolUseID string           `json:"toolUseId,omitempty"` // set when Role="tool" so the client can pair the result back to its tool_use block
+}
+
+// SessionStats tracks token usage and cost.
+type SessionStats struct {
+	InputTokens          int     `json:"inputTokens"`
+	OutputTokens         int     `json:"outputTokens"`
+	CacheReadTokens      int     `json:"cacheReadTokens"`
+	CacheCreationTokens  int     `json:"cacheCreationTokens"`
+	CostUsd              float64 `json:"costUsd"`
+	TimeToFirstToken     float64 `json:"timeToFirstToken,omitempty"`
+	TokensPerSecond      float64 `json:"tokensPerSecond,omitempty"`
+	PromptEvalCount      int     `json:"promptEvalCount,omitempty"`
+	EvalDurationMs       float64 `json:"evalDurationMs,omitempty"`
+	PromptEvalDurationMs float64 `json:"promptEvalDurationMs,omitempty"`
+}
+
+// extractTextContent extracts plain text from a Message's JSON content.
+// User messages may be stored as a JSON string or raw text.
+// Assistant messages are stored as [{type: "text", text: "..."}] blocks.
+func ExtractTextContent(msg Message) string {
+	if msg.Role == "user" || msg.Role == "tool" {
+		var text string
+		if json.Unmarshal(msg.Content, &text) == nil {
+			return text
+		}
+		return string(msg.Content)
+	}
+	return FlattenTextBlocks(msg.Content)
+}
+
+// flattenTextBlocks reduces polymorphic content (a JSON string OR an array of
+// {type:"text", text:"..."} blocks) to a single string. Used by translators
+// to canonicalize tool_result content and by extractTextContent above.
+//
+// Empty input returns "". Input that decodes as neither a string nor the
+// block array falls back to the raw bytes — preserves diagnostics for
+// inputs the translator didn't anticipate.
+func FlattenTextBlocks(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil {
+		var sb strings.Builder
+		for _, b := range blocks {
+			if b.Type == "text" {
+				sb.WriteString(b.Text)
+			}
+		}
+		return sb.String()
+	}
+	return string(raw)
+}
+
+// EventHandler is the callback from provider to session for streaming events.
+type EventHandler func(eventType string, data json.RawMessage)

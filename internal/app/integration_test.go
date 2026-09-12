@@ -1,0 +1,342 @@
+//go:build live
+
+package app
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"relayllm/internal/api"
+	"relayllm/internal/config"
+	"relayllm/internal/permission"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
+	"relayllm/internal/types"
+	"strings"
+	"testing"
+	"time"
+)
+
+// integStopTestEndpoint/skipIfOMLXUnavailable duplicate the identical check
+// in internal/provider/stop_generation_test.go — both are live-tagged test
+// scaffolding in different packages (test-file symbols never cross a
+// package boundary), so duplicating this small reachability probe is
+// simpler than sharing it.
+var integStopTestEndpoint = config.OpenAIEndpoint{
+	Name:    "omlx",
+	BaseURL: "http://localhost:8000/v1",
+	APIKey:  "omlx-sygde9eyq9mc0fvx",
+}
+
+const integStopTestModel = "gemma-4-31b-it-mxfp8"
+
+func skipIfOMLXUnavailable(t *testing.T) {
+	t.Helper()
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, integStopTestEndpoint.BaseURL+"/models", nil)
+	if integStopTestEndpoint.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+integStopTestEndpoint.APIKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Skipf("OMLX not reachable: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("OMLX /models returned %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Skipf("OMLX: decode /models: %v", err)
+	}
+	found := false
+	for _, m := range payload.Data {
+		if strings.Contains(m.ID, integStopTestModel) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skipf("OMLX: model %s not loaded", integStopTestModel)
+	}
+}
+
+// testServer wires up the full relayLLM stack in-process for integration testing.
+type testServer struct {
+	Server       *httptest.Server
+	SessionStore *session.SessionStore
+	Sessions     *session.SessionManager
+	Perms        *permission.PermissionManager
+}
+
+func newTestServer(t *testing.T) *testServer {
+	t.Helper()
+	dataDir := t.TempDir()
+
+	sessionStore := session.NewSessionStore(dataDir + "/sessions")
+	perms := permission.NewPermissionManager()
+	sessions := session.NewSessionManager(sessionStore, perms)
+	sessions.SetOpenAIConfig(&config.OpenAIConfig{
+		Endpoints: []config.OpenAIEndpoint{
+			// Local dev oMLX server + personal local-server token (not a
+			// production secret). Kept in sync with the identical constants
+			// in internal/provider/openai_integration_test.go by hand — this
+			// file predates the package split and duplicating two string
+			// literals is simpler than sharing a live-tagged-only const.
+			{Name: "omlx", BaseURL: "http://localhost:8000/v1", APIKey: "omlx-sygde9eyq9mc0fvx"},
+		},
+	})
+
+	templateStore := terminal.NewTemplateStore(dataDir + "/terminals/templates.json")
+	terminalMgr := terminal.NewTerminalManager(templateStore, "")
+	wsHub := api.NewWSHub(sessions, perms, terminalMgr)
+	sessions.SetEventSink(wsHub)
+	perms.SetEventSink(wsHub)
+
+	mux := http.NewServeMux()
+	api.RegisterSessionRoutes(mux, sessions)
+	api.RegisterPermissionRoutes(mux, perms, sessions)
+	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
+
+	server := httptest.NewServer(mux)
+
+	// Tests don't exercise the hook subprocess; empty socket is fine.
+	sessions.SetHookSocket("")
+
+	t.Cleanup(func() {
+		sessions.StopAll()
+		server.Close()
+	})
+
+	return &testServer{
+		Server:       server,
+		SessionStore: sessionStore,
+		Sessions:     sessions,
+		Perms:        perms,
+	}
+}
+
+// doJSON performs an HTTP request with JSON body and decodes the JSON response.
+func doJSON(t *testing.T, method, url string, body interface{}, resp interface{}) *http.Response {
+	t.Helper()
+
+	var reqBody io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request body: %v", err)
+		}
+		reqBody = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequest(method, url, reqBody)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	httpResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, url, err)
+	}
+	defer httpResp.Body.Close()
+
+	if resp != nil {
+		respBody, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			t.Fatalf("read response body: %v", err)
+		}
+		if err := json.Unmarshal(respBody, resp); err != nil {
+			t.Fatalf("unmarshal response (status %d, body: %s): %v", httpResp.StatusCode, string(respBody), err)
+		}
+	}
+
+	return httpResp
+}
+
+// createTestProject creates a project via the API and returns its ID.
+func createTestProject(t *testing.T, ts *testServer) string {
+	t.Helper()
+	projectDir := t.TempDir()
+
+	var project struct {
+		ID string `json:"id"`
+	}
+	resp := doJSON(t, "POST", ts.Server.URL+"/api/projects", map[string]interface{}{
+		"name": "integration-test",
+		"path": projectDir,
+	}, &project)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create project: expected 201, got %d", resp.StatusCode)
+	}
+	if project.ID == "" {
+		t.Fatal("create project: empty ID")
+	}
+	return project.ID
+}
+
+// createTestSession creates a session via the API and returns its ID.
+func createTestSession(t *testing.T, ts *testServer, projectID string) string {
+	t.Helper()
+
+	var session struct {
+		SessionID string `json:"sessionId"`
+	}
+	resp := doJSON(t, "POST", ts.Server.URL+"/api/sessions", map[string]interface{}{
+		"projectId": projectID,
+		"model":     "omlx/gemma-4-31b-it-mxfp8",
+	}, &session)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create session: expected 201, got %d", resp.StatusCode)
+	}
+	if session.SessionID == "" {
+		t.Fatal("create session: empty sessionId")
+	}
+	return session.SessionID
+}
+
+// sendMessage sends a message via the sync HTTP endpoint and returns response + stats.
+func sendMessage(t *testing.T, ts *testServer, sessionID, text string) (string, types.SessionStats) {
+	t.Helper()
+
+	var result struct {
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
+	}
+	resp := doJSON(t, "POST", ts.Server.URL+"/api/sessions/"+sessionID+"/message", map[string]string{
+		"text": text,
+	}, &result)
+	if resp.StatusCode != 200 {
+		t.Fatalf("send message: expected 200, got %d", resp.StatusCode)
+	}
+	return result.Response, result.Stats
+}
+
+// endSession ends a session via the API.
+func endSession(t *testing.T, ts *testServer, sessionID string) {
+	t.Helper()
+	resp := doJSON(t, "DELETE", ts.Server.URL+"/api/sessions/"+sessionID, nil, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("end session: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// --- Tests ---
+
+// TestIntegration_ProjectCRUD removed — project CRUD now lives in relay.
+// relayLLM proxies read-only project data from the bridge.
+
+func TestIntegration_HelloWorld(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test (requires local LLM)")
+	}
+	skipIfOMLXUnavailable(t)
+
+	ts := newTestServer(t)
+	projectID := createTestProject(t, ts)
+	sessionID := createTestSession(t, ts, projectID)
+
+	response, stats := sendMessage(t, ts, sessionID, "Respond with exactly: hello world")
+
+	if response == "" {
+		t.Fatal("empty response")
+	}
+	if !strings.Contains(strings.ToLower(response), "hello") {
+		t.Fatalf("expected response to contain 'hello', got: %q", response)
+	}
+
+	if stats.InputTokens == 0 {
+		t.Error("expected non-zero InputTokens")
+	}
+	if stats.OutputTokens == 0 {
+		t.Error("expected non-zero OutputTokens")
+	}
+	endSession(t, ts, sessionID)
+}
+
+func TestIntegration_SessionResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test (requires local LLM)")
+	}
+	skipIfOMLXUnavailable(t)
+
+	ts := newTestServer(t)
+	projectID := createTestProject(t, ts)
+	sessionID := createTestSession(t, ts, projectID)
+
+	// Send first message with a code word.
+	response1, _ := sendMessage(t, ts, sessionID,
+		"Remember this code word: pineapple42. Just confirm you've noted it.")
+	if response1 == "" {
+		t.Fatal("empty response to first message")
+	}
+	t.Logf("first response: %s", response1)
+
+	// End session (persists ProviderState and message history).
+	endSession(t, ts, sessionID)
+
+	// Send follow-up message — session will be lazy-loaded from disk.
+	response2, _ := sendMessage(t, ts, sessionID,
+		"What was the code word I told you?")
+	if response2 == "" {
+		t.Fatal("empty response to resumed message")
+	}
+	t.Logf("resumed response: %s", response2)
+
+	if !strings.Contains(strings.ToLower(response2), "pineapple42") {
+		t.Fatalf("expected resumed response to contain 'pineapple42', got: %q", response2)
+	}
+
+	endSession(t, ts, sessionID)
+}
+
+func TestIntegration_MultipleMessages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test (requires local LLM)")
+	}
+	skipIfOMLXUnavailable(t)
+
+	ts := newTestServer(t)
+	projectID := createTestProject(t, ts)
+	sessionID := createTestSession(t, ts, projectID)
+
+	// First message.
+	response1, stats1 := sendMessage(t, ts, sessionID,
+		"What is 2+2? Reply with just the number.")
+	if !strings.Contains(response1, "4") {
+		t.Fatalf("expected response to contain '4', got: %q", response1)
+	}
+	t.Logf("first response: %s (tokens: in=%d out=%d cost=$%.6f)",
+		response1, stats1.InputTokens, stats1.OutputTokens, stats1.CostUsd)
+
+	// Second message — tests conversation context.
+	response2, stats2 := sendMessage(t, ts, sessionID,
+		"What was the math question I just asked? Repeat it.")
+	lower := strings.ToLower(response2)
+	if !strings.Contains(lower, "2+2") && !strings.Contains(lower, "2 + 2") &&
+		!strings.Contains(lower, "two plus two") && !strings.Contains(lower, "2 plus 2") {
+		t.Fatalf("expected response to reference '2+2', got: %q", response2)
+	}
+	t.Logf("second response: %s (tokens: in=%d out=%d cost=$%.6f)",
+		response2, stats2.InputTokens, stats2.OutputTokens, stats2.CostUsd)
+
+	// Stats should reflect cumulative totals from the second turn.
+	if stats2.InputTokens == 0 || stats2.OutputTokens == 0 {
+		t.Error("expected non-zero token counts on second message")
+	}
+
+	fmt.Printf("cumulative stats: in=%d out=%d cost=$%.6f\n",
+		stats2.InputTokens, stats2.OutputTokens, stats2.CostUsd)
+
+	endSession(t, ts, sessionID)
+}
