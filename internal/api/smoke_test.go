@@ -1,4 +1,4 @@
-package main
+package api
 
 // Smoke test for the testsupport infrastructure itself. If this fails, every
 // downstream test using TestServer/testutil.FakeProvider/etc. is broken — keep it
@@ -7,7 +7,9 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/events"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"testing"
 	"time"
 )
@@ -40,7 +42,7 @@ func TestSupport_FakeProvider_EmitsScriptedEvents(t *testing.T) {
 		got = append(got, eventType)
 	})
 	p.ScriptText("hi")
-	p.ScriptResult("end_turn", SessionStats{})
+	p.ScriptResult("end_turn", types.SessionStats{})
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -48,13 +50,13 @@ func TestSupport_FakeProvider_EmitsScriptedEvents(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	wantPrefix := []string{
-		HandlerLLMEvent,    // message_start
-		HandlerLLMEvent,    // content_block_start
-		HandlerLLMEvent,    // content_block_delta
-		HandlerLLMEvent,    // content_block_stop
-		HandlerStatsUpdate, // emitted by ScriptResult
-		HandlerLLMEvent,    // result envelope
-		HandlerMessageComplete,
+		events.HandlerLLMEvent,    // message_start
+		events.HandlerLLMEvent,    // content_block_start
+		events.HandlerLLMEvent,    // content_block_delta
+		events.HandlerLLMEvent,    // content_block_stop
+		events.HandlerStatsUpdate, // emitted by ScriptResult
+		events.HandlerLLMEvent,    // result envelope
+		events.HandlerMessageComplete,
 	}
 	if len(got) != len(wantPrefix) {
 		t.Fatalf("event count: got %d, want %d (events=%v)", len(got), len(wantPrefix), got)
@@ -102,7 +104,7 @@ func TestSupport_TestServer_EndToEndFakeProvider(t *testing.T) {
 	fp := srv.SetFakeProvider()
 
 	fp.ScriptText("pong")
-	fp.ScriptResult("end_turn", SessionStats{InputTokens: 3, OutputTokens: 1})
+	fp.ScriptResult("end_turn", types.SessionStats{InputTokens: 3, OutputTokens: 1})
 
 	conn := srv.DialWS()
 	sessionID := srv.CreateSession(nil)
@@ -121,7 +123,7 @@ func TestSupport_TestServer_EndToEndFakeProvider(t *testing.T) {
 
 	// Wait for the message_complete signal that the session emits when the
 	// provider's scripted stream finishes.
-	ReadUntilType(t, conn, HandlerMessageComplete, 2*time.Second)
+	ReadUntilType(t, conn, events.HandlerMessageComplete, 2*time.Second)
 
 	if sent := fp.Sent(); len(sent) != 1 || sent[0].Text != "ping" {
 		t.Errorf("fake provider Sent: %+v", sent)

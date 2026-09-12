@@ -1,7 +1,10 @@
-package main
+package api
 
 import (
 	"net/http"
+	"relayllm/internal/servermanager"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"time"
 )
 
@@ -11,25 +14,25 @@ import (
 // chain from main.go.
 func RegisterStatusRoutes(
 	mux *http.ServeMux,
-	sessions *SessionManager,
-	terminals *TerminalManager,
-	llama *ServerManager,
-	mlx *ServerManager,
+	sessions *session.SessionManager,
+	terminals *terminal.TerminalManager,
+	llama *servermanager.ServerManager,
+	mlx *servermanager.ServerManager,
 	startTime time.Time,
 ) {
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		instances := []ServerInstanceInfo{}
+		instances := []servermanager.ServerInstanceInfo{}
 		if llama != nil {
 			instances = llama.ListInstances()
 		}
-		mlxInstances := []ServerInstanceInfo{}
+		mlxInstances := []servermanager.ServerInstanceInfo{}
 		if mlx != nil {
 			mlxInstances = mlx.ListInstances()
 		}
 		// Budgets are reported per configured manager so the Service Inspector
 		// can show why a model is loaded, queued, or evicted.
-		budgets := []BudgetInfo{}
-		for _, mgr := range []*ServerManager{llama, mlx} {
+		budgets := []servermanager.BudgetInfo{}
+		for _, mgr := range []*servermanager.ServerManager{llama, mlx} {
 			if mgr != nil {
 				budgets = append(budgets, mgr.Budget())
 			}
@@ -51,10 +54,10 @@ func RegisterStatusRoutes(
 // registerInstanceRoutes wires GET /api/{kind}/instances and
 // DELETE /api/{kind}/instances/{alias} for one managed-server kind. The
 // routes stay live with a nil manager: GET returns an empty list, DELETE 404s.
-func registerInstanceRoutes(mux *http.ServeMux, kind string, mgr *ServerManager) {
+func registerInstanceRoutes(mux *http.ServeMux, kind string, mgr *servermanager.ServerManager) {
 	mux.HandleFunc("GET /api/"+kind+"/instances", func(w http.ResponseWriter, r *http.Request) {
 		if mgr == nil {
-			writeJSON(w, 200, []ServerInstanceInfo{})
+			writeJSON(w, 200, []servermanager.ServerInstanceInfo{})
 			return
 		}
 		writeJSON(w, 200, mgr.ListInstances())

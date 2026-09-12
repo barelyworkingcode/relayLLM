@@ -1,4 +1,4 @@
-package main
+package api
 
 // HTTP API coverage. Hits every route through TestServer. The
 // permission-timeout test exercises the Clock injection done in Phase 2.
@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"relayllm/internal/permission"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 	"strings"
 	"testing"
 	"time"
@@ -107,13 +109,13 @@ func TestAPI_PostMessageSync_ReturnsAccumulatedResponse(t *testing.T) {
 	fp := srv.SetFakeProvider()
 
 	fp.ScriptText("hello world")
-	fp.ScriptResult("end_turn", SessionStats{InputTokens: 5, OutputTokens: 2})
+	fp.ScriptResult("end_turn", types.SessionStats{InputTokens: 5, OutputTokens: 2})
 
 	sessionID := srv.CreateSession(nil)
 
 	var resp struct {
-		Response string       `json:"response"`
-		Stats    SessionStats `json:"stats"`
+		Response string             `json:"response"`
+		Stats    types.SessionStats `json:"stats"`
 	}
 	httpResp := srv.PostJSON("/api/sessions/"+sessionID+"/message",
 		map[string]interface{}{"text": "ping"}, &resp)
@@ -280,7 +282,7 @@ func TestAPI_PostPermission_TimesOut_DeterministicallyWithFakeClock(t *testing.T
 		if r.status != http.StatusOK {
 			t.Errorf("status: got %d, want 200", r.status)
 		}
-		var decision PermissionDecision
+		var decision permission.PermissionDecision
 		if err := json.Unmarshal(r.body, &decision); err != nil {
 			t.Fatalf("decode body %q: %v", string(r.body), err)
 		}
@@ -299,9 +301,9 @@ func TestAPI_PostPermission_AutoAllowsByPolicy(t *testing.T) {
 
 	// Inject a policy that auto-allows Read.
 	sess, _ := srv.Sessions.GetSession(sessionID)
-	sess.Policy = &PermissionPolicy{AllowedTools: []string{"Read"}}
+	sess.Policy = &types.PermissionPolicy{AllowedTools: []string{"Read"}}
 
-	var decision PermissionDecision
+	var decision permission.PermissionDecision
 	srv.PostJSON("/api/permission", map[string]interface{}{
 		"sessionId": sessionID,
 		"toolName":  "Read",
@@ -319,9 +321,9 @@ func TestAPI_PostPermission_AutoDeniesByPolicy(t *testing.T) {
 	sessionID := srv.CreateSession(nil)
 
 	sess, _ := srv.Sessions.GetSession(sessionID)
-	sess.Policy = &PermissionPolicy{DeniedTools: []string{"fs_bash"}}
+	sess.Policy = &types.PermissionPolicy{DeniedTools: []string{"fs_bash"}}
 
-	var decision PermissionDecision
+	var decision permission.PermissionDecision
 	srv.PostJSON("/api/permission", map[string]interface{}{
 		"sessionId": sessionID,
 		"toolName":  "fs_bash",

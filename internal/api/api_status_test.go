@@ -1,7 +1,9 @@
-package main
+package api
 
 import (
 	"encoding/json"
+	"relayllm/internal/servermanager"
+	"relayllm/internal/terminal"
 	"testing"
 )
 
@@ -15,11 +17,11 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	srv := NewTestServer(t, nil)
 
 	var got struct {
-		UptimeSeconds int64                `json:"uptimeSeconds"`
-		Sessions      int                  `json:"sessions"`
-		Instances     []ServerInstanceInfo `json:"instances"`
-		MlxInstances  []ServerInstanceInfo `json:"mlxInstances"`
-		Terminals     []TerminalSummary    `json:"terminals"`
+		UptimeSeconds int64                              `json:"uptimeSeconds"`
+		Sessions      int                                `json:"sessions"`
+		Instances     []servermanager.ServerInstanceInfo `json:"instances"`
+		MlxInstances  []servermanager.ServerInstanceInfo `json:"mlxInstances"`
+		Terminals     []terminal.TerminalSummary         `json:"terminals"`
 	}
 	resp := srv.GetJSON("/api/status", &got)
 	if resp.StatusCode != 200 {
@@ -66,7 +68,7 @@ func TestAPI_Status_MlxRoutes_NoManager(t *testing.T) {
 	srv := NewTestServer(t, nil)
 
 	// GET /api/mlx/instances should return empty array when no mlx manager.
-	var got []ServerInstanceInfo
+	var got []servermanager.ServerInstanceInfo
 	resp := srv.GetJSON("/api/mlx/instances", &got)
 	if resp.StatusCode != 200 {
 		t.Fatalf("mlx instances: got %d, want 200", resp.StatusCode)

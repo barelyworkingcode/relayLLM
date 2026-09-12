@@ -9,7 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"relayllm/internal/api"
 	"relayllm/internal/config"
+	"relayllm/internal/permission"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"strings"
 	"testing"
 	"time"
@@ -67,18 +71,18 @@ func skipIfOMLXUnavailable(t *testing.T) {
 // testServer wires up the full relayLLM stack in-process for integration testing.
 type testServer struct {
 	Server       *httptest.Server
-	SessionStore *SessionStore
-	Sessions     *SessionManager
-	Perms        *PermissionManager
+	SessionStore *session.SessionStore
+	Sessions     *session.SessionManager
+	Perms        *permission.PermissionManager
 }
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dataDir := t.TempDir()
 
-	sessionStore := NewSessionStore(dataDir + "/sessions")
-	perms := NewPermissionManager()
-	sessions := NewSessionManager(sessionStore, perms)
+	sessionStore := session.NewSessionStore(dataDir + "/sessions")
+	perms := permission.NewPermissionManager()
+	sessions := session.NewSessionManager(sessionStore, perms)
 	sessions.SetOpenAIConfig(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{
 			// Local dev oMLX server + personal local-server token (not a
@@ -90,15 +94,15 @@ func newTestServer(t *testing.T) *testServer {
 		},
 	})
 
-	templateStore := NewTemplateStore(dataDir + "/terminals/templates.json")
-	terminalMgr := NewTerminalManager(templateStore, "")
-	wsHub := NewWSHub(sessions, perms, terminalMgr)
+	templateStore := terminal.NewTemplateStore(dataDir + "/terminals/templates.json")
+	terminalMgr := terminal.NewTerminalManager(templateStore, "")
+	wsHub := api.NewWSHub(sessions, perms, terminalMgr)
 	sessions.SetEventSink(wsHub)
 	perms.SetEventSink(wsHub)
 
 	mux := http.NewServeMux()
-	RegisterSessionRoutes(mux, sessions)
-	RegisterPermissionRoutes(mux, perms, sessions)
+	api.RegisterSessionRoutes(mux, sessions)
+	api.RegisterPermissionRoutes(mux, perms, sessions)
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	server := httptest.NewServer(mux)

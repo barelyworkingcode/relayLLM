@@ -1,4 +1,4 @@
-package main
+package api
 
 // GET /api/status/detailed and GET /status — the diagnostic status
 // dashboard's JSON feed and its embedded HTML shell. Deliberately separate
@@ -21,7 +21,11 @@ import (
 	"net/http"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
+	"relayllm/internal/registry"
+	"relayllm/internal/router"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,13 +48,13 @@ var statusFileServer = http.FileServerFS(statusAssets)
 // section; a nil Registry yields an empty endpoints array; nil Managers,
 // Virtual, and Terminals behave the same way. Clock nil -> DefaultClock.
 type DetailedStatusDeps struct {
-	Sessions  *SessionManager
-	Terminals *TerminalManager
+	Sessions  *session.SessionManager
+	Terminals *terminal.TerminalManager
 	WSHub     *WSHub
-	Managers  []*ServerManager // dispatch priority order: llama, then mlx
-	Registry  *ProxyRegistry   // may be nil
+	Managers  []*servermanager.ServerManager // dispatch priority order: llama, then mlx
+	Registry  *registry.ProxyRegistry        // may be nil
 	Virtual   *config.VirtualLLMConfig
-	Router    *RelayRouter // may be nil (--router-port unset)
+	Router    *router.RelayRouter // may be nil (--router-port unset)
 	StartTime time.Time
 	Clock     clk.Clock
 }
@@ -140,7 +144,7 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 		}
 	}
 
-	var epStatuses []EndpointStatus
+	var epStatuses []registry.EndpointStatus
 	if deps.Registry != nil {
 		epStatuses = deps.Registry.Snapshot(ctx)
 	}
@@ -150,12 +154,12 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 	virtualRows := detailedVirtualRows(deps.Virtual, epStatuses, deps.Managers, activeByVirtualName, pinCounts)
 	endpointRows := detailedEndpointRows(epStatuses, activeByEndpointName, now)
 
-	budgets := []BudgetInfo{}
+	budgets := []servermanager.BudgetInfo{}
 	for _, mgr := range deps.Managers {
 		budgets = append(budgets, mgr.Budget())
 	}
 
-	terminals := []TerminalSummary{}
+	terminals := []terminal.TerminalSummary{}
 	if deps.Terminals != nil {
 		terminals = deps.Terminals.ListSummary()
 	}
@@ -252,7 +256,7 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 // apply to a given kind are simply omitted (not sent as null) per §3.
 // ---------------------------------------------------------------------------
 
-func detailedProxyRow(info ProxyConnInfo) map[string]any {
+func detailedProxyRow(info router.ProxyConnInfo) map[string]any {
 	kind := "http"
 	if info.Stream {
 		kind = "sse"
@@ -311,7 +315,7 @@ func detailedWSRow(info WSConnInfo) map[string]any {
 	}
 }
 
-func detailedRecentRequestRow(rr RecentRequestInfo) map[string]any {
+func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
 	return map[string]any{
 		"id":         strconv.FormatUint(rr.ID, 10),
 		"model":      rr.Model,
@@ -337,7 +341,7 @@ func detailedRecentRequestRow(rr RecentRequestInfo) map[string]any {
 // mutable fields, never both at once.
 // ---------------------------------------------------------------------------
 
-func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]int, now time.Time) (rows []map[string]any, processingCount int) {
+func detailedSessionRows(sessions *session.SessionManager, viewersBySession map[string]int, now time.Time) (rows []map[string]any, processingCount int) {
 	if sessions == nil {
 		return []map[string]any{}, 0
 	}
@@ -362,9 +366,9 @@ func detailedSessionRows(sessions *SessionManager, viewersBySession map[string]i
 		stats := s.Stats
 		s.Unlock()
 
-		state := connStateIdle
+		state := router.ConnStateIdle
 		if processing {
-			state = connStateActive
+			state = router.ConnStateActive
 			processingCount++
 		}
 
@@ -418,18 +422,18 @@ func secondsSinceRFC3339(s string, now time.Time) int {
 // detailedInstanceRow embeds ServerInstanceInfo (already json-tagged) rather
 // than copying its fields, adding only what this view needs on top.
 type detailedInstanceRow struct {
-	ServerInstanceInfo
+	servermanager.ServerInstanceInfo
 	Kind           string `json:"kind"`
 	ActiveRequests int    `json:"activeRequests"`
 }
 
 // detailedCatalogRow embeds ManagedModelInfo the same way.
 type detailedCatalogRow struct {
-	ManagedModelInfo
+	servermanager.ManagedModelInfo
 	Kind string `json:"kind"`
 }
 
-func detailedManagedRows(managers []*ServerManager, activeByManagedTarget map[string]int) ([]detailedInstanceRow, []detailedCatalogRow) {
+func detailedManagedRows(managers []*servermanager.ServerManager, activeByManagedTarget map[string]int) ([]detailedInstanceRow, []detailedCatalogRow) {
 	instances := []detailedInstanceRow{}
 	catalog := []detailedCatalogRow{}
 	for _, mgr := range managers {
@@ -466,18 +470,18 @@ func detailedManagedRows(managers []*ServerManager, activeByManagedTarget map[st
 // Virtual-model rows (models.virtual)
 // ---------------------------------------------------------------------------
 
-func detailedVirtualRows(virtual *config.VirtualLLMConfig, epStatuses []EndpointStatus, managers []*ServerManager, activeByVirtualName map[string]int, pinCounts map[string]map[string]int) []map[string]any {
+func detailedVirtualRows(virtual *config.VirtualLLMConfig, epStatuses []registry.EndpointStatus, managers []*servermanager.ServerManager, activeByVirtualName map[string]int, pinCounts map[string]map[string]int) []map[string]any {
 	rows := []map[string]any{}
 	if virtual == nil {
 		return rows
 	}
 	for i := range virtual.Models {
 		v := &virtual.Models[i]
-		candidates, freshCount := candidatesForVirtual(v, epStatuses, managers)
+		candidates, freshCount := router.CandidatesForVirtual(v, epStatuses, managers)
 
-		status := ModelStatusUnloaded
+		status := servermanager.ModelStatusUnloaded
 		if freshCount > 0 {
-			status = ModelStatusLoaded
+			status = servermanager.ModelStatusLoaded
 		}
 
 		candRows := make([]map[string]any, 0, len(candidates))
@@ -522,7 +526,7 @@ func detailedVirtualRows(virtual *config.VirtualLLMConfig, epStatuses []Endpoint
 // security_regression_test.go. Field name is "error", matching
 // ManagedModelInfo.Error's naming convention (RECONCILED_SCHEMA.md §6) — not
 // "lastError".
-func detailedEndpointRows(statuses []EndpointStatus, activeByEndpointName map[string]int, now time.Time) []map[string]any {
+func detailedEndpointRows(statuses []registry.EndpointStatus, activeByEndpointName map[string]int, now time.Time) []map[string]any {
 	rows := make([]map[string]any, 0, len(statuses))
 	for _, s := range statuses {
 		models := make([]string, 0, len(s.Models))

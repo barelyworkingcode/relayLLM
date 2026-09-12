@@ -1,4 +1,4 @@
-package main
+package api
 
 // Hermetic coverage for api_status_detailed.go: nil-dependency safety, the
 // top-level JSON shape, virtual-model candidate reachability/pin reporting,
@@ -9,14 +9,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"relayllm/internal/config"
+	"relayllm/internal/permission"
+	"relayllm/internal/registry"
 	"relayllm/internal/router"
+	"relayllm/internal/session"
+	"relayllm/internal/terminal"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestDetailedStatus_NilRouterAndRegistry(t *testing.T) {
-	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
+	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
 
 	deps := DetailedStatusDeps{
 		Sessions:  sessions,
@@ -77,9 +81,9 @@ func assertJSONArray(t *testing.T, name string, v any) {
 }
 
 func TestDetailedStatus_Shape(t *testing.T) {
-	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
-	perms := NewPermissionManager()
-	terminals := NewTerminalManager(NewTemplateStore(t.TempDir()), t.TempDir())
+	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
+	perms := permission.NewPermissionManager()
+	terminals := terminal.NewTerminalManager(terminal.NewTemplateStore(t.TempDir()), t.TempDir())
 	wsHub := NewWSHub(sessions, perms, terminals)
 
 	deps := DetailedStatusDeps{
@@ -121,9 +125,9 @@ func TestDetailedStatus_Shape(t *testing.T) {
 func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 	onlineEP := config.OpenAIEndpoint{Name: "online", BaseURL: "http://127.0.0.1:1/v1"}
 	offlineEP := config.OpenAIEndpoint{Name: "offline", BaseURL: "http://127.0.0.1:1/v1"}
-	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{onlineEP, offlineEP}})
-	registry.SetStatusForTest(onlineEP, true, UpstreamModel{ID: "m"})
-	registry.SetStatusForTest(offlineEP, false)
+	reg := registry.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{onlineEP, offlineEP}})
+	reg.SetStatusForTest(onlineEP, true, registry.UpstreamModel{ID: "m"})
+	reg.SetStatusForTest(offlineEP, false)
 
 	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vMixed",
@@ -133,17 +137,17 @@ func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 		},
 	}}}
 
-	rtr := NewRelayRouter(":0", nil, registry, virtual)
+	rtr := router.NewRelayRouter(":0", nil, reg, virtual)
 	// Record a pin directly on the affinity store via the test seam — this is
 	// exactly what routeVirtual does on a successful response (see
 	// relay_router_virtual.go), without needing a live HTTP round trip here.
 	onlineIdentity := router.EndpointTargetIdentity(onlineEP, "m")
 	rtr.RecordAffinityForTest("vMixed", "conv-1", onlineIdentity)
 
-	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
+	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
 	deps := DetailedStatusDeps{
 		Sessions:  sessions,
-		Registry:  registry,
+		Registry:  reg,
 		Virtual:   virtual,
 		Router:    rtr,
 		StartTime: time.Now(),
