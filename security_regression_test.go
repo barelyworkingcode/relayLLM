@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"relayllm/internal/sshhost"
 )
 
 // Security regression suite. One file = one audit surface. Every test here
@@ -206,7 +208,7 @@ func TestSec_HostExec_ArgvNeverContainsHookOrRelaySecrets(t *testing.T) {
 	// The remote command is base64-encoded inside argv, so decode it before
 	// grepping for secrets — a plaintext substring check on argv itself would
 	// only ever see the encoded form and always pass, vacuously.
-	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	joined := strings.Join(argv[:len(argv)-1], " ") + " " + decoded
 
 	for _, secret := range []string{"hook.sock", "RELAY_LLM_HOOK_SOCKET", "RELAY_LLM_HOOK_TOKEN", "RELAY_PROJECT_TOKEN", "RELAY_TOKEN", "RELAY_SERVICE_TOKEN"} {
@@ -227,7 +229,7 @@ func TestSec_HostExec_EnvIsSessionIDOnly(t *testing.T) {
 	// The env is baked into the remote command's `exec env 'K'='v' …` clause;
 	// assert the decoded script carries exactly one env assignment.
 	remote := argv[len(argv)-1]
-	decoded := RemoteShellCommandDecodedForTest(remote)
+	decoded := sshhost.RemoteShellCommandDecodedForTest(remote)
 	count := strings.Count(decoded, "'='")
 	// buildRemoteScript never quotes '=' itself; each K=V pair renders as
 	// 'KEY'='VALUE', so a single assignment produces exactly one such pair.
@@ -262,7 +264,7 @@ func TestSec_HostTerminalExec_ArgvNeverContainsRelaySecrets(t *testing.T) {
 	spec := hostTerminalSpec()
 	for _, tmplID := range []string{"shell", "claude", "npm-test"} {
 		_, argv := buildHostTerminalExec(spec, tmplID, "/proj", "npm", []string{"test"})
-		decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+		decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 		for _, secret := range []string{"RELAY_PROJECT_TOKEN", "RELAY_TOKEN", "RELAY_SERVICE_TOKEN", "RELAY_LLM_HOOK"} {
 			if strings.Contains(decoded, secret) {
 				t.Errorf("tmplID=%q host terminal script leaked %q: %s", tmplID, secret, decoded)

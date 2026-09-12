@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	clk "relayllm/internal/clock"
 )
 
 const supportBearerToken = "test-bearer-token"
@@ -38,7 +40,7 @@ type TestServer struct {
 // TestServerOptions controls how the server is wired.
 type TestServerOptions struct {
 	// Clock for permission-timeout (and any future Clock-aware code). Default: DefaultClock.
-	Clock Clock
+	Clock clk.Clock
 	// ProviderFactory injected into SessionManager. If non-nil, replaces the
 	// real switch on session.ProviderType. Default: nil (i.e. real providers,
 	// which most tests will not want).
@@ -60,7 +62,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 		opts = &TestServerOptions{}
 	}
 	if opts.Clock == nil {
-		opts.Clock = DefaultClock
+		opts.Clock = clk.DefaultClock
 	}
 
 	dataDir := t.TempDir()

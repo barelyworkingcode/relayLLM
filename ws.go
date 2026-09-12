@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	clk "relayllm/internal/clock"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -31,7 +32,7 @@ type WSHub struct {
 	// Defaults to DefaultClock; SetClock is a setter (mirroring
 	// PermissionManager.SetClock) rather than a constructor parameter, so the
 	// three existing NewWSHub call sites stay unchanged.
-	clock Clock
+	clock clk.Clock
 }
 
 // wsConn wraps one live WebSocket connection. id/remoteAddr/connectedAt are
@@ -45,7 +46,7 @@ type wsConn struct {
 	id          uint64
 	remoteAddr  string
 	connectedAt time.Time
-	clock       Clock
+	clock       clk.Clock
 
 	lastActivityNano atomic.Int64
 	bytesOut         atomic.Int64
@@ -60,9 +61,9 @@ var wsConnSeq atomic.Uint64
 // connect time, so a connection that has neither sent nor received anything
 // yet still reports a sane (zero) idle duration rather than one measured from
 // the Unix epoch.
-func newWSConn(conn *websocket.Conn, remoteAddr string, clock Clock) *wsConn {
+func newWSConn(conn *websocket.Conn, remoteAddr string, clock clk.Clock) *wsConn {
 	if clock == nil {
-		clock = DefaultClock
+		clock = clk.DefaultClock
 	}
 	now := clock.Now()
 	wc := &wsConn{
@@ -167,16 +168,16 @@ func NewWSHub(sessions *SessionManager, perms *PermissionManager, terminals *Ter
 		sessions:  sessions,
 		perms:     perms,
 		terminals: terminals,
-		clock:     DefaultClock,
+		clock:     clk.DefaultClock,
 	}
 }
 
 // SetClock installs the clock used for connection activity timestamps.
 // Mirrors PermissionManager.SetClock — a setter rather than a constructor
 // parameter so the three existing NewWSHub call sites stay unchanged.
-func (h *WSHub) SetClock(c Clock) {
+func (h *WSHub) SetClock(c clk.Clock) {
 	if c == nil {
-		c = DefaultClock
+		c = clk.DefaultClock
 	}
 	h.clock = c
 }

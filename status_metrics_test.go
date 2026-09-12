@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	clk "relayllm/internal/clock"
 )
 
 // ---------------------------------------------------------------------------
@@ -71,7 +73,7 @@ func TestRollingRate_NoWritesReportsZero(t *testing.T) {
 // ProxyMetrics lifecycle
 // ---------------------------------------------------------------------------
 
-func newTestProxyMetrics(clock Clock) *ProxyMetrics {
+func newTestProxyMetrics(clock clk.Clock) *ProxyMetrics {
 	return NewProxyMetrics(clock)
 }
 

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"relayllm/internal/sshhost"
 )
 
 // ---------------------------------------------------------------------------
@@ -37,7 +39,7 @@ func TestBuildHostTerminalExec_ArgvPrefixAndFlag(t *testing.T) {
 func TestBuildHostTerminalExec_ShellTemplate(t *testing.T) {
 	for _, tmplID := range []string{"", "shell"} {
 		_, argv := buildHostTerminalExec(hostTerminalSpec(), tmplID, "/proj", "", nil)
-		decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+		decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 		want := `cd '/proj' && exec env 'TERM'='xterm-256color' "$SHELL" -l`
 		if decoded != want {
 			t.Errorf("tmplID=%q decoded = %q, want %q", tmplID, decoded, want)
@@ -47,7 +49,7 @@ func TestBuildHostTerminalExec_ShellTemplate(t *testing.T) {
 
 func TestBuildHostTerminalExec_ShellTemplate_NoDirLandsInHostHome(t *testing.T) {
 	_, argv := buildHostTerminalExec(hostTerminalSpec(), "shell", "", "", nil)
-	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	if strings.HasPrefix(decoded, "cd ") {
 		t.Errorf("empty directory must omit cd (lands in host's login home), got %q", decoded)
 	}
@@ -56,7 +58,7 @@ func TestBuildHostTerminalExec_ShellTemplate_NoDirLandsInHostHome(t *testing.T) 
 func TestBuildHostTerminalExec_ClaudeTemplate(t *testing.T) {
 	spec := hostTerminalSpec()
 	_, argv := buildHostTerminalExec(spec, "claude", "/proj", "claude", []string{"--resume", "abc"})
-	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	want := `cd '/proj' && exec env 'TERM'='xterm-256color' '/opt/homebrew/bin/claude' '--resume' 'abc'`
 	if decoded != want {
 		t.Errorf("decoded = %q, want %q", decoded, want)
@@ -69,7 +71,7 @@ func TestBuildHostTerminalExec_ClaudeTemplate_UsesHostClaudePathNotCommand(t *te
 	// the claude branch must always use spec.ClaudePath, never the template's
 	// own (locally-resolved) command string.
 	_, argv := buildHostTerminalExec(spec, "claude", "/proj", "/usr/local/bin/claude-wrong", nil)
-	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	if !strings.Contains(decoded, "/opt/homebrew/bin/claude") {
 		t.Errorf("decoded script must use host.ClaudePath, got %q", decoded)
 	}
@@ -80,7 +82,7 @@ func TestBuildHostTerminalExec_ClaudeTemplate_UsesHostClaudePathNotCommand(t *te
 
 func TestBuildHostTerminalExec_OtherTemplate_RunsThroughInteractiveShell(t *testing.T) {
 	_, argv := buildHostTerminalExec(hostTerminalSpec(), "npm-test", "/proj", "npm", []string{"test"})
-	decoded := RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	if !strings.Contains(decoded, `-lic`) {
 		t.Errorf("other-template branch must invoke the login shell with -lic, got %q", decoded)
 	}

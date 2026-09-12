@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	clk "relayllm/internal/clock"
 )
 
 // PermissionPolicy is the per-session Claude permission policy. Sourced from
@@ -81,19 +83,19 @@ type PermissionManager struct {
 	mu      sync.Mutex
 	pending map[string]pendingPermission
 	sink    EventSink
-	clock   Clock
+	clock   clk.Clock
 }
 
 func NewPermissionManager() *PermissionManager {
 	return &PermissionManager{
 		pending: make(map[string]pendingPermission),
-		clock:   DefaultClock,
+		clock:   clk.DefaultClock,
 	}
 }
 
 // SetClock swaps the clock used for permission timeouts. Tests use this to
 // drive deterministic timeouts; production never calls it.
-func (m *PermissionManager) SetClock(c Clock) {
+func (m *PermissionManager) SetClock(c clk.Clock) {
 	m.clock = c
 }
 

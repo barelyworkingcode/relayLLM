@@ -19,6 +19,7 @@ import (
 	"context"
 	"embed"
 	"net/http"
+	clk "relayllm/internal/clock"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ type DetailedStatusDeps struct {
 	Virtual   *VirtualLLMConfig
 	Router    *RelayRouter // may be nil (--router-port unset)
 	StartTime time.Time
-	Clock     Clock
+	Clock     clk.Clock
 }
 
 // RegisterDetailedStatusRoutes wires GET /api/status/detailed and the
@@ -99,7 +100,7 @@ func serveStatusHTML(w http.ResponseWriter, r *http.Request) {
 func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[string]any {
 	clock := deps.Clock
 	if clock == nil {
-		clock = DefaultClock
+		clock = clk.DefaultClock
 	}
 	now := clock.Now()
 

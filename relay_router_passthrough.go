@@ -34,6 +34,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"relayllm/internal/netutil"
 )
 
 // PassthroughConfig is one entry of settings.json's router.passthrough map.
@@ -94,7 +96,7 @@ func newPassthroughProxy(name string, cfg PassthroughConfig) (*httputil.ReverseP
 	// The client's real credential rides every request. Sending it in
 	// plaintext off the box would undo the TLS the client used before it was
 	// pointed here.
-	if upstream.Scheme == "http" && !isLoopbackHost(upstream.Hostname()) {
+	if upstream.Scheme == "http" && !netutil.IsLoopbackHost(upstream.Hostname()) {
 		return nil, nil, fmt.Errorf("upstream %q must use https (only a loopback upstream may be plain http)", cfg.Upstream)
 	}
 

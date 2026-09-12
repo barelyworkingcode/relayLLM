@@ -1,4 +1,4 @@
-package main
+package netutil
 
 import (
 	"reflect"
@@ -27,9 +27,9 @@ func TestParseBindList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseBindList(tc.in)
+			got := ParseBindList(tc.in)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("parseBindList(%q) = %v, want %v", tc.in, got, tc.want)
+				t.Errorf("ParseBindList(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -56,9 +56,9 @@ func TestListenAddrs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := listenAddrs(tc.binds, tc.port)
+			got := ListenAddrs(tc.binds, tc.port)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("listenAddrs(%v, %q) = %v, want %v", tc.binds, tc.port, got, tc.want)
+				t.Errorf("ListenAddrs(%v, %q) = %v, want %v", tc.binds, tc.port, got, tc.want)
 			}
 		})
 	}
@@ -82,9 +82,9 @@ func TestFirstNonLoopbackBind(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotOK := firstNonLoopbackBind(tc.binds)
+			gotHost, gotOK := FirstNonLoopbackBind(tc.binds)
 			if gotHost != tc.want || gotOK != tc.wantOK {
-				t.Errorf("firstNonLoopbackBind(%v) = (%q, %t), want (%q, %t)", tc.binds, gotHost, gotOK, tc.want, tc.wantOK)
+				t.Errorf("FirstNonLoopbackBind(%v) = (%q, %t), want (%q, %t)", tc.binds, gotHost, gotOK, tc.want, tc.wantOK)
 			}
 		})
 	}
@@ -95,14 +95,14 @@ func TestFirstNonLoopbackBind(t *testing.T) {
 // not take down an earlier, already-bound listener, and must not itself be
 // an error — only a total failure (every address rejected) is.
 func TestListenAll_PartialFailureSkipsBadAddressAndKeepsTheRest(t *testing.T) {
-	seed, err := listenAll([]string{"127.0.0.1:0"}, "test")
+	seed, err := ListenAll([]string{"127.0.0.1:0"}, "test")
 	if err != nil {
 		t.Fatalf("seed listener: %v", err)
 	}
 	busyAddr := seed[0].Addr().String()
 	defer seed[0].Close()
 
-	lns, err := listenAll([]string{"127.0.0.1:0", busyAddr}, "test")
+	lns, err := ListenAll([]string{"127.0.0.1:0", busyAddr}, "test")
 	if err != nil {
 		t.Fatalf("listenAll with one bad address: %v", err)
 	}
@@ -123,21 +123,21 @@ func TestListenAll_PartialFailureSkipsBadAddressAndKeepsTheRest(t *testing.T) {
 // failure is not enough for: nothing at all got bound, so the caller must
 // see an error rather than a healthy-looking empty listener set.
 func TestListenAll_EveryAddressFailsIsAnError(t *testing.T) {
-	seed, err := listenAll([]string{"127.0.0.1:0"}, "test")
+	seed, err := ListenAll([]string{"127.0.0.1:0"}, "test")
 	if err != nil {
 		t.Fatalf("seed listener: %v", err)
 	}
 	busyAddr := seed[0].Addr().String()
 	defer seed[0].Close()
 
-	_, err = listenAll([]string{busyAddr, busyAddr}, "test")
+	_, err = ListenAll([]string{busyAddr, busyAddr}, "test")
 	if err == nil {
 		t.Fatal("expected an error when every requested address fails to bind")
 	}
 }
 
 func TestListenAll_AllSucceed(t *testing.T) {
-	lns, err := listenAll([]string{"127.0.0.1:0", "127.0.0.1:0"}, "test")
+	lns, err := ListenAll([]string{"127.0.0.1:0", "127.0.0.1:0"}, "test")
 	if err != nil {
 		t.Fatalf("listenAll: %v", err)
 	}
