@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"errors"
@@ -141,16 +141,16 @@ func (l *terminalLogger) Close() {
 	}
 }
 
-// errTerminalLogNotFound is returned when neither log file exists for the
+// ErrTerminalLogNotFound is returned when neither log file exists for the
 // requested terminal ID. The HTTP handler maps this to 404; other errors
 // (validation, disk I/O) become 500 / 400.
-var errTerminalLogNotFound = errors.New("terminal log not found")
+var ErrTerminalLogNotFound = errors.New("terminal log not found")
 
 // readTerminalLog buffers the stitched head+tail into a byte slice. Used
-// only by tests — production callers stream via openTerminalLogReaders +
+// only by tests — production callers stream via OpenTerminalLogReaders +
 // io.Copy to avoid loading the whole 1 MB cap into memory.
 func readTerminalLog(dir, id string) ([]byte, error) {
-	head, tail, err := openTerminalLogReaders(dir, id)
+	head, tail, err := OpenTerminalLogReaders(dir, id)
 	if err != nil {
 		return nil, err
 	}
@@ -169,11 +169,11 @@ func readTerminalLog(dir, id string) ([]byte, error) {
 	return out, nil
 }
 
-// openTerminalLogReaders returns open file handles for the head and tail
+// OpenTerminalLogReaders returns open file handles for the head and tail
 // log files of a terminal. Either may be nil if that file doesn't exist.
-// Returns errTerminalLogNotFound if neither exists. The caller owns
+// Returns ErrTerminalLogNotFound if neither exists. The caller owns
 // Close() on the returned handles.
-func openTerminalLogReaders(dir, id string) (head, tail *os.File, err error) {
+func OpenTerminalLogReaders(dir, id string) (head, tail *os.File, err error) {
 	if !isValidTerminalID(id) {
 		return nil, nil, fmt.Errorf("invalid terminal id")
 	}
@@ -189,12 +189,12 @@ func openTerminalLogReaders(dir, id string) (head, tail *os.File, err error) {
 		return nil, nil, tailErr
 	}
 	if head == nil && tail == nil {
-		return nil, nil, errTerminalLogNotFound
+		return nil, nil, ErrTerminalLogNotFound
 	}
 	return head, tail, nil
 }
 
-// sweepTerminalLogs deletes per-session log files older than maxAge. After
+// SweepTerminalLogs deletes per-session log files older than maxAge. After
 // that pass, if the directory's total size still exceeds maxTotalBytes,
 // removes the oldest remaining files until the cap is satisfied. Returns
 // the number of files removed; errors on individual files are logged at
@@ -203,7 +203,7 @@ func openTerminalLogReaders(dir, id string) (head, tail *os.File, err error) {
 // Time-based eviction is the primary policy (30 days is plenty for
 // "I want to see what that scheduled task did last week"); the byte cap is
 // a safety net for hosts that churn through many short sessions.
-func sweepTerminalLogs(dir string, maxAge time.Duration, maxTotalBytes int64) (removed int, err error) {
+func SweepTerminalLogs(dir string, maxAge time.Duration, maxTotalBytes int64) (removed int, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

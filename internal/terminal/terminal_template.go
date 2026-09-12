@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"fmt"
@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"relayllm/internal/config"
+	"relayllm/internal/spawn"
 )
 
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
@@ -32,7 +33,7 @@ func ResolveTemplateCommand(t config.TerminalTemplate) string {
 		return resolveShell()
 	}
 	if filepath.Base(t.Command) == "claude" {
-		return resolveClaudePath()
+		return spawn.ResolveClaudePath()
 	}
 	if p, err := exec.LookPath(t.Command); err == nil {
 		return p

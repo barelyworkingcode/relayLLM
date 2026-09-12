@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"fmt"
@@ -15,7 +15,10 @@ import (
 	"github.com/creack/pty"
 
 	"relayllm/internal/config"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/spawn"
 	"relayllm/internal/sshhost"
+	"relayllm/internal/types"
 )
 
 const (
@@ -48,7 +51,7 @@ type TerminalSession struct {
 	// refreshed mid-life (a terminal's process is short-lived relative to a
 	// probe update, and re-execing an interactive shell mid-session makes no
 	// sense the way respawning a headless CLI does).
-	Host *HostSpec `json:"host,omitempty"`
+	Host *types.HostSpec `json:"host,omitempty"`
 
 	// Additional argv tokens appended after the template's resolved Args.
 	// Same ${PROJECT_PATH}/${RELAY_TOKEN} substitution applies. Used by
@@ -72,7 +75,7 @@ type TerminalSession struct {
 	// Pi project-overlay hooks (set by TerminalManager.SetPiOverlay). Only
 	// consulted when the template runs `pi`; non-pi templates ignore them.
 	piConfig        *config.PiConfig
-	overlayInputsFn func() PiOverlayInputs
+	overlayInputsFn func() pioverlay.PiOverlayInputs
 
 	// Idle timeout: kills terminal after no viewers for this duration.
 	idleTimeout time.Duration
@@ -164,10 +167,10 @@ func (s *TerminalSession) buildLocalCmd(tmpl config.TerminalTemplate) (*exec.Cmd
 
 	cmd := exec.Command(command, args...)
 	cmd.Dir = s.Directory
-	cmd.Env = ensurePath(childBaseEnv())
+	cmd.Env = spawn.EnsurePath(spawn.ChildBaseEnv())
 	// Set TERM and COLORTERM for full 24-bit true color support.
-	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
-	cmd.Env = setEnv(cmd.Env, "COLORTERM", "truecolor")
+	cmd.Env = spawn.SetEnv(cmd.Env, "TERM", "xterm-256color")
+	cmd.Env = spawn.SetEnv(cmd.Env, "COLORTERM", "truecolor")
 
 	for k, v := range tmpl.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, subs.Expand(v)))
@@ -175,8 +178,8 @@ func (s *TerminalSession) buildLocalCmd(tmpl config.TerminalTemplate) (*exec.Cmd
 
 	// Project-scoped token (empty for ad-hoc terminals); dual-written under the
 	// legacy RELAY_TOKEN name for skills that still reference it.
-	cmd.Env = setProjectTokenEnv(cmd.Env, subs.RelayToken)
-	cmd.Env = applyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
+	cmd.Env = spawn.SetProjectTokenEnv(cmd.Env, subs.RelayToken)
+	cmd.Env = spawn.ApplyEnvPassthrough(cmd.Env, tmpl.EnvPassthrough)
 
 	// Pi project-overlay: when the template runs `pi` in a relay-managed
 	// project and the overlay is enabled in config.PiConfig, materialize
@@ -185,7 +188,7 @@ func (s *TerminalSession) buildLocalCmd(tmpl config.TerminalTemplate) (*exec.Cmd
 	// pi sessions see the same models/skills inside the project.
 	if isPiCommand(command) && s.piConfig != nil && s.overlayInputsFn != nil {
 		var err error
-		cmd.Env, err = applyPiOverlayEnv(cmd.Env, s.Directory, s.piConfig, s.overlayInputsFn())
+		cmd.Env, err = pioverlay.ApplyPiOverlayEnv(cmd.Env, s.Directory, s.piConfig, s.overlayInputsFn())
 		if err != nil {
 			return nil, fmt.Errorf("terminal pi overlay: %w", err)
 		}
@@ -212,7 +215,7 @@ func (s *TerminalSession) buildHostCmd(tmpl config.TerminalTemplate) (*exec.Cmd,
 
 	name, argv := buildHostTerminalExec(host, tmpl.ID, s.Directory, tmpl.Command, args)
 	cmd := exec.Command(name, argv...)
-	cmd.Env = childBaseEnv()
+	cmd.Env = spawn.ChildBaseEnv()
 	return cmd, nil
 }
 
@@ -230,7 +233,7 @@ func (s *TerminalSession) buildHostCmd(tmpl config.TerminalTemplate) (*exec.Cmd,
 // rather than RemoteCommand's argv-env mechanism, because `"$SHELL"` must
 // reach the host unquoted (decision 8) for the host's own shell to expand it,
 // and RemoteCommand always single-quotes every argv token.
-func buildHostTerminalExec(spec *HostSpec, tmplID, dir, command string, args []string) (name string, argv []string) {
+func buildHostTerminalExec(spec *types.HostSpec, tmplID, dir, command string, args []string) (name string, argv []string) {
 	var remote string
 	switch tmplID {
 	case "", "shell":
@@ -483,12 +486,12 @@ func isPiCommand(command string) bool {
 	return command != "" && filepath.Base(command) == "pi"
 }
 
-// resolveTemplateSubs is a thin adapter that builds a RelayManagedSpec from
+// resolveTemplateSubs is a thin adapter that builds a spawn.RelayManagedSpec from
 // a config.TerminalTemplate and delegates to the generic resolver. A non-empty
 // projectID makes the terminal project-scoped (gets a token, regardless of the
 // template's UseRelayToken flag). See relay_spawn.go.
-func resolveTemplateSubs(tmpl config.TerminalTemplate, directory, projectID string) (SpawnSubs, error) {
-	return RelayManagedSpec{
+func resolveTemplateSubs(tmpl config.TerminalTemplate, directory, projectID string) (spawn.SpawnSubs, error) {
+	return spawn.RelayManagedSpec{
 		ProjectID:     projectID,
 		Directory:     directory,
 		UseRelayToken: tmpl.UseRelayToken,

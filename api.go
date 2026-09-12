@@ -306,9 +306,9 @@ func RegisterTerminalRoutes(mux *http.ServeMux, templates *TemplateStore, termin
 			http.Error(w, "log persistence disabled", http.StatusNotFound)
 			return
 		}
-		head, tail, err := openTerminalLogReaders(dir, id)
+		head, tail, err := OpenTerminalLogReaders(dir, id)
 		if err != nil {
-			if errors.Is(err, errTerminalLogNotFound) {
+			if errors.Is(err, ErrTerminalLogNotFound) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}

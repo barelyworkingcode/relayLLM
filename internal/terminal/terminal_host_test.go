@@ -1,19 +1,21 @@
-package main
+package terminal
 
 import (
 	"strings"
 	"testing"
 
+	"relayllm/internal/relay"
 	"relayllm/internal/sshhost"
 	"relayllm/internal/testutil"
+	"relayllm/internal/types"
 )
 
 // ---------------------------------------------------------------------------
 // buildHostTerminalExec (../relay/docs/ssh-hosts.md decision 5/8)
 // ---------------------------------------------------------------------------
 
-func hostTerminalSpec() *HostSpec {
-	return &HostSpec{
+func hostTerminalSpec() *types.HostSpec {
+	return &types.HostSpec{
 		ID:         "h1",
 		Name:       "devbox",
 		SSHArgv:    []string{"ssh", "-o", "BatchMode=yes", "admin@devbox"},
@@ -100,7 +102,7 @@ func TestBuildHostTerminalExec_OtherTemplate_RunsThroughInteractiveShell(t *test
 
 func TestResolveTerminalHost_ResolvesFromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
-	host := &HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
+	host := &types.HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	fb.SetHostPtyEnv("/home/admin/proj", host)
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
@@ -112,7 +114,7 @@ func TestResolveTerminalHost_ResolvesFromBridge(t *testing.T) {
 
 func TestResolveTerminalHost_NoProjectIDNeverContactsBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
-	fb.SetHostPtyEnv("/home/admin/proj", &HostSpec{ID: "h1", Name: "devbox"})
+	fb.SetHostPtyEnv("/home/admin/proj", &types.HostSpec{ID: "h1", Name: "devbox"})
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
 
 	if got := resolveTerminalHost("", "/tmp/scratch"); got != nil {
@@ -124,8 +126,8 @@ func TestResolveTerminalHost_NoProjectIDNeverContactsBridge(t *testing.T) {
 }
 
 func TestResolveTerminalHost_StandaloneReturnsNil(t *testing.T) {
-	t.Setenv(envServiceToken, "")
-	t.Setenv(envServiceTokenLegacy, "")
+	t.Setenv(relay.EnvServiceToken, "")
+	t.Setenv(relay.EnvServiceTokenLegacy, "")
 	if got := resolveTerminalHost("proj-1", "/tmp/proj"); got != nil {
 		t.Errorf("resolveTerminalHost = %+v, want nil when standalone", got)
 	}
