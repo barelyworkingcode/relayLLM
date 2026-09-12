@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"bytes"
@@ -133,7 +133,7 @@ func TestSweepTerminalLogs_RemovesOldFiles(t *testing.T) {
 	makeLog("bbbbbbbb-bbbb-cccc-dddd-222222222222.tail.log", 1*time.Hour, 200)
 	makeLog("cccccccc-bbbb-cccc-dddd-333333333333.tail.log", 30*time.Minute, 2048)
 
-	removed, err := sweepTerminalLogs(dir, 7*24*time.Hour, 1024)
+	removed, err := SweepTerminalLogs(dir, 7*24*time.Hour, 1024)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestSweepTerminalLogs_IgnoresUnrelatedFiles(t *testing.T) {
 	mt := time.Now().Add(-365 * 24 * time.Hour)
 	_ = os.Chtimes(stranger, mt, mt)
 
-	if _, err := sweepTerminalLogs(dir, 7*24*time.Hour, 0); err != nil {
+	if _, err := SweepTerminalLogs(dir, 7*24*time.Hour, 0); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if _, err := os.Stat(stranger); err != nil {

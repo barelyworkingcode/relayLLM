@@ -148,7 +148,7 @@ func main() {
 			sweepInterval = 24 * time.Hour
 		)
 		for {
-			if removed, err := sweepTerminalLogs(terminalLogDir, sweepAge, sweepMaxBytes); err != nil {
+			if removed, err := SweepTerminalLogs(terminalLogDir, sweepAge, sweepMaxBytes); err != nil {
 				slog.Warn("terminal log sweep failed", "error", err)
 			} else if removed > 0 {
 				slog.Info("terminal log sweep", "removed", removed)

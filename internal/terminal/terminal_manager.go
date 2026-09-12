@@ -1,4 +1,4 @@
-package main
+package terminal
 
 import (
 	"fmt"
@@ -11,6 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"relayllm/internal/config"
+	"relayllm/internal/pioverlay"
+	"relayllm/internal/relay"
+	"relayllm/internal/types"
 )
 
 // TerminalManager manages terminal session lifecycle.
@@ -28,7 +31,7 @@ type TerminalManager struct {
 	// these only when the template carries a RelayManagedSpec; non-pi or
 	// non-relay-managed templates spawn exactly as before.
 	piConfig        *config.PiConfig
-	overlayInputsFn func() PiOverlayInputs
+	overlayInputsFn func() pioverlay.PiOverlayInputs
 
 	onOutput func(terminalID string, data []byte)
 	onExit   func(terminalID string, exitCode int)
@@ -54,7 +57,7 @@ func (m *TerminalManager) LogDir() string {
 // PTY templates that run `pi` against a relay-managed directory get the same
 // per-project models.json/settings.json/auth.json the LLM provider uses. Pass
 // (nil, nil) to disable the overlay for PTY sessions.
-func (m *TerminalManager) SetPiOverlay(cfg *config.PiConfig, inputsFn func() PiOverlayInputs) {
+func (m *TerminalManager) SetPiOverlay(cfg *config.PiConfig, inputsFn func() pioverlay.PiOverlayInputs) {
 	m.piConfig = cfg
 	m.overlayInputsFn = inputsFn
 }
@@ -83,7 +86,7 @@ func (m *TerminalManager) Create(templateID, name, directory, projectID string, 
 		if projectID == "" {
 			return nil, fmt.Errorf("terminal template not found: %s", templateID)
 		}
-		pt, err := resolveRelayProjectTemplate(projectID, templateID)
+		pt, err := relay.ResolveProjectTemplate(projectID, templateID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve project template %s: %w", templateID, err)
 		}
@@ -285,11 +288,11 @@ func (m *TerminalManager) StopAll() {
 // ad-hoc terminal (no projectID) never contacts the bridge, and any bridge
 // failure degrades to "not a host" rather than blocking terminal creation on
 // relay's availability.
-func resolveTerminalHost(projectID, directory string) *HostSpec {
-	if projectID == "" || serviceToken() == "" {
+func resolveTerminalHost(projectID, directory string) *types.HostSpec {
+	if projectID == "" || relay.ServiceToken() == "" {
 		return nil
 	}
-	resp, err := resolveRelayPtyEnv(RelayPtyEnvRequest{ProjectID: projectID, Directory: directory})
+	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: projectID, Directory: directory})
 	if err != nil {
 		slog.Warn("resolve host for terminal create failed", "project", projectID, "error", err)
 		return nil
