@@ -1,4 +1,4 @@
-package main
+package router
 
 import (
 	"bufio"
@@ -227,7 +227,7 @@ func TestPassthrough_WebSocketUpgradeRelayedAndMetered(t *testing.T) {
 	if row.Status != http.StatusSwitchingProtocols || row.TargetKind != "passthrough" || row.Target != "chatgpt" {
 		t.Errorf("row status=%d kind=%q target=%q, want 101 passthrough chatgpt", row.Status, row.TargetKind, row.Target)
 	}
-	if row.State == connStateStalled || row.State == connStateQuiet {
+	if row.State == ConnStateStalled || row.State == ConnStateQuiet {
 		t.Errorf("row state = %q, want active or idle", row.State)
 	}
 

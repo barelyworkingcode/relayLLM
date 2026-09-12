@@ -1,4 +1,4 @@
-package main
+package router
 
 import (
 	"context"
@@ -10,13 +10,23 @@ import (
 	"strings"
 
 	"relayllm/internal/config"
+	"relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 )
 
-type resolvedVirtualTarget struct {
+type ResolvedVirtualTarget struct {
 	endpoint   config.OpenAIEndpoint
 	upstreamID string
-	manager    *ServerManager
+	manager    *servermanager.ServerManager
 	alias      string
+}
+
+// Manager returns the managed-server manager for an alias target, or nil for
+// an endpoint target. Exported for callers outside this package (the status
+// dashboard) that need to distinguish the two without reaching into the
+// unexported field directly.
+func (t ResolvedVirtualTarget) Manager() *servermanager.ServerManager {
+	return t.manager
 }
 
 // label renders the target for a human-readable failure message. Includes
@@ -24,7 +34,7 @@ type resolvedVirtualTarget struct {
 // endpoint with different models (a big-then-small fallback pair) must be
 // distinguishable in a 503's per-target failure list, or an operator reading
 // it can't tell which one actually failed.
-func (t resolvedVirtualTarget) label() string {
+func (t ResolvedVirtualTarget) Label() string {
 	if t.manager != nil {
 		return fmt.Sprintf("alias %q", t.alias)
 	}
@@ -47,15 +57,23 @@ func (t resolvedVirtualTarget) label() string {
 // mid-conversation switch virtualAffinityStore exists to prevent, and here
 // it would never even self-correct. Each part is escaped so endpoint "a" model
 // "b/c" and endpoint "a/b" model "c" can't collide on the "/" join.
-func (t resolvedVirtualTarget) identity() string {
+func (t ResolvedVirtualTarget) Identity() string {
 	if t.manager != nil {
 		return "alias:" + t.alias
 	}
 	return "endpoint:" + escapeIdentityPart(t.endpoint.Name) + "/" + escapeIdentityPart(t.upstreamID)
 }
 
+// EndpointTargetIdentity computes the Identity() string for an endpoint
+// target without needing to construct a ResolvedVirtualTarget (whose fields
+// are unexported) — a test-only seam for callers outside this package that
+// need to assert against a specific target's pin identity.
+func EndpointTargetIdentity(ep config.OpenAIEndpoint, upstreamID string) string {
+	return ResolvedVirtualTarget{endpoint: ep, upstreamID: upstreamID}.Identity()
+}
+
 // escapeIdentityPart escapes "\" and "/" in one component of a
-// resolvedVirtualTarget identity, so joining endpoint-name and
+// ResolvedVirtualTarget identity, so joining endpoint-name and
 // upstream-model-id with "/" can't produce the same string two different
 // ways.
 func escapeIdentityPart(s string) string {
@@ -68,7 +86,7 @@ func escapeIdentityPart(s string) string {
 // model, in the order handleProxy should attempt them. Returns nil when name
 // isn't a configured virtual at all — callers distinguish "not a virtual" from
 // "a virtual with no usable target" by checking p.virtual.Find themselves.
-func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []resolvedVirtualTarget {
+func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []ResolvedVirtualTarget {
 	if p.virtual == nil {
 		return nil
 	}
@@ -76,21 +94,21 @@ func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []reso
 	if virtual == nil {
 		return nil
 	}
-	var statuses []EndpointStatus
+	var statuses []registry.EndpointStatus
 	if p.registry != nil {
 		statuses = p.registry.Snapshot(ctx)
 	}
-	candidates, _ := candidatesForVirtual(virtual, statuses, p.managers)
+	candidates, _ := CandidatesForVirtual(virtual, statuses, p.managers)
 	return candidates
 }
 
-// candidatesForVirtual is virtualCandidates' pure ordering logic, factored
+// CandidatesForVirtual is virtualCandidates' pure ordering logic, factored
 // out so handleModels can snapshot the registry once and reuse it across
 // every configured virtual model instead of probing per model — Snapshot
 // alone is O(endpoints); doing that once per virtual name made the old
 // handleModels O(virtuals × endpoints) for a value it discarded once resolved.
 //
-// The registry's probe cache is 15s stale by design (see ProxyRegistry).
+// The registry's probe cache is 15s stale by design (see registry.ProxyRegistry).
 // Treating "online" as a hard gate — the old resolveVirtual's behavior — made
 // a healthy endpoint unroutable for up to 15s after it recovered, and a dead
 // one look routable for up to 15s after it dropped. Instead we walk the
@@ -106,7 +124,7 @@ func (p *RelayRouter) virtualCandidates(ctx context.Context, name string) []reso
 // freshCount reports how many of the returned candidates came from pass one
 // — handleModels reports a virtual as "loaded" only when this is > 0, since
 // the remainder are last-resort attempts the router isn't confident about.
-func candidatesForVirtual(virtual *config.VirtualLLM, statuses []EndpointStatus, managers []*ServerManager) (candidates []resolvedVirtualTarget, freshCount int) {
+func CandidatesForVirtual(virtual *config.VirtualLLM, statuses []registry.EndpointStatus, managers []*servermanager.ServerManager) (candidates []ResolvedVirtualTarget, freshCount int) {
 	online := make(map[string]config.OpenAIEndpoint)
 	configured := make(map[string]config.OpenAIEndpoint)
 	for _, status := range statuses {
@@ -116,44 +134,44 @@ func candidatesForVirtual(virtual *config.VirtualLLM, statuses []EndpointStatus,
 		}
 	}
 
-	var fresh, stale []resolvedVirtualTarget
+	var fresh, stale []ResolvedVirtualTarget
 	for _, target := range virtual.Targets {
-		switch classifyVirtualTarget(target) {
-		case virtualTargetEndpoint:
+		switch ClassifyVirtualTarget(target) {
+		case VirtualTargetEndpoint:
 			if endpoint, ok := online[target.Endpoint]; ok {
-				fresh = append(fresh, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
+				fresh = append(fresh, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
 			} else if endpoint, ok := configured[target.Endpoint]; ok {
-				stale = append(stale, resolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
+				stale = append(stale, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
 			}
 			// else: names an endpoint that doesn't exist in config — skip.
-		case virtualTargetAlias:
+		case VirtualTargetAlias:
 			for _, manager := range managers {
 				if manager.HasAlias(target.Alias) {
-					fresh = append(fresh, resolvedVirtualTarget{manager: manager, alias: target.Alias})
+					fresh = append(fresh, ResolvedVirtualTarget{manager: manager, alias: target.Alias})
 					break
 				}
 			}
 			// else: no manager has this alias — skip.
-		default: // virtualTargetInvalid: neither shape (e.g. endpoint set
+		default: // VirtualTargetInvalid: neither shape (e.g. endpoint set
 			// without model, and no alias either) — skip. warnVirtualModelConfig
-			// flags this at startup, using the same classifyVirtualTarget call.
+			// flags this at startup, using the same ClassifyVirtualTarget call.
 		}
 	}
 	return append(fresh, stale...), len(fresh)
 }
 
-// virtualTargetShape is what classifyVirtualTarget resolves a configured
+// VirtualTargetShape is what ClassifyVirtualTarget resolves a configured
 // config.VirtualLLMTarget to.
-type virtualTargetShape int
+type VirtualTargetShape int
 
 const (
-	virtualTargetInvalid virtualTargetShape = iota
-	virtualTargetEndpoint
-	virtualTargetAlias
+	VirtualTargetInvalid VirtualTargetShape = iota
+	VirtualTargetEndpoint
+	VirtualTargetAlias
 )
 
-// classifyVirtualTarget is the single source of truth for what shape a
-// configured target actually is — both candidatesForVirtual (routing) and
+// ClassifyVirtualTarget is the single source of truth for what shape a
+// configured target actually is — both CandidatesForVirtual (routing) and
 // warnVirtualModelConfig (startup validation, main.go) dispatch on this
 // instead of hand-maintaining parallel switch statements, so the two can
 // never classify the same target differently: a target with both an
@@ -161,18 +179,18 @@ const (
 // places, rather than one place treating it as the broken "endpoint without
 // model" shape while the other routes it fine.
 //
-// Precedence matches candidatesForVirtual exactly: endpoint+model wins when
+// Precedence matches CandidatesForVirtual exactly: endpoint+model wins when
 // both are set, then alias. Anything else (endpoint without model and no
 // alias, model without endpoint or alias, nothing set at all) is
-// virtualTargetInvalid.
-func classifyVirtualTarget(target config.VirtualLLMTarget) virtualTargetShape {
+// VirtualTargetInvalid.
+func ClassifyVirtualTarget(target config.VirtualLLMTarget) VirtualTargetShape {
 	switch {
 	case target.Endpoint != "" && target.Model != "":
-		return virtualTargetEndpoint
+		return VirtualTargetEndpoint
 	case target.Alias != "":
-		return virtualTargetAlias
+		return VirtualTargetAlias
 	default:
-		return virtualTargetInvalid
+		return VirtualTargetInvalid
 	}
 }
 
@@ -191,7 +209,7 @@ func affinityKeyFromBody(promptCacheKey, user string) string {
 }
 
 // applyAffinity moves the candidate matching pinned to the front of the
-// list, ahead of the reachability-preferred ordering candidatesForVirtual
+// list, ahead of the reachability-preferred ordering CandidatesForVirtual
 // already computed. That ordering optimizes for "believed usable right
 // now"; a pin overrides it on purpose, because a 15s reachability-cache
 // wobble must not be allowed to hop an established conversation to a
@@ -199,13 +217,13 @@ func affinityKeyFromBody(promptCacheKey, user string) string {
 // target no longer present in candidates (e.g. removed from config) is
 // silently ignored and the normal order stands — never invent a target that
 // isn't there.
-func applyAffinity(candidates []resolvedVirtualTarget, pinned string) []resolvedVirtualTarget {
+func applyAffinity(candidates []ResolvedVirtualTarget, pinned string) []ResolvedVirtualTarget {
 	if pinned == "" {
 		return candidates
 	}
 	idx := -1
 	for i, c := range candidates {
-		if c.identity() == pinned {
+		if c.Identity() == pinned {
 			idx = i
 			break
 		}
@@ -213,7 +231,7 @@ func applyAffinity(candidates []resolvedVirtualTarget, pinned string) []resolved
 	if idx <= 0 {
 		return candidates // not found, or already first: nothing to move.
 	}
-	reordered := make([]resolvedVirtualTarget, 0, len(candidates))
+	reordered := make([]ResolvedVirtualTarget, 0, len(candidates))
 	reordered = append(reordered, candidates[idx])
 	reordered = append(reordered, candidates[:idx]...)
 	reordered = append(reordered, candidates[idx+1:]...)
@@ -251,13 +269,13 @@ func applyAffinity(candidates []resolvedVirtualTarget, pinned string) []resolved
 // attemptVirtual, so nothing is written) and there is no second registry
 // entry — handleProxy's single `defer p.metrics.end(conn)` owns the
 // connection's lifetime regardless of how many candidates ran here.
-func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []resolvedVirtualTarget, body []byte, affinityKey string, conn *ProxyConn) {
+func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []ResolvedVirtualTarget, body []byte, affinityKey string, conn *ProxyConn) {
 	var failures []string
 	for _, target := range candidates {
 		// A caller that has already hung up (client disconnect →
 		// context.Canceled, or a request deadline) must stop the failover
 		// walk here rather than plow through every remaining candidate.
-		// ServerManager.Acquire is ctx-aware for its own admission wait, but
+		// servermanager.ServerManager.Acquire is ctx-aware for its own admission wait, but
 		// not for a health check on a launch it ends up owning (see Acquire's
 		// doc comment) — so a candidate that wins the race to launch a cold
 		// model still rides that out to completion even after the caller is
@@ -271,7 +289,7 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 			return
 		}
 		conn.noteAttempt()
-		conn.setTarget("virtual", name+" → "+target.label())
+		conn.setTarget("virtual", name+" → "+target.Label())
 		wrote, status, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
 			// Pin only a response the backend actually stands behind. A 5xx
@@ -291,14 +309,14 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 				// pinned before, if that one just failed. The conversation is
 				// already contaminated by the switch at that point, so pin
 				// forward rather than flap back on the next turn.
-				p.affinity.record(name, affinityKey, target.identity())
+				p.affinity.record(name, affinityKey, target.Identity())
 			}
 			return // upstream answered — whatever it answered stands.
 		}
 		if wrote {
 			return // already committed to the client; nothing left to retry.
 		}
-		failures = append(failures, fmt.Sprintf("%s: %v", target.label(), err))
+		failures = append(failures, fmt.Sprintf("%s: %v", target.Label(), err))
 	}
 	writeRouterError(w, http.StatusServiceUnavailable,
 		fmt.Sprintf("virtual model %q: no target reachable (%s)", name, strings.Join(failures, "; ")))
@@ -313,7 +331,7 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 // in a real net/http server panics with http.ErrAbortHandler — recovered by
 // the standard library one frame up — and a bare post-call release() would
 // leak the managed-server lease on that path.
-func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target resolvedVirtualTarget, body []byte) (wrote bool, status int, err error) {
+func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target ResolvedVirtualTarget, body []byte) (wrote bool, status int, err error) {
 	var backendErr error
 	// onError intercepts the proxy's default 502 write: returning true tells
 	// newUpstreamProxy the caller is handling the failure itself, so a
@@ -346,7 +364,7 @@ func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, tar
 // Requests are replayable across attempts because newUpstreamProxy's
 // Director re-installs the body from the captured []byte on every call, so
 // each candidate gets a fresh, undrained body.
-func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target resolvedVirtualTarget, body []byte, onError func(error) bool) (proxy *httputil.ReverseProxy, release func(), err error) {
+func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target ResolvedVirtualTarget, body []byte, onError func(error) bool) (proxy *httputil.ReverseProxy, release func(), err error) {
 	if target.manager != nil {
 		endpoint, rel, err := target.manager.Acquire(ctx, target.alias)
 		if err != nil {

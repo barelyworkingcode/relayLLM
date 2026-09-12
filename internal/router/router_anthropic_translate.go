@@ -1,4 +1,4 @@
-package main
+package router
 
 // Pure Anthropic Messages API <-> OpenAI Chat Completions translation. No
 // I/O, no globals — every function here is a plain data transform, testable

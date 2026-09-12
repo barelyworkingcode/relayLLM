@@ -1,4 +1,4 @@
-package main
+package router
 
 // Credential passthrough routes for the relay-router (settings.json's
 // router.passthrough). Each entry mounts /<name>/ and forwards everything

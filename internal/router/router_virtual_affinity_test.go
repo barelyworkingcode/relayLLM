@@ -1,4 +1,4 @@
-package main
+package router
 
 // Unit coverage for virtualAffinityStore and applyAffinity (relay_router_virtual_affinity.go,
 // relay_router.go). Full request-path coverage (pinning surviving a
@@ -8,6 +8,7 @@ package main
 
 import (
 	"relayllm/internal/config"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestApplyAffinity_NoPinLeavesOrderUnchanged(t *testing.T) {
-	candidates := []resolvedVirtualTarget{{alias: "a", manager: &ServerManager{}}, {alias: "b", manager: &ServerManager{}}}
+	candidates := []ResolvedVirtualTarget{{alias: "a", manager: &servermanager.ServerManager{}}, {alias: "b", manager: &servermanager.ServerManager{}}}
 	got := applyAffinity(candidates, "")
 	if len(got) != 2 || got[0].alias != "a" || got[1].alias != "b" {
 		t.Errorf("got %+v, want unchanged order", got)
@@ -27,10 +28,10 @@ func TestApplyAffinity_NoPinLeavesOrderUnchanged(t *testing.T) {
 }
 
 func TestApplyAffinity_MovesPinnedTargetToFront(t *testing.T) {
-	candidates := []resolvedVirtualTarget{
+	candidates := []ResolvedVirtualTarget{
 		{endpoint: config.OpenAIEndpoint{Name: "x"}, upstreamID: "m"},
 		{endpoint: config.OpenAIEndpoint{Name: "y"}, upstreamID: "m"},
-		{alias: "z", manager: &ServerManager{}},
+		{alias: "z", manager: &servermanager.ServerManager{}},
 	}
 	got := applyAffinity(candidates, "alias:z")
 	if len(got) != 3 || got[0].alias != "z" {
@@ -43,7 +44,7 @@ func TestApplyAffinity_MovesPinnedTargetToFront(t *testing.T) {
 }
 
 func TestApplyAffinity_UnknownPinIsIgnored(t *testing.T) {
-	candidates := []resolvedVirtualTarget{{alias: "a", manager: &ServerManager{}}, {alias: "b", manager: &ServerManager{}}}
+	candidates := []ResolvedVirtualTarget{{alias: "a", manager: &servermanager.ServerManager{}}, {alias: "b", manager: &servermanager.ServerManager{}}}
 	// "alias:removed" names a target that was dropped from config — the pin
 	// is stale and must not synthesize a target that isn't there, nor
 	// disturb the existing order.
@@ -54,21 +55,21 @@ func TestApplyAffinity_UnknownPinIsIgnored(t *testing.T) {
 }
 
 func TestApplyAffinity_AlreadyFirstIsNoop(t *testing.T) {
-	candidates := []resolvedVirtualTarget{{alias: "a", manager: &ServerManager{}}, {alias: "b", manager: &ServerManager{}}}
+	candidates := []ResolvedVirtualTarget{{alias: "a", manager: &servermanager.ServerManager{}}, {alias: "b", manager: &servermanager.ServerManager{}}}
 	got := applyAffinity(candidates, "alias:a")
 	if len(got) != 2 || got[0].alias != "a" || got[1].alias != "b" {
 		t.Errorf("got %+v, want unchanged order when the pin is already first", got)
 	}
 }
 
-// resolvedVirtualTarget.identity distinguishes an endpoint from a managed
+// ResolvedVirtualTarget.identity distinguishes an endpoint from a managed
 // alias of the same name — the two namespaces must never collide inside the
 // affinity store any more than they do anywhere else in the router.
 func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing.T) {
-	endpointTarget := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "shared"}, upstreamID: "m"}
-	aliasTarget := resolvedVirtualTarget{alias: "shared", manager: &ServerManager{}}
-	if endpointTarget.identity() == aliasTarget.identity() {
-		t.Errorf("endpoint and alias with the same name must have distinct identities, both got %q", endpointTarget.identity())
+	endpointTarget := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "shared"}, upstreamID: "m"}
+	aliasTarget := ResolvedVirtualTarget{alias: "shared", manager: &servermanager.ServerManager{}}
+	if endpointTarget.Identity() == aliasTarget.Identity() {
+		t.Errorf("endpoint and alias with the same name must have distinct identities, both got %q", endpointTarget.Identity())
 	}
 }
 
@@ -79,10 +80,10 @@ func TestResolvedVirtualTarget_IdentityDistinguishesEndpointFromAlias(t *testing
 // candidates, permanently re-pinning a conversation that was actually served
 // by the small model onto the big one next turn.
 func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *testing.T) {
-	big := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
-	small := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
-	if big.identity() == small.identity() {
-		t.Errorf("same-endpoint targets with different models must have distinct identities, both got %q", big.identity())
+	big := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	if big.Identity() == small.Identity() {
+		t.Errorf("same-endpoint targets with different models must have distinct identities, both got %q", big.Identity())
 	}
 }
 
@@ -90,24 +91,24 @@ func TestResolvedVirtualTarget_IdentityDistinguishesModelsOnSameEndpoint(t *test
 // (endpoint, model) pairs collide by shifting where the "/" falls — escaping
 // is what prevents that.
 func TestResolvedVirtualTarget_IdentityEscapesJoinAmbiguity(t *testing.T) {
-	a := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a"}, upstreamID: "b/c"}
-	b := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a/b"}, upstreamID: "c"}
-	if a.identity() == b.identity() {
+	a := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a"}, upstreamID: "b/c"}
+	b := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "a/b"}, upstreamID: "c"}
+	if a.Identity() == b.Identity() {
 		t.Errorf("endpoint %q model %q and endpoint %q model %q must not collide, both got %q",
-			"a", "b/c", "a/b", "c", a.identity())
+			"a", "b/c", "a/b", "c", a.Identity())
 	}
 }
 
 // label() must also name the upstream model — a 503's per-target failure
 // list is useless for distinguishing two same-endpoint targets otherwise.
 func TestResolvedVirtualTarget_LabelIncludesUpstreamModel(t *testing.T) {
-	big := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
-	small := resolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
-	if big.label() == small.label() {
-		t.Errorf("same-endpoint targets with different models must have distinct labels, both got %q", big.label())
+	big := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-70b"}
+	small := ResolvedVirtualTarget{endpoint: config.OpenAIEndpoint{Name: "lmstudio"}, upstreamID: "qwen-7b"}
+	if big.Label() == small.Label() {
+		t.Errorf("same-endpoint targets with different models must have distinct labels, both got %q", big.Label())
 	}
-	if !strings.Contains(big.label(), "qwen-70b") {
-		t.Errorf("label() = %q, want it to name the upstream model", big.label())
+	if !strings.Contains(big.Label(), "qwen-70b") {
+		t.Errorf("label() = %q, want it to name the upstream model", big.Label())
 	}
 }
 

@@ -258,16 +258,32 @@ func TestMainTCPListener_TLS(t *testing.T) {
 	}
 }
 
+// freeTCPAddr binds then immediately releases a loopback port, following the
+// same bind-and-release idiom TestPreflightPortFree_SucceedsForFreePort uses
+// (server_manager_test.go) to hand a real, currently-free address to a
+// component that wants to do its own net.Listen. Duplicated from
+// internal/router/router_tls_test.go — a test helper can't cross a package
+// boundary.
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
 // TestMainTCPListener_MultipleBinds is the end-to-end proof that this
 // feature works: two independent addresses, one shared *http.Server, both
 // serving the same handler, and a single Shutdown tearing down both at
 // once.
 func TestMainTCPListener_MultipleBinds(t *testing.T) {
-	// freeTCPAddr (relay_router_tls_test.go) binds then releases a loopback
-	// port, giving two addresses this test can dial by name before
-	// startMainTCPListener rebinds them for real — srv.Addr alone only ever
-	// reports the first, so this is the only way to address the second bind
-	// directly.
+	// freeTCPAddr binds then releases a loopback port, giving two addresses
+	// this test can dial by name before startMainTCPListener rebinds them for
+	// real — srv.Addr alone only ever reports the first, so this is the only
+	// way to address the second bind directly.
 	addr1 := freeTCPAddr(t)
 	addr2 := freeTCPAddr(t)
 

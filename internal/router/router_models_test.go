@@ -1,4 +1,4 @@
-package main
+package router
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
 	"testing"
 	"time"
@@ -76,19 +78,19 @@ func assertLlamaClientAccepts(t *testing.T, rows []catalogRow) {
 	}
 }
 
-func newCatalogRouter(t *testing.T) (*RelayRouter, *ServerManager, *testutil.FakeClock) {
+func newCatalogRouter(t *testing.T) (*RelayRouter, *servermanager.ServerManager, *testutil.FakeClock) {
 	t.Helper()
 	// Two models: one plain, one multimodal with a pinned context. memoryGB
-	// is set explicitly so NewServerManager's own estimation (which reads
+	// is set explicitly so servermanager.NewServerManager's own estimation (which reads
 	// it as an override) produces a known size without poking mgr.memory.
 	cfg := &config.ServerConfig{Models: []config.ServerModelConfig{
 		{Alias: "plain", Args: map[string]any{"memoryGB": 4.0, "ctx-size": 32768.0}},
 		{Alias: "vision", Args: map[string]any{"memoryGB": 4.0, "mmproj": "/p.gguf"}},
 	}}
-	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, cfg, "/nonexistent/relayllm-test-server")
 	clk := testutil.NewFakeClock(time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC))
 
-	return NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil), mgr, clk
+	return NewRelayRouter("127.0.0.1:0", []*servermanager.ServerManager{mgr}, nil, nil), mgr, clk
 }
 
 func TestRouterCatalog_SatisfiesLlamaCppClientContract(t *testing.T) {
@@ -109,9 +111,9 @@ func TestRouterCatalog_ConfiguredModelsAreUsable(t *testing.T) {
 	router, _, _ := newCatalogRouter(t)
 
 	for _, row := range fetchCatalog(t, router, "/models") {
-		if row.Status.Value != ModelStatusLoaded {
+		if row.Status.Value != servermanager.ModelStatusLoaded {
 			t.Errorf("%q status = %q, want %q so clients can select it without an explicit load",
-				row.ID, row.Status.Value, ModelStatusLoaded)
+				row.ID, row.Status.Value, servermanager.ModelStatusLoaded)
 		}
 	}
 }
@@ -128,25 +130,25 @@ func TestRouterCatalog_ReportsLoadState(t *testing.T) {
 	}
 
 	// Nothing running, but usable on demand.
-	if got := byID()["plain"].Status.Value; got != ModelStatusLoaded {
-		t.Errorf("status = %q, want %q before launch", got, ModelStatusLoaded)
+	if got := byID()["plain"].Status.Value; got != servermanager.ModelStatusLoaded {
+		t.Errorf("status = %q, want %q before launch", got, servermanager.ModelStatusLoaded)
 	}
 
 	// A process that exists but has not passed its health check is "loading" —
 	// clients poll on this transition, so it must not read as unloaded.
 	markHealthy := mgr.InjectLoadingInstanceForTest("plain")
-	if got := byID()["plain"].Status.Value; got != ModelStatusLoading {
-		t.Errorf("status = %q, want %q while starting up", got, ModelStatusLoading)
+	if got := byID()["plain"].Status.Value; got != servermanager.ModelStatusLoading {
+		t.Errorf("status = %q, want %q while starting up", got, servermanager.ModelStatusLoading)
 	}
 
 	markHealthy()
-	if got := byID()["plain"].Status.Value; got != ModelStatusLoaded {
-		t.Errorf("status = %q, want %q once healthy", got, ModelStatusLoaded)
+	if got := byID()["plain"].Status.Value; got != servermanager.ModelStatusLoaded {
+		t.Errorf("status = %q, want %q once healthy", got, servermanager.ModelStatusLoaded)
 	}
 
 	// A model that never started is still selectable.
-	if got := byID()["vision"].Status.Value; got != ModelStatusLoaded {
-		t.Errorf("vision status = %q, want %q", got, ModelStatusLoaded)
+	if got := byID()["vision"].Status.Value; got != servermanager.ModelStatusLoaded {
+		t.Errorf("vision status = %q, want %q", got, servermanager.ModelStatusLoaded)
 	}
 }
 
@@ -164,8 +166,8 @@ func TestRouterCatalog_RunningInstanceOverridesStaleFailure(t *testing.T) {
 		if row.Status.Failed {
 			t.Error("stale failure reported for an alias that is running")
 		}
-		if row.Status.Value != ModelStatusLoaded {
-			t.Errorf("status = %q, want %q", row.Status.Value, ModelStatusLoaded)
+		if row.Status.Value != servermanager.ModelStatusLoaded {
+			t.Errorf("status = %q, want %q", row.Status.Value, servermanager.ModelStatusLoaded)
 		}
 	}
 }
@@ -213,8 +215,8 @@ func TestRouterCatalog_SurfacesLoadFailure(t *testing.T) {
 		t.Error("status.failed not set after a failed load; clients would poll forever")
 	}
 	// A model that cannot start is not usable, so it must not claim to be.
-	if row.Status.Value != ModelStatusUnloaded {
-		t.Errorf("status = %q, want %q after a failed load", row.Status.Value, ModelStatusUnloaded)
+	if row.Status.Value != servermanager.ModelStatusUnloaded {
+		t.Errorf("status = %q, want %q after a failed load", row.Status.Value, servermanager.ModelStatusUnloaded)
 	}
 	if row.Status.Error != "binary not found" {
 		t.Errorf("status.error = %q, want the failure reason", row.Status.Error)
@@ -323,12 +325,12 @@ func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
 		{Alias: "pinned", Args: map[string]any{"ctx-size": 8192.0}},
 		{Alias: "unpinned", Args: map[string]any{}},
 	}}
-	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, cfg, "/nonexistent/relayllm-test-server")
 	// Native context as read from model metadata at construction.
 	mgr.SetTrainedContextForTest("pinned", 131072)
 	mgr.SetTrainedContextForTest("unpinned", 262144)
 
-	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)
+	router := NewRelayRouter("127.0.0.1:0", []*servermanager.ServerManager{mgr}, nil, nil)
 	rows := map[string]catalogRow{}
 	for _, r := range fetchCatalog(t, router, "/models") {
 		rows[r.ID] = r
@@ -350,7 +352,7 @@ func TestRouterCatalog_TrainedContextFallback(t *testing.T) {
 // omits it, taking the whole catalog down with it.
 func TestRouterCatalog_EndpointRowsCarryArchitecture(t *testing.T) {
 	upstream := newFakeOpenAIUpstream(t, []string{"gpt-test"})
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{
 			{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "test-key"},
 		},
@@ -391,7 +393,7 @@ func TestRouterCatalog_EndpointVisionPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 	router := NewRelayRouter(":0", nil, registry, nil)
@@ -424,12 +426,12 @@ func TestRouterCatalog_ManagedContextLengthTopLevel(t *testing.T) {
 		{Alias: "trained-only", Args: map[string]any{}},
 		{Alias: "unknown", Args: map[string]any{}},
 	}}
-	mgr := NewServerManager(llamaProfile, cfg, "/nonexistent/relayllm-test-server")
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, cfg, "/nonexistent/relayllm-test-server")
 	mgr.SetTrainedContextForTest("pinned", 131072)
 	mgr.SetTrainedContextForTest("trained-only", 262144)
 	// "unknown" has neither a pinned ctx-size nor a recorded trained context.
 
-	router := NewRelayRouter("127.0.0.1:0", []*ServerManager{mgr}, nil, nil)
+	router := NewRelayRouter("127.0.0.1:0", []*servermanager.ServerManager{mgr}, nil, nil)
 	rows := map[string]catalogRow{}
 	for _, r := range fetchCatalog(t, router, "/models") {
 		rows[r.ID] = r
@@ -473,7 +475,7 @@ func TestRouterCatalog_EndpointContextLengthTopLevel(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1"}},
 	})
 	router := NewRelayRouter(":0", nil, registry, nil)
@@ -499,12 +501,12 @@ func TestRouterCatalog_EndpointContextLengthTopLevel(t *testing.T) {
 // would actually try first — same source virtualRowMetadata already uses for
 // meta and modalities.
 func TestRouterCatalog_VirtualModel_ContextLengthTopLevel(t *testing.T) {
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: "vision-alias", Args: map[string]any{
 			"mmproj": "/p.gguf", "ctx-size": 32768.0,
 		}}},
 	}, "")
-	router := NewRelayRouter(":0", []*ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+	router := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
 		Name: "vVision", Targets: []config.VirtualLLMTarget{{Alias: "vision-alias"}},
 	}}})
 

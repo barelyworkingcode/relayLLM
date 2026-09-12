@@ -483,15 +483,15 @@ func detailedVirtualRows(virtual *config.VirtualLLMConfig, epStatuses []Endpoint
 		candRows := make([]map[string]any, 0, len(candidates))
 		for order, c := range candidates {
 			kind := "endpoint"
-			if c.manager != nil {
+			if c.Manager() != nil {
 				kind = "alias"
 			}
-			identity := c.identity()
+			identity := c.Identity()
 			candRows = append(candRows, map[string]any{
 				"order":               order,
 				"kind":                kind,
 				"identity":            identity,
-				"label":               c.label(),
+				"label":               c.Label(),
 				"reachable":           order < freshCount,
 				"pinnedConversations": pinCounts[v.Name][identity],
 			})

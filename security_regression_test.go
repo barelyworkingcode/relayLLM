@@ -155,7 +155,7 @@ func TestSec_DetailedStatus_NeverLeaksEndpointSecrets(t *testing.T) {
 	const secretKey = "sk-super-secret-do-not-leak-1234567890"
 	ep := config.OpenAIEndpoint{Name: "leaky", BaseURL: "http://127.0.0.1:1/v1", APIKey: secretKey}
 	registry := NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
-	seedEndpointStatus(registry, ep, true, UpstreamModel{ID: "m"})
+	registry.SetStatusForTest(ep, true, UpstreamModel{ID: "m"})
 
 	sessions := NewSessionManager(NewSessionStore(t.TempDir()), NewPermissionManager())
 	deps := DetailedStatusDeps{

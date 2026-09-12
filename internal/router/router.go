@@ -1,4 +1,4 @@
-package main
+package router
 
 import (
 	"bytes"
@@ -17,6 +17,8 @@ import (
 
 	"relayllm/internal/config"
 	"relayllm/internal/netutil"
+	"relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 )
 
 // RelayRouter aggregates managed-server aliases (llama.cpp, MLX, …) and
@@ -28,10 +30,10 @@ import (
 // Endpoints that fail their last probe drop out of /v1/models and refuse
 // direct (`endpoint.Name/id`) routing until the next 15s TTL cycle — a
 // virtual model may still route through an offline-believed endpoint as a
-// last resort (see candidatesForVirtual).
+// last resort (see CandidatesForVirtual).
 type RelayRouter struct {
-	managers []*ServerManager
-	registry *ProxyRegistry
+	managers []*servermanager.ServerManager
+	registry *registry.ProxyRegistry
 	virtual  *config.VirtualLLMConfig
 	affinity *virtualAffinityStore
 	server   *http.Server
@@ -111,6 +113,14 @@ func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
 	p.reasoningEffortMap = m
 }
 
+// RecordAffinityForTest seeds a conversation pin directly, bypassing a real
+// proxied request. Test-only seam for callers outside this package that need
+// to assert on affinity-pinned dashboard rows without driving a full request
+// through routeVirtual.
+func (p *RelayRouter) RecordAffinityForTest(virtual, conversation, target string) {
+	p.affinity.record(virtual, conversation, target)
+}
+
 // setReasoningEffortTemplateKwargs installs the router-level
 // chat_template_kwargs merge table (settings.json's
 // router.reasoningEffortTemplateKwargs). nil or empty disables it — also
@@ -142,8 +152,8 @@ func (p *RelayRouter) setTLS(cert, key string) {
 // endpoint branch; virtual may be nil to disable the virtual-model branch. A
 // router with no live backends 400s every request — StartRelayRouter guards
 // against starting one.
-func NewRelayRouter(addr string, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
-	live := make([]*ServerManager, 0, len(managers))
+func NewRelayRouter(addr string, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig) *RelayRouter {
+	live := make([]*servermanager.ServerManager, 0, len(managers))
 	for _, m := range managers {
 		if m != nil {
 			live = append(live, m)
@@ -324,7 +334,7 @@ func (p *RelayRouter) handleModelUnload(w http.ResponseWriter, r *http.Request) 
 
 // managedModelFromBody decodes {"model": "..."} and resolves it to the manager
 // that owns it, writing the error response itself when it cannot.
-func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Request) (*ServerManager, string, bool) {
+func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Request) (*servermanager.ServerManager, string, bool) {
 	var body struct {
 		Model string `json:"model"`
 	}
@@ -343,7 +353,7 @@ func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Reques
 	return nil, "", false
 }
 
-// resolvedVirtualTarget is one candidate the router will actually try for a
+// ResolvedVirtualTarget is one candidate the router will actually try for a
 // virtual model. manager set means an alias target; otherwise it's an
 // endpoint target (endpoint + upstreamID).
 
@@ -462,7 +472,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// A pinned target (see virtualAffinityStore) outranks reachability ordering —
-			// it goes to the front even if candidatesForVirtual currently
+			// it goes to the front even if CandidatesForVirtual currently
 			// believes something else is more reachable. A pin naming a
 			// target dropped from candidates (removed from config) is a
 			// no-op inside applyAffinity, so routing falls back to the
@@ -488,7 +498,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("unknown model %q", envelope.Model)})
 }
 
-func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *ServerManager, alias string, body []byte, conn *ProxyConn) {
+func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *servermanager.ServerManager, alias string, body []byte, conn *ProxyConn) {
 	// The lease is held for the whole proxied exchange, including the SSE
 	// stream, so the budget cannot evict this instance mid-response.
 	endpoint, release, err := mgr.Acquire(r.Context(), alias)
@@ -609,7 +619,7 @@ var openAIRoutesWithoutV1 = map[string]bool{
 // upstreamPath maps an inbound router path onto an upstream whose OpenAI API
 // root is basePath — the path part of its BaseURL, e.g. "/v1". The result is
 // the same URL provider_openai.go builds as BaseURL+"/chat/completions", and
-// the one ProxyRegistry already probes as BaseURL+"/models".
+// the one registry.ProxyRegistry already probes as BaseURL+"/models".
 //
 // Forwarding the inbound path verbatim only worked while every upstream
 // mounted both forms. ExLlamaV3 (europa) mounts /v1 only: a bare
@@ -664,7 +674,7 @@ func upstreamPath(basePath, inbound string) string {
 // reasoningEffort* fields. One cert/key pair covers every bound address —
 // there's no per-bind TLS config — so the cert must be valid for all of
 // them if more than one is configured.
-func StartRelayRouter(addrs []string, managers []*ServerManager, registry *ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
+func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}

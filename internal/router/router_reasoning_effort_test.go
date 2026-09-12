@@ -1,4 +1,4 @@
-package main
+package router
 
 // Coverage for the router-level reasoning_effort rewrite (config.RouterConfig /
 // rewriteProxyBody in relay_router.go). See CLAUDE.md's Relay-router section
@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"relayllm/internal/config"
+	regpkg "relayllm/internal/registry"
+	"relayllm/internal/servermanager"
 	"testing"
 )
 
@@ -30,12 +32,12 @@ func newManagedAliasRouter(t *testing.T, alias string, upstream *httptest.Server
 	t.Helper()
 	port := upstream.Listener.Addr().(*net.TCPAddr).Port
 
-	mgr := NewServerManager(llamaProfile, &config.ServerConfig{
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
 		Models: []config.ServerModelConfig{{Alias: alias, Args: map[string]any{"model": "/fake"}}},
 	}, "")
 	mgr.InjectReadyInstanceForTest(alias, port, 0)
 
-	r := NewRelayRouter(":0", []*ServerManager{mgr}, nil, nil)
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
 	if effortMap != nil {
 		r.setReasoningEffortMap(effortMap)
 	}
@@ -129,7 +131,7 @@ func TestReasoningEffort_ManagedAliasPath_EmptyMappedValueRemovesKey(t *testing.
 func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -164,7 +166,7 @@ func TestReasoningEffort_EndpointPath_RewritesMappedValue(t *testing.T) {
 func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -192,7 +194,7 @@ func TestReasoningEffort_EndpointPath_UnmappedValuePassesThrough(t *testing.T) {
 func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -223,7 +225,7 @@ func TestReasoningEffort_EndpointPath_NonStringValueLeftAlone(t *testing.T) {
 func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -273,7 +275,7 @@ func TestReasoningEffort_EndpointPath_OtherFieldsSurviveContent(t *testing.T) {
 func TestReasoningEffort_VirtualModelPath_RewritesMappedValue(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -513,7 +515,7 @@ func TestReasoningEffortTemplateKwargs_NonMatchingLeavesBodyAlone(t *testing.T) 
 func TestReasoningEffortTemplateKwargs_EndpointPath_MergesKwargs(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
@@ -540,7 +542,7 @@ func TestReasoningEffortTemplateKwargs_EndpointPath_MergesKwargs(t *testing.T) {
 func TestReasoningEffortTemplateKwargs_VirtualModelPath_MergesKwargs(t *testing.T) {
 	var seenBody []byte
 	upstream := bodyRecordingUpstream(t, &seenBody)
-	registry := NewProxyRegistry(&config.OpenAIConfig{
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{
 		Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "k"}},
 	})
 
