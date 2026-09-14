@@ -35,7 +35,8 @@ codesign --verify --strict --verbose=2 cmd/hook/hook
   --args "127.0.0.1,192.168.64.1" \
   --url "http://localhost:8181/status" \
   --autostart \
-  --no-frontend-creds   # backend: never dials relay's front door, so don't hand it the bearer (it would leak into spawned shells)
+  --capability manifest \
+  --capability projects
   # --router-bind stays loopback-only (the flag's default): this devbox's
   # settings.json configures router.anthropic (real Anthropic API credential
   # passthrough), which refuses to start on a non-loopback --router-bind
