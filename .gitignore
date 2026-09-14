@@ -1,5 +1,5 @@
-relayllm
-cmd/hook/hook
+/relayllm
+/cmd/hook/hook
 .idea/
 plans/
 .DS_Store
