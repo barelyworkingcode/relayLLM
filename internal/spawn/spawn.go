@@ -43,6 +43,19 @@ var relaySecretEnvKeys = []string{
 	// terminal).
 	relay.EnvProjectToken,       // RELAY_PROJECT_TOKEN
 	relay.EnvProjectTokenLegacy, // RELAY_TOKEN
+
+	// relayLLM's own internal bearer (--token / RELAY_LLM_TOKEN) authenticates
+	// every request on its socket, sessions and terminals included — strictly
+	// more power than any spawned child legitimately needs. It reaches this
+	// process's own environment only when relay launched it with the flag's
+	// env-var form; stripping it here means that fact can never leak into a
+	// child's environment via plain inheritance. Claude's PreToolUse hook gets
+	// its own narrower, per-session credential instead (buildClaudeEnv sets
+	// RELAY_LLM_HOOK_TOKEN explicitly, after this scrub runs), which is also
+	// listed here so an inherited stale value can never masquerade as a fresh
+	// one before that explicit set happens.
+	"RELAY_LLM_TOKEN",
+	"RELAY_LLM_HOOK_TOKEN",
 }
 
 // SetProjectTokenEnv sets the project-scoped token on a child env under both the

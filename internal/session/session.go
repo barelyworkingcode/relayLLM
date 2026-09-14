@@ -44,7 +44,6 @@ type SessionManager struct {
 	perms        *permission.PermissionManager
 	sink         types.EventSink
 	hookSocket   string
-	hookToken    string
 	ollamaURL    string
 	openaiConfig *config.OpenAIConfig
 	llamaManager *servermanager.ServerManager
@@ -109,10 +108,6 @@ func (m *SessionManager) SetEventSink(sink types.EventSink) {
 // /api/permission. Same uid + 0600 perms + token authenticate the call.
 func (m *SessionManager) SetHookSocket(socketPath string) {
 	m.hookSocket = socketPath
-}
-
-func (m *SessionManager) SetHookToken(token string) {
-	m.hookToken = token
 }
 
 func (m *SessionManager) SetOllamaURL(url string) {
@@ -470,7 +465,7 @@ func (m *SessionManager) initProvider(session *types.Session) error {
 				slog.Warn("failed to write hook config", "dir", session.Directory, "error", err)
 			}
 		}
-		p := provider.NewClaudeProvider(session, handler, m.hookSocket, m.hookToken, m.perms)
+		p := provider.NewClaudeProvider(session, handler, m.hookSocket, m.perms)
 		if session.ProviderState != nil {
 			p.RestoreState(session.ProviderState)
 		}

@@ -205,8 +205,11 @@ Full catalog: `internal/events/ws_messages.go` + [`docs/event-protocol.md`](docs
 The `claude` CLI runs the PreToolUse hook binary before each tool use; the hook
 dials relayLLM's Unix socket (`RELAY_LLM_HOOK_SOCKET`, with `RELAY_LLM_SESSION_ID`
 + `RELAY_LLM_HOOK_TOKEN`), which holds the request open and asks the WebSocket
-client to approve/deny. Headless sessions (`settings: {"headless": true}`, used by
-relayScheduler) set `RELAY_LLM_HEADLESS=true` so the hook auto-approves.
+client to approve/deny. `RELAY_LLM_HOOK_TOKEN` is **not** relayLLM's internal
+bearer — it's a random credential minted per session, valid only for that
+session's own `POST /api/permission` call and revoked when the session ends
+(see CLAUDE.md's "Local Auth" section). Headless sessions (`settings: {"headless": true}`,
+used by relayScheduler) set `RELAY_LLM_HEADLESS=true` so the hook auto-approves.
 
 ## Data
 

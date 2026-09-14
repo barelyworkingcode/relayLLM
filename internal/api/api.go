@@ -352,6 +352,17 @@ func RegisterPermissionRoutes(mux *http.ServeMux, perms *permission.PermissionMa
 			return
 		}
 
+		// A hook token only authenticates the session it was minted for
+		// (HookScopedBearerAuth already proved the token is valid for
+		// *some* session — this closes the gap between "valid" and "valid
+		// for the session this request claims to be about").
+		if scopedSessionID, ok := HookSessionFromContext(r.Context()); ok && scopedSessionID != body.SessionID {
+			slog.Warn("rejecting permission request: hook token session mismatch",
+				"tokenSession", scopedSessionID, "requestSession", body.SessionID)
+			writeJSON(w, 403, map[string]string{"error": "hook token does not authorize this session"})
+			return
+		}
+
 		slog.Info("permission request", "session", body.SessionID, "tool", body.ToolName, "toolUseId", body.ToolUseID)
 
 		// Short-circuit if the session's policy matches a deny/allow rule.
