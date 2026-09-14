@@ -54,7 +54,7 @@ func Main() {
 	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Include 0.0.0.0 to accept connections from other hosts.")
 	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
 	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
-	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving the same routes as --socket (sessions, terminals, /status dashboard) — protected by --http-bind, not a bearer token, same as --router-port. Empty to disable.")
+	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving ONLY the read-only /status diagnostics dashboard (GET /status, /api/status, /api/status/detailed) — protected by --http-bind, not a bearer token, same as --router-port. Every other route, including /ws and all mutating routes, 404s on this port; use the bearer-authenticated --socket for those. Empty to disable.")
 	httpBind := flag.String("http-bind", envOrDefault("RELAY_LLM_HTTP_BIND", "127.0.0.1"), "Comma-separated bind addresses for the --http-port listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Set to 0.0.0.0 to accept connections from other hosts.")
 	httpTLSCert := flag.String("http-tls-cert", envOrDefault("RELAY_LLM_HTTP_TLS_CERT", ""), "TLS certificate file for the --http-port listener. Requires --http-tls-key; empty (with key also empty) serves plain http.")
 	httpTLSKey := flag.String("http-tls-key", envOrDefault("RELAY_LLM_HTTP_TLS_KEY", ""), "TLS private key file for the --http-port listener. Requires --http-tls-cert.")
@@ -314,15 +314,21 @@ func Main() {
 	// catches panics from real handlers regardless of which front is used.
 	//
 	// The Unix socket and the --http-port TCP front deliberately do NOT
-	// share one handler value anymore: the socket carries relay's manifest
-	// bridging and the permission hook's callback (both machine clients
+	// share one handler value: the socket carries relay's manifest bridging
+	// and the permission hook's callback (both machine clients
 	// authenticating with the bearer token, never a browser), so it keeps
-	// bearerAuth in front. The TCP front is plain — no bearerAuth at all —
-	// protected only by which --http-bind addresses were actually bound,
-	// the same posture --router-port already has. See bearerAuth's doc
-	// comment.
+	// bearerAuth in front and serves the full route table. The TCP front
+	// carries no bearer token either — reachability there is still gated by
+	// --http-bind, the same posture --router-port has always had — but on
+	// top of that it is wrapped in api.TCPDiagnosticsOnly, which serves only
+	// the read-only /status dashboard and 404s everything else (every
+	// mutating route, /ws, terminal/session content). Anyone who can reach
+	// the TCP port can no longer create a terminal, drive a session, or open
+	// a WebSocket — only the bearer-authenticated socket can. See
+	// TCPDiagnosticsOnly's and bearerAuth's doc comments.
 	recovered := api.RecoverMiddleware(mux)
 	socketHandler := api.BearerAuth(*internalToken, recovered)
+	tcpHandler := api.TCPDiagnosticsOnly(recovered)
 
 	server := &http.Server{Handler: socketHandler}
 
@@ -341,18 +347,18 @@ func Main() {
 		slog.Warn("failed to chmod socket", "path", *socketPath, "error", err)
 	}
 
-	// Optional second front on TCP, same mux and route table as the socket
-	// above — not bearer-authenticated (see the handler-chain comment
-	// above and bearerAuth's doc comment): reachability is gated purely by
-	// which --http-bind addresses actually bound. Each configured address
-	// binds best-effort (see listenAll): one that fails is logged and
-	// skipped, not fatal, since the address may only be assignable in some
-	// deployments. Only a total failure — every address rejected — is
-	// fatal, the same reason the socket's is: it would otherwise leave the
-	// operator with a silently absent listener and a healthy-looking
-	// process.
+	// Optional second front on TCP, restricted to the read-only diagnostics
+	// allowlist (see TCPDiagnosticsOnly) rather than the socket's full route
+	// table — not bearer-authenticated (see the handler-chain comment above
+	// and bearerAuth's doc comment): reachability is gated purely by which
+	// --http-bind addresses actually bound. Each configured address binds
+	// best-effort (see listenAll): one that fails is logged and skipped, not
+	// fatal, since the address may only be assignable in some deployments.
+	// Only a total failure — every address rejected — is fatal, the same
+	// reason the socket's is: it would otherwise leave the operator with a
+	// silently absent listener and a healthy-looking process.
 	httpAddrs := netutil.ListenAddrs(httpBinds, *httpPort)
-	tcpServer, err := startMainTCPListener(httpAddrs, *httpTLSCert, *httpTLSKey, recovered)
+	tcpServer, err := startMainTCPListener(httpAddrs, *httpTLSCert, *httpTLSKey, tcpHandler)
 	if err != nil {
 		slog.Error("failed to listen on http port", "addrs", httpAddrs, "error", err)
 		os.Exit(1)
