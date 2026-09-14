@@ -30,6 +30,8 @@ codesign --verify --strict --verbose=2 relayllm
   --args "8181" \
   --args "--http-bind" \
   --args "127.0.0.1,192.168.64.1" \
+  --args "--router-bind" \
+  --args "127.0.0.1,192.168.64.1" \
   --url "http://localhost:8181/status" \
   --autostart \
   --capability manifest \
