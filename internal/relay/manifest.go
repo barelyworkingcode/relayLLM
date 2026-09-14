@@ -282,21 +282,17 @@ func settingsSchema() []FieldDecl {
 }
 
 // MaybeRegisterManifest tells relay where to dispatch front-door traffic
-// for this service. Standalone runs (no RELAY_BRIDGE_SOCKET set) are a
-// clean no-op — direct clients still reach the listener.
+// for this service. A process relay did not launch is a clean no-op — direct
+// clients still reach the listener.
 //
 // Failure is logged and swallowed: the listener is already up, so missing
 // the relay-dispatch path is a partial degradation, not a hard error.
 func MaybeRegisterManifest(dataDir, internalSocket, internalToken string) {
-	if os.Getenv(EnvBridgeSocket) == "" {
+	if !Launched() {
 		slog.Info("standalone mode — skipping manifest registration")
 		return
 	}
 	serviceID := os.Getenv(EnvServiceID)
-	if serviceID == "" {
-		slog.Warn("bridge socket set but service ID missing — skipping manifest registration", "env", EnvServiceID)
-		return
-	}
 
 	manifest := BuildManifest(dataDir)
 	args, err := json.Marshal(RegisterManifestRequest{

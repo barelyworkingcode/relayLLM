@@ -127,8 +127,8 @@ func (p *ClaudeProvider) resolveMCPToken() string {
 
 // refreshHostSpec re-resolves the session's Host via relay's bridge before
 // each spawn, so a probe update (new claude_path, host record edit) takes
-// effect on the next turn. On any failure — including a standalone run with
-// no service token — it leaves the already-stored Host untouched: a Host is
+// effect on the next turn. On any failure — including a standalone run relay
+// did not launch — it leaves the already-stored Host untouched: a Host is
 // a routing fact, not a credential, so falling back to the stored value (not
 // clearing it) is what lets a persisted host session resume after a
 // relayLLM restart while relay is briefly unreachable.
@@ -140,7 +140,7 @@ func (p *ClaudeProvider) resolveMCPToken() string {
 // terminal the way there is for a headless CLI restart — re-resolving on
 // every keystroke would buy nothing a session actually needs.
 func (p *ClaudeProvider) refreshHostSpec() {
-	if relay.ServiceToken() == "" {
+	if !relay.Launched() {
 		return
 	}
 	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: p.session.ProjectID, Directory: p.directory})

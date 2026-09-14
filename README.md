@@ -36,8 +36,10 @@ env var to pin it).
 ```
 
 Builds both binaries and registers the service with relay. When relay spawns it,
-relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` + `RELAY_SERVICE_TOKEN`
-and registers a manifest (see [Service manifest](#service-manifest)).
+relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` + `RELAY_LAUNCH_FD`,
+reads a one-time launch secret from that fd, authenticates with a `Hello`, and
+registers a manifest (see [Service manifest](#service-manifest)). No relay
+credential is ever held in the environment.
 
 ## Configuration
 

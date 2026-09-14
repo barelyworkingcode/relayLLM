@@ -14,34 +14,22 @@ import (
 )
 
 // Minimal client for relay's bridge Unix socket. Used to resolve a
-// project's runtime env (token, working dir, skill path) at PTY spawn time.
-// Authenticates with the full-access service token relay injected via
-// RELAY_SERVICE_TOKEN when it spawned this process. The wire format mirrors
+// project's runtime env (token, working dir, host) at spawn time and to
+// register the manifest. Requests carry no token: relay authenticates them by
+// the peer audit token it bound at Hello (launch.go). The wire format mirrors
 // relay/bridge — newline-delimited JSON, one request, one response.
 
 const (
 	relayBridgeSocketName = "relay.sock"
 	relayBridgeTimeout    = 5 * time.Second
 
-	// Env vars relay injects into every spawned service. Mirrors relay's
-	// own injection in service_registry.go. Constants live here (the bridge
-	// client) so both consumers (PTY env resolution, manifest registration)
-	// reference them through the same channel.
+	// Env vars relay injects into every spawned service. None is secret.
 	EnvBridgeSocket = "RELAY_BRIDGE_SOCKET"
 	EnvServiceID    = "RELAY_SERVICE_ID"
 
-	// EnvFrontendToken is relay's front-door bearer. relay injects it into every
-	// spawned service, but relayLLM never uses it (it's a backend, not a frontend
-	// consumer) — it must be stripped from child env so it never leaks into a
-	// shell. Mirrors relay/bridge.EnvFrontendToken.
-	EnvFrontendToken = "RELAY_FRONTEND_TOKEN"
-
-	// EnvServiceToken is the full-access service token used to authenticate
-	// bridge calls (ResolvePtyEnv, RegisterManifest). Mirrors
-	// relay/bridge.EnvServiceToken. It is NOT a project token and must never
-	// be injected into a spawned child shell. EnvServiceTokenLegacy is the
-	// pre-rename name, accepted as a transition fallback; drop once relay
-	// stops setting it.
+	// Credential names relay no longer sets. relayLLM never reads them; they
+	// exist only so they can be scrubbed (see removedCredentialEnvKeys).
+	EnvFrontendToken      = "RELAY_FRONTEND_TOKEN"
 	EnvServiceToken       = "RELAY_SERVICE_TOKEN"
 	EnvServiceTokenLegacy = "RELAY_MCP_TOKEN"
 
@@ -106,6 +94,7 @@ type RelayProjectTemplateResponse struct {
 // BridgeRequest is the on-wire request envelope.
 type BridgeRequest struct {
 	Type      string          `json:"type"`
+	Name      string          `json:"name,omitempty"`
 	Token     string          `json:"token,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
@@ -133,41 +122,24 @@ func relayBridgeSocketPath() string {
 	return filepath.Join(configDir, "relay", relayBridgeSocketName)
 }
 
-// ServiceToken returns the full-access service token relay injected at spawn,
-// preferring the current env name and falling back to the legacy name during
-// the cross-repo rename window. Empty when this process was not spawned by
-// relay (standalone/dev runs).
-func ServiceToken() string {
-	if t := os.Getenv(EnvServiceToken); t != "" {
-		return t
+// SendBridgeRequest sends one tokenless request to relay's bridge and returns
+// the parsed envelope. Refuses unless Launched(): a standalone process has no
+// bound identity, so relay would treat the call as unauthenticated.
+func SendBridgeRequest(reqType string, args json.RawMessage) (BridgeResponse, error) {
+	if !Launched() {
+		return BridgeResponse{}, fmt.Errorf("relay bridge unavailable: not launched by relay")
 	}
-	return os.Getenv(EnvServiceTokenLegacy)
+	return roundTrip(relayBridgeSocketPath(), BridgeRequest{Type: reqType, Arguments: args})
 }
 
-// SendBridgeRequest dials relay's bridge socket, writes one request, reads
-// one response, returns the parsed envelope. Authentication is read from
-// the RELAY_SERVICE_TOKEN env (the service token relay issued at spawn),
-// falling back to the legacy name during the cross-repo rename window.
-//
-// Shared by every bridge-consuming call site (PTY env resolution, manifest
-// registration) so the dial / write / scan / parse machinery lives in
-// exactly one place.
-func SendBridgeRequest(reqType string, args json.RawMessage) (BridgeResponse, error) {
-	token := ServiceToken()
-	if token == "" {
-		return BridgeResponse{}, fmt.Errorf("%s not set in environment (relay-managed callers require a service token)", EnvServiceToken)
-	}
-
-	payload, err := json.Marshal(BridgeRequest{
-		Type:      reqType,
-		Token:     token,
-		Arguments: args,
-	})
+// roundTrip dials sockPath, writes req, and reads exactly one response. An
+// Error frame is returned as an error alongside the envelope.
+func roundTrip(sockPath string, req BridgeRequest) (BridgeResponse, error) {
+	payload, err := json.Marshal(req)
 	if err != nil {
 		return BridgeResponse{}, fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	sockPath := relayBridgeSocketPath()
 	conn, err := net.DialTimeout("unix", sockPath, relayBridgeTimeout)
 	if err != nil {
 		return BridgeResponse{}, fmt.Errorf("dial relay bridge at %s: %w (is Relay tray app running?)", sockPath, err)
@@ -199,8 +171,8 @@ func SendBridgeRequest(reqType string, args json.RawMessage) (BridgeResponse, er
 }
 
 // ResolvePtyEnv calls relay's bridge ResolvePtyEnv. Returns an error
-// if relay is not running, the project cannot be resolved, or the auth
-// token is missing.
+// if this process was not launched by relay, relay is not reachable, or the
+// project cannot be resolved.
 func ResolvePtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 	args, err := json.Marshal(req)
 	if err != nil {
@@ -223,8 +195,8 @@ func ResolvePtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
 // ResolveProjectTemplate calls relay's bridge ResolveProjectTemplate to
 // fetch a project-scoped shell template definition by (projectID, templateID),
 // mapping the response into a config.TerminalTemplate so the existing launch path is
-// unchanged. Returns an error if relay is not running, the service token is
-// missing, or the project/template cannot be resolved — the caller fails closed
+// unchanged. Returns an error if this process was not launched by relay, relay
+// is not reachable, or the project/template cannot be resolved — the caller fails closed
 // and never spawns a guessed command. The response carries no token; the
 // project token is injected separately by the existing ResolvePtyEnv path.
 func ResolveProjectTemplate(projectID, templateID string) (config.TerminalTemplate, error) {
