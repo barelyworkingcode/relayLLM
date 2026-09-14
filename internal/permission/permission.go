@@ -1,6 +1,9 @@
 package permission
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
@@ -75,12 +78,22 @@ type PermissionManager struct {
 	pending map[string]pendingPermission
 	sink    types.EventSink
 	clock   clk.Clock
+
+	// hookTokens tracks live per-session permission-hook credentials
+	// (MintHookToken/ValidateHookToken/RevokeHookToken). Keyed by the
+	// SHA-256 hash of the plaintext, never the plaintext itself, so a copy
+	// of this map (a heap dump, a future debug endpoint) can't be replayed
+	// as a bearer.
+	hookTokens     map[[32]byte]string // hash -> sessionID
+	hookTokenOwner map[string][32]byte // sessionID -> hash, for revocation
 }
 
 func NewPermissionManager() *PermissionManager {
 	return &PermissionManager{
-		pending: make(map[string]pendingPermission),
-		clock:   clk.DefaultClock,
+		pending:        make(map[string]pendingPermission),
+		clock:          clk.DefaultClock,
+		hookTokens:     make(map[[32]byte]string),
+		hookTokenOwner: make(map[string][32]byte),
 	}
 }
 
@@ -211,5 +224,59 @@ func (m *PermissionManager) DenyAllForSession(sessionID, reason string) {
 
 	for _, ch := range chans {
 		ch <- PermissionDecision{Decision: "deny", Reason: reason}
+	}
+}
+
+// MintHookToken generates a fresh per-session credential for the Claude Code
+// PreToolUse hook's callback into /api/permission and returns its plaintext
+// (32 random bytes, hex-encoded). Only its SHA-256 hash is retained, bound
+// to sessionID; the plaintext is handed to the one process that needs it
+// (the hook, via its env) and never persisted. Minting again for a sessionID
+// that already has a token drops the old one first, so at most one token is
+// ever live per session and a stale one from a crashed/replaced provider
+// can't out-live its replacement.
+func (m *PermissionManager) MintHookToken(sessionID string) string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	token := hex.EncodeToString(b)
+	hash := sha256.Sum256([]byte(token))
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if old, ok := m.hookTokenOwner[sessionID]; ok {
+		delete(m.hookTokens, old)
+	}
+	m.hookTokens[hash] = sessionID
+	m.hookTokenOwner[sessionID] = hash
+	return token
+}
+
+// ValidateHookToken reports the sessionID a hook token was minted for. A
+// false result covers every failure mode identically (unknown, revoked,
+// wrong session already ended) — callers must not distinguish them, since
+// doing so would tell a caller with a guessed/leaked hash more than "no".
+func (m *PermissionManager) ValidateHookToken(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	hash := sha256.Sum256([]byte(token))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sessionID, ok := m.hookTokens[hash]
+	return sessionID, ok
+}
+
+// RevokeHookToken invalidates sessionID's hook token, if any. Called when
+// the session's provider is killed (end, delete, or replaced by a fresh
+// provider on resume) so a token from a session that no longer exists can
+// never authenticate a permission decision for anything.
+func (m *PermissionManager) RevokeHookToken(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if hash, ok := m.hookTokenOwner[sessionID]; ok {
+		delete(m.hookTokens, hash)
+		delete(m.hookTokenOwner, sessionID)
 	}
 }
