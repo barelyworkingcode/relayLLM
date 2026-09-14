@@ -41,6 +41,11 @@ type TestServer struct {
 	WSHub        *WSHub
 	Token        string
 	FakeProvider *testutil.FakeProvider // set if ProviderFromFake is used
+	// Recovered is the handler value below bearerAuth — the same one
+	// app.go wraps in TCPDiagnosticsOnly for the --http-port front. Exposed
+	// so tests (tcp_diagnostics_test.go) can build both fronts from one mux
+	// without duplicating the full route registration.
+	Recovered http.Handler
 }
 
 // TestServerOptions controls how the server is wired.
@@ -127,7 +132,8 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	})
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
-	handler := BearerAuth(supportBearerToken, RecoverMiddleware(mux))
+	recovered := RecoverMiddleware(mux)
+	handler := BearerAuth(supportBearerToken, recovered)
 	srv := httptest.NewServer(handler)
 
 	t.Cleanup(func() {
@@ -144,6 +150,7 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 		Terminals: terminals,
 		WSHub:     wsHub,
 		Token:     supportBearerToken,
+		Recovered: recovered,
 	}
 }
 

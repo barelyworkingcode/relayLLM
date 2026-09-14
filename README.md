@@ -178,6 +178,13 @@ dispatcher. The authoritative wire contract is
 [`docs/event-protocol.md`](docs/event-protocol.md) and the route/message
 constants in `internal/api/api.go` / `internal/events/ws_messages.go`.
 
+The routes below are the Unix socket's (bearer-authenticated). The optional
+`--http-port` TCP listener is a *different, much smaller* surface: a
+read-only diagnostics allowlist (`GET /status`, `/status/status.css`,
+`/status/status.js`, `/api/status`, `/api/status/detailed`) for the `/status`
+dashboard, served anonymously — see `internal/api/tcp_diagnostics.go`.
+Everything else, including `/ws` and every mutating route, 404s there.
+
 **HTTP** (all JSON):
 
 - `GET/POST /api/sessions`, `POST /api/sessions/:id/message` (sync), `DELETE /api/sessions/:id`, `POST /api/sessions/:id/delete`, `POST /api/sessions/:id/stop`; pi-only `PUT /api/sessions/:id/model` and `…/thinking-level`.
