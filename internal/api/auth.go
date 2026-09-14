@@ -20,14 +20,17 @@ func GenerateBearerToken() string {
 }
 
 // bearerAuth wraps an http.Handler with bearer-token authentication. It
-// guards the Unix socket only — main.go's --http-port TCP front is served
+// guards the Unix socket only — app.go's --http-port TCP front is served
 // anonymously (see startMainTCPListener's call site), protected by
 // --http-bind rather than a token, deliberately matching --router-port's
-// existing unauthenticated-by-bind-address posture. There is therefore no
-// browser-facing credential path here anymore (no cookie, no ?token=
-// bootstrap) — every caller of the socket is a machine client (relay's
-// dispatcher, the permission hook, a direct socket client) that can just
-// send a header.
+// existing unauthenticated-by-bind-address posture. The TCP front's
+// anonymity is why it is additionally wrapped in TCPDiagnosticsOnly
+// (tcp_diagnostics.go): with no credential at all, the route surface itself
+// has to be the read-only diagnostics allowlist rather than the full table
+// this middleware guards. There is therefore no browser-facing credential
+// path here anymore (no cookie, no ?token= bootstrap) — every caller of the
+// socket is a machine client (relay's dispatcher, the permission hook, a
+// direct socket client) that can just send a header.
 //
 // If `token` is empty, the middleware is a no-op pass-through. This is the
 // dev-mode default — relayLLM running without orchestrator credentials.
