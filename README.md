@@ -234,7 +234,9 @@ relayLLM detects its run mode from `RELAY_BRIDGE_SOCKET`:
 - **Standalone** (unset) — binds its own socket, serves direct clients.
 - **Enhanced** (set) — same listener and wire language, plus it dials relay's
   bridge with a `RegisterManifest` payload declaring its routes, internal socket
-  + token, status endpoint, and actions. relay's dispatcher forwards matching
+  + relayLLM's own bearer token, status endpoint, and actions. Bridge requests
+  carry no relay credential: relay recognises relayLLM by the launch identity
+  bound at `Hello`. relay's dispatcher forwards matching
   front-door traffic over that socket.
 
 The mode switch is a deployment fact, not a code fork — one config loader, two

@@ -157,9 +157,9 @@ func fixupMCPServersString(raw json.RawMessage, target *map[string]mcp.MCPServer
 // resolved. Used by both BaseChatProvider (in-process MCP manager) and the
 // Claude provider (which renders the same shape as a --mcp-config JSON).
 //
-// Fails closed: an empty projectToken yields ok=false. We never fall back to
-// the full-access service token — that would hand the spawned `relay mcp`
-// child god-mode bridge access instead of the project's scoped permissions.
+// Fails closed: an empty projectToken yields ok=false. A project token is the
+// most the spawned `relay mcp` child may ever hold; there is no broader relay
+// credential to fall back to, and none may be introduced as one.
 func resolveRelayMCPServer(projectToken string) (mcp.MCPServerConfig, bool) {
 	cmd := os.Getenv("RELAY_MCP_COMMAND")
 	if cmd == "" {
