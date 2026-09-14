@@ -55,20 +55,6 @@ func ListenAddrs(binds []string, port string) []string {
 	return addrs
 }
 
-// FirstNonLoopbackBind returns the first bind that isn't loopback, so a
-// caller can name the specific offender in an error message rather than
-// dumping the whole list. The wildcards ("", "0.0.0.0", "::") report as
-// non-loopback here — net.ParseIP gives them no IsLoopback — which is the
-// correct fail-closed answer: they accept off-box connections too.
-func FirstNonLoopbackBind(binds []string) (string, bool) {
-	for _, b := range binds {
-		if !IsLoopbackHost(b) {
-			return b, true
-		}
-	}
-	return "", false
-}
-
 // ListenAll binds every address in addrs on a best-effort basis: an address
 // that fails to bind (already in use, no such interface, …) is logged and
 // skipped rather than aborting every other bind. This is deliberate, not an

@@ -64,32 +64,6 @@ func TestListenAddrs(t *testing.T) {
 	}
 }
 
-// TestFirstNonLoopbackBind pins the fail-closed loopback scan: any single
-// non-loopback bind in the list is the offender that gets named, and
-// wildcards count as non-loopback since they accept off-box connections
-// too.
-func TestFirstNonLoopbackBind(t *testing.T) {
-	cases := []struct {
-		name   string
-		binds  []string
-		want   string
-		wantOK bool
-	}{
-		{"all loopback", []string{"127.0.0.1", "::1", "localhost"}, "", false},
-		{"one lan address", []string{"127.0.0.1", "192.168.64.1"}, "192.168.64.1", true},
-		{"wildcard counts as non-loopback", []string{"0.0.0.0"}, "0.0.0.0", true},
-		{"empty list", nil, "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			gotHost, gotOK := FirstNonLoopbackBind(tc.binds)
-			if gotHost != tc.want || gotOK != tc.wantOK {
-				t.Errorf("FirstNonLoopbackBind(%v) = (%q, %t), want (%q, %t)", tc.binds, gotHost, gotOK, tc.want, tc.wantOK)
-			}
-		})
-	}
-}
-
 // TestListenAll_PartialFailureSkipsBadAddressAndKeepsTheRest covers the
 // best-effort bind contract: a later address failing (already in use) must
 // not take down an earlier, already-bound listener, and must not itself be

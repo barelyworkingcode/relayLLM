@@ -91,9 +91,9 @@ type RouterConfig struct {
 }
 
 // ForwardsClientCredentials reports whether any route forwards the client's
-// own credential upstream (router.anthropic or router.passthrough). main
-// uses it to refuse a plaintext non-loopback bind. StartRelayRouter uses it
-// to start a router that has no local backends. Nil-safe.
+// own credential upstream (router.anthropic or router.passthrough).
+// StartRelayRouter uses it to start a router that has no local backends.
+// Nil-safe.
 func (c *RouterConfig) ForwardsClientCredentials() bool {
 	return c != nil && (c.Anthropic != nil || len(c.Passthrough) > 0)
 }
