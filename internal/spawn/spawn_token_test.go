@@ -42,6 +42,26 @@ func TestChildBaseEnv_StripsRelaySecrets(t *testing.T) {
 	}
 }
 
+// relayLLM's own internal bearer (RELAY_LLM_TOKEN) authenticates every
+// request on its socket — strictly more power than any spawned child needs.
+// It reaches this process's own environment only when relay launched it
+// with the flag's env-var form, so this is the one place that fact can be
+// stopped from becoming every child's problem. RELAY_LLM_HOOK_TOKEN is
+// scrubbed too: buildClaudeEnv sets the real per-session value explicitly
+// after ChildBaseEnv runs, so an inherited stale value must never survive
+// long enough to be mistaken for it.
+func TestChildBaseEnv_StripsInternalBearerAndHookToken(t *testing.T) {
+	t.Setenv("RELAY_LLM_TOKEN", "internal-bearer-secret")
+	t.Setenv("RELAY_LLM_HOOK_TOKEN", "stale-hook-token")
+
+	env := ChildBaseEnv()
+	for _, k := range []string{"RELAY_LLM_TOKEN", "RELAY_LLM_HOOK_TOKEN"} {
+		if envHasKey(env, k) {
+			t.Errorf("%s must be stripped from child base env", k)
+		}
+	}
+}
+
 // SetProjectTokenEnv writes the project token under both the current and legacy
 // names (transition shim) and no-ops on empty.
 func TestSetProjectTokenEnv(t *testing.T) {

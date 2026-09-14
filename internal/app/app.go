@@ -227,9 +227,9 @@ func Main() {
 	})
 
 	// The Claude CLI hook subprocess (runs as the user) dials our Unix
-	// socket and authenticates with the internal token.
+	// socket and authenticates with a per-session token minted for it
+	// (see HookScopedBearerAuth below) — never this process's own bearer.
 	sessions.SetHookSocket(*socketPath)
-	sessions.SetHookToken(*internalToken)
 	sessions.SetOllamaURL(*ollamaURL)
 
 	if len(cfg.OpenAI.Endpoints) > 0 {
@@ -315,19 +315,21 @@ func Main() {
 	//
 	// The Unix socket and the --http-port TCP front deliberately do NOT
 	// share one handler value: the socket carries relay's manifest bridging
-	// and the permission hook's callback (both machine clients
-	// authenticating with the bearer token, never a browser), so it keeps
-	// bearerAuth in front and serves the full route table. The TCP front
-	// carries no bearer token either — reachability there is still gated by
-	// --http-bind, the same posture --router-port has always had — but on
-	// top of that it is wrapped in api.TCPDiagnosticsOnly, which serves only
-	// the read-only /status dashboard and 404s everything else (every
-	// mutating route, /ws, terminal/session content). Anyone who can reach
-	// the TCP port can no longer create a terminal, drive a session, or open
-	// a WebSocket — only the bearer-authenticated socket can. See
-	// TCPDiagnosticsOnly's and bearerAuth's doc comments.
+	// and the permission hook's callback (both machine clients, never a
+	// browser), so it keeps an auth layer in front and serves the full
+	// route table. The permission hook authenticates with a per-session
+	// token, not the internal bearer every other caller on this socket
+	// uses — see HookScopedBearerAuth's doc comment for the one route that
+	// exception applies to. The TCP front carries no bearer token at all —
+	// reachability there is still gated by --http-bind, the same posture
+	// --router-port has always had — but on top of that it is wrapped in
+	// api.TCPDiagnosticsOnly, which serves only the read-only /status
+	// dashboard and 404s everything else (every mutating route, /ws,
+	// terminal/session content). Anyone who can reach the TCP port can no
+	// longer create a terminal, drive a session, or open a WebSocket — only
+	// the authenticated socket can. See TCPDiagnosticsOnly's doc comment.
 	recovered := api.RecoverMiddleware(mux)
-	socketHandler := api.BearerAuth(*internalToken, recovered)
+	socketHandler := api.HookScopedBearerAuth(*internalToken, perms.ValidateHookToken, recovered)
 	tcpHandler := api.TCPDiagnosticsOnly(recovered)
 
 	server := &http.Server{Handler: socketHandler}
