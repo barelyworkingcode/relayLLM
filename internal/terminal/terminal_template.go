@@ -13,13 +13,20 @@ import (
 	"relayllm/internal/spawn"
 )
 
+// claudeCodeTemplateID is the built-in Claude Code template's id — the
+// settings.json `pty` map key, not Session.ProviderType's "claude" (a
+// different string in a different namespace; see provider_capabilities.go).
+// SSH-host-path branches in terminal_session.go key off this constant so the
+// two can't drift apart again.
+const claudeCodeTemplateID = "claude-code"
+
 // protectedTemplateIDs are seeded built-ins that cannot be deleted or updated
 // via the API. Users can still hand-edit settings.json to fully remove them.
 // This set also drives the `builtIn` field on API responses.
 var protectedTemplateIDs = map[string]bool{
-	"claude-code": true,
-	"opencode":    true,
-	"shell":       true,
+	claudeCodeTemplateID: true,
+	"opencode":           true,
+	"shell":              true,
 }
 
 // ResolveTemplateCommand returns the absolute path to the template's command,
@@ -45,7 +52,7 @@ func ResolveTemplateCommand(t config.TerminalTemplate) string {
 // first run. Lean shape — only the fields users care to see and edit.
 func seedDefaultPTYConfig() map[string]config.TerminalTemplate {
 	return map[string]config.TerminalTemplate{
-		"claude-code": {
+		claudeCodeTemplateID: {
 			Name:           "Claude Code",
 			Command:        "claude",
 			Icon:           "terminal",
