@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"relayllm/internal/config"
 	"relayllm/internal/relay"
 	"relayllm/internal/sshhost"
 	"relayllm/internal/testutil"
@@ -60,7 +61,7 @@ func TestBuildHostTerminalExec_ShellTemplate_NoDirLandsInHostHome(t *testing.T) 
 
 func TestBuildHostTerminalExec_ClaudeTemplate(t *testing.T) {
 	spec := hostTerminalSpec()
-	_, argv := buildHostTerminalExec(spec, "claude", "/proj", "claude", []string{"--resume", "abc"})
+	_, argv := buildHostTerminalExec(spec, claudeCodeTemplateID, "/proj", "claude", []string{"--resume", "abc"})
 	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	want := `cd '/proj' && exec env 'TERM'='xterm-256color' '/opt/homebrew/bin/claude' '--resume' 'abc'`
 	if decoded != want {
@@ -73,13 +74,25 @@ func TestBuildHostTerminalExec_ClaudeTemplate_UsesHostClaudePathNotCommand(t *te
 	// "command" (the template's Command field) is deliberately wrong here —
 	// the claude branch must always use spec.ClaudePath, never the template's
 	// own (locally-resolved) command string.
-	_, argv := buildHostTerminalExec(spec, "claude", "/proj", "/usr/local/bin/claude-wrong", nil)
+	_, argv := buildHostTerminalExec(spec, claudeCodeTemplateID, "/proj", "/usr/local/bin/claude-wrong", nil)
 	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 	if !strings.Contains(decoded, "/opt/homebrew/bin/claude") {
 		t.Errorf("decoded script must use host.ClaudePath, got %q", decoded)
 	}
 	if strings.Contains(decoded, "claude-wrong") {
 		t.Errorf("decoded script must not use the template's local command, got %q", decoded)
+	}
+}
+
+// "claude" is Session.ProviderType's namespace (provider_capabilities.go),
+// not a template id — the built-in template's id is "claude-code"
+// (claudeCodeTemplateID). A stray literal "claude" id must fall through to
+// the generic interactive-shell branch, not the RemoteCommand one.
+func TestBuildHostTerminalExec_BareClaudeID_IsNotTheClaudeCodeBranch(t *testing.T) {
+	_, argv := buildHostTerminalExec(hostTerminalSpec(), "claude", "/proj", "claude", nil)
+	decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
+	if !strings.Contains(decoded, "-lic") {
+		t.Errorf("tmplID=%q must run through the generic branch (-lic), got %q", "claude", decoded)
 	}
 }
 
@@ -91,6 +104,37 @@ func TestBuildHostTerminalExec_OtherTemplate_RunsThroughInteractiveShell(t *test
 	}
 	if !strings.HasPrefix(decoded, `cd '/proj' && exec env 'TERM'='xterm-256color' "$SHELL" -lic `) {
 		t.Errorf("unexpected script shape: %q", decoded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildHostCmd — the probe-required guard ahead of buildHostTerminalExec.
+// ---------------------------------------------------------------------------
+
+func TestBuildHostCmd_ClaudeCodeTemplate_RequiresProbedClaudePath(t *testing.T) {
+	spec := hostTerminalSpec()
+	spec.ClaudePath = ""
+	s := &TerminalSession{Host: spec, Directory: "/proj"}
+
+	_, err := s.buildHostCmd(config.TerminalTemplate{ID: claudeCodeTemplateID, Command: "claude"})
+	if err == nil {
+		t.Fatal("buildHostCmd: want error when the host has no probed claude path, got nil")
+	}
+}
+
+func TestBuildHostCmd_ClaudeCodeTemplate_RunsOnceProbed(t *testing.T) {
+	s := &TerminalSession{Host: hostTerminalSpec(), Directory: "/proj"}
+
+	cmd, err := s.buildHostCmd(config.TerminalTemplate{ID: claudeCodeTemplateID, Command: "claude"})
+	if err != nil {
+		t.Fatalf("buildHostCmd: %v", err)
+	}
+	if cmd.Path != "ssh" && !strings.HasSuffix(cmd.Path, "/ssh") {
+		t.Errorf("cmd.Path = %q, want the ssh binary", cmd.Path)
+	}
+	decoded := sshhost.RemoteShellCommandDecodedForTest(cmd.Args[len(cmd.Args)-1])
+	if !strings.Contains(decoded, "/opt/homebrew/bin/claude") {
+		t.Errorf("host branch did not run for template id %q: %s", claudeCodeTemplateID, decoded)
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 // (v1 carries no relay MCPs/tokens onto a host — decision 6).
 func TestSec_HostTerminalExec_ArgvNeverContainsRelaySecrets(t *testing.T) {
 	spec := hostTerminalSpec()
-	for _, tmplID := range []string{"shell", "claude", "npm-test"} {
+	for _, tmplID := range []string{"shell", claudeCodeTemplateID, "npm-test"} {
 		_, argv := buildHostTerminalExec(spec, tmplID, "/proj", "npm", []string{"test"})
 		decoded := sshhost.RemoteShellCommandDecodedForTest(argv[len(argv)-1])
 		for _, secret := range []string{"RELAY_PROJECT_TOKEN", "RELAY_TOKEN", "RELAY_SERVICE_TOKEN", "RELAY_LLM_HOOK"} {
