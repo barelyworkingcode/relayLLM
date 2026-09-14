@@ -9,9 +9,8 @@ import (
 	"strings"
 )
 
-// generateBearerToken returns a 64-char (32-byte) random hex token. Used
-// when relayLLM auto-provisions its own listener auth (standalone, no
-// flag/env override). Same shape as relay's own service tokens.
+// GenerateBearerToken returns a 64-char (32-byte) random hex token. Used
+// when relayLLM auto-provisions its own listener auth (no flag/env override).
 func GenerateBearerToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

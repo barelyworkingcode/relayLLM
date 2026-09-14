@@ -19,7 +19,7 @@ func envHasKey(env []string, key string) bool {
 	return false
 }
 
-// ChildBaseEnv must strip ALL of relayLLM's relay credentials — including any
+// ChildBaseEnv must strip ALL relay credential names — including any
 // inherited project-token value — so nothing leaks into a child we don't
 // explicitly inject for. The correct per-child project token is added back via
 // SetProjectTokenEnv after ChildBaseEnv.

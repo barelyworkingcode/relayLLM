@@ -58,9 +58,9 @@ func SetProjectTokenEnv(env []string, token string) []string {
 	return env
 }
 
-// ChildBaseEnv returns os.Environ() with relayLLM's own relay credentials
+// ChildBaseEnv returns os.Environ() with every relaySecretEnvKeys entry
 // stripped. Use it as the base environment for every spawned child instead of
-// os.Environ() directly, so relay secrets never leak into a shell/LLM/mcp child.
+// os.Environ() directly, so no stale relay credential reaches a shell/LLM/mcp child.
 func ChildBaseEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
