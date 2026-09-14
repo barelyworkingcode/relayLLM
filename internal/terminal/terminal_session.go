@@ -205,7 +205,7 @@ func (s *TerminalSession) buildHostCmd(tmpl config.TerminalTemplate) (*exec.Cmd,
 	if len(host.SSHArgv) == 0 {
 		return nil, fmt.Errorf("host %q has no ssh_argv", host.Name)
 	}
-	if tmpl.ID == "claude" && host.ClaudePath == "" {
+	if tmpl.ID == claudeCodeTemplateID && host.ClaudePath == "" {
 		return nil, fmt.Errorf("host %q has no claude: run a probe", host.Name)
 	}
 
@@ -224,7 +224,8 @@ func (s *TerminalSession) buildHostCmd(tmpl config.TerminalTemplate) (*exec.Cmd,
 // interactive shell with none) + `--` + <remote>. tmplID selects the remote
 // command shape (../relay/docs/ssh-hosts.md):
 //   - "" or "shell": the host's own login shell, `exec "$SHELL" -l`
-//   - "claude": claude_path + args, via RemoteCommand's quoted argv form
+//   - "claude-code" (claudeCodeTemplateID): claude_path + args, via
+//     RemoteCommand's quoted argv form
 //   - anything else: command + args through the host's interactive login
 //     shell (`-lic`) so its PATH resolves the command, mirroring what a
 //     locally-resolved template assumes about the console's PATH
@@ -238,7 +239,7 @@ func buildHostTerminalExec(spec *types.HostSpec, tmplID, dir, command string, ar
 	switch tmplID {
 	case "", "shell":
 		remote = sshhost.RemoteShellCommand(dir, termEnvPrefix()+`"$SHELL" -l`)
-	case "claude":
+	case claudeCodeTemplateID:
 		full := append([]string{spec.ClaudePath}, args...)
 		remote = sshhost.RemoteCommand(dir, full, map[string]string{"TERM": "xterm-256color"})
 	default:
