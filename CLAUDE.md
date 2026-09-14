@@ -80,8 +80,8 @@ internal/servermanager/           llama.cpp / mlx-serve managed-process lifecycl
 internal/config/config.go         Unified config loader (settings.json -> OpenAI + llama-server + mlx-serve
                                    configs) + every provider/router/server schema struct
 internal/relay/                   Bridge socket transport + manifest
-  bridge_client.go                   Transport (SendBridgeRequest) + PtyEnv resolution.
-                                      RELAY_BRIDGE_SOCKET env var detection.
+  bridge_client.go                   Transport (SendBridgeRequest, tokenless) + PtyEnv resolution.
+  launch.go                          Launch identity: RELAY_LAUNCH_FD secret read + Hello; Launched()
   manifest.go                        Service manifest declaration + MaybeRegisterManifest
 internal/spawn/spawn.go           Shared relay-managed spawn prep (project-token resolution + ${SUB} expansion)
 internal/permission/permission.go Permission request/response tracking
@@ -369,7 +369,7 @@ Runs `go build ./...`, `go vet ./...`, and the hermetic test suite under the rac
 - Need a scripted LLM stream? `srv.SetFakeProvider()` then `fp.ScriptText(...)` / `fp.ScriptResult(...)`.
 - Need deterministic timing? `NewFakeClock(t0)` + `clock.Advance(d)`. Wire via `TestServerOptions{Clock: ...}`.
 - Need fake tool calls? `NewFakeMCPClient(FakeTool{Name, Handler})`.
-- Need to validate the relay bridge handshake? `NewFakeBridge(t)` + `withBridgeEnv(t, ...)`.
+- Need relay bridge features in a test? `NewFakeBridge(t)` + `LaunchViaBridge(t, fb, serviceID)` (real pipe, real Hello). `WithBridgeEnv` sets the env without launching, i.e. standalone.
 
 ## Ecosystem
 
@@ -402,10 +402,12 @@ relayLLM is one of several relay-enhanced services. It serves session/provider o
 
 ## Service Manifest Integration
 
-relayLLM detects its run mode from `RELAY_BRIDGE_SOCKET`:
+relayLLM detects its run mode from `RELAY_LAUNCH_FD`:
 
-- **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct HTTP/WS clients.
-- **Enhanced** (env set): same listener + same wire language, plus it dials the bridge socket and sends a `RegisterManifest` payload declaring its routes, status endpoint, and actions. Relay's dispatcher then forwards matching front-door requests over the internal socket using the same bearer token relayLLM declared in the manifest.
+- **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct HTTP/WS clients. No bridge call is ever made.
+- **Enhanced** (env set): the first thing `app.Main` does — before anything can spawn a child — is `relay.BootstrapLaunch`: read the 64-hex launch secret from that fd to EOF, close it, unset `RELAY_LAUNCH_FD`, and send `Hello` (`name` = `RELAY_SERVICE_ID`) over `RELAY_BRIDGE_SOCKET`. Relay binds this process's peer audit token as the service identity. Any failure exits non-zero — never a silent fall back to standalone. After that, same listener + same wire language, plus a `RegisterManifest` declaring routes, status endpoint, and actions; relay's dispatcher forwards matching front-door requests over the internal socket using the bearer token relayLLM declared in the manifest.
+
+`relay.Launched()` (Hello succeeded) is the only "relay bridge available" signal. Every bridge request carries an **empty token**; relay authenticates it by the peer identity. relayLLM holds no relay credential in its environment: `RELAY_SERVICE_TOKEN`, `RELAY_MCP_TOKEN` and `RELAY_FRONTEND_TOKEN` are never read, and are scrubbed from its own env and every child's. Contract: `../spec-launch-identity.md`.
 
 The mode switch is a deployment fact, not a code fork — one config loader, two sources. Both `internal/relay/manifest.go` (what relayLLM exposes) and `internal/relay/bridge_client.go` (how it talks to relay) are small and self-contained.
 
@@ -419,4 +421,4 @@ See `../relay/docs/service-manifest.md` for the full protocol contract.
 
 ### Relay-side token rotation
 
-The `RELAY_PROJECT_TOKEN` env var carried into chat-provider MCP spawns, pi sessions, and project-scoped terminals is a *relay project token*, not relayLLM's local bearer. **relayLLM never stores it and never receives it from eve** — it resolves the token just-in-time from relay's bridge by `projectId` at every spawn (`resolveProjectToken` → `ResolvePtyEnv`), injects it, and discards it. This makes rotation transparent (the next spawn picks up the new token via `RotateProjectToken`) and means a relayLLM restart can't lose it (there's nothing stored to lose — the old `Session.McpToken` field is gone). If a project token can't be resolved, the child gets no token (fail closed) — relayLLM never substitutes the full-access `RELAY_SERVICE_TOKEN`. The service token is used *only* to authenticate relayLLM's own bridge calls. See `../relay/docs/decisions/007-project-token-brokering.md` and `../relay/docs/tokens.md`.
+The `RELAY_PROJECT_TOKEN` env var carried into chat-provider MCP spawns, pi sessions, and project-scoped terminals is a *relay project token*, not relayLLM's local bearer. **relayLLM never stores it and never receives it from eve** — it resolves the token just-in-time from relay's bridge by `projectId` at every spawn (`resolveProjectToken` → `ResolvePtyEnv`), injects it, and discards it. This makes rotation transparent (the next spawn picks up the new token via `RotateProjectToken`) and means a relayLLM restart can't lose it (there's nothing stored to lose — the old `Session.McpToken` field is gone). If a project token can't be resolved, or relay did not launch this process, the child gets no token (fail closed). relayLLM has no service token to substitute: its own bridge calls are authenticated by launch identity. See `../relay/docs/decisions/007-project-token-brokering.md` and `../relay/docs/tokens.md`.

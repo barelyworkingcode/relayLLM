@@ -74,7 +74,7 @@ func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(relay.RelayPtyEnvResponse{RelayToken: "resolved-token-xyz", WorkingDir: "/proj"})
 	fb.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1", Directory: "/proj"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "resolved-token-xyz" {
@@ -94,11 +94,10 @@ func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 	}
 }
 
-// Standalone relayLLM (no service token in env) has no bridge to ask; return
-// empty rather than dialing and warning — and never escalate to a service token.
+// Standalone relayLLM (not launched by relay) has no bridge to ask; return
+// empty rather than dialing and warning.
 func TestClaudeResolveMCPToken_StandaloneReturnsEmpty(t *testing.T) {
-	t.Setenv(relay.EnvServiceToken, "")
-	t.Setenv(relay.EnvServiceTokenLegacy, "")
+	relay.ResetLaunchForTesting()
 	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "" {
 		t.Errorf("token = %q, want empty (standalone)", got)

@@ -29,9 +29,10 @@ func TestChildBaseEnv_StripsRelaySecrets(t *testing.T) {
 	t.Setenv(relay.EnvFrontendToken, "frontend-secret")
 	t.Setenv(relay.EnvProjectToken, "stale-project")
 	t.Setenv(relay.EnvProjectTokenLegacy, "stale-legacy-project")
+	t.Setenv(relay.EnvLaunchFD, "3")
 
 	env := ChildBaseEnv()
-	for _, k := range []string{relay.EnvServiceToken, relay.EnvServiceTokenLegacy, relay.EnvFrontendToken, relay.EnvProjectToken, relay.EnvProjectTokenLegacy} {
+	for _, k := range []string{relay.EnvServiceToken, relay.EnvServiceTokenLegacy, relay.EnvFrontendToken, relay.EnvProjectToken, relay.EnvProjectTokenLegacy, relay.EnvLaunchFD} {
 		if envHasKey(env, k) {
 			t.Errorf("%s must be stripped from child base env", k)
 		}
@@ -65,7 +66,7 @@ func TestRelayManagedSpec_ProjectIDIsManaged(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(relay.RelayPtyEnvResponse{RelayToken: "scoped-tok", WorkingDir: "/proj"})
 	fb.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	spec := RelayManagedSpec{ProjectID: "proj-1", Directory: "/proj"}
 	subs, err := spec.Resolve()
@@ -110,7 +111,7 @@ func TestResolveProjectToken_FromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(relay.RelayPtyEnvResponse{RelayToken: "jit-tok", WorkingDir: "/proj"})
 	fb.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	got := ResolveProjectToken(&types.Session{ID: "s1", ProjectID: "proj-9", Directory: "/proj"})
 	if got != "jit-tok" {
@@ -127,11 +128,10 @@ func TestResolveProjectToken_FromBridge(t *testing.T) {
 	}
 }
 
-// Standalone relayLLM (no service token in env) never dials the bridge and never
-// escalates to a service token — it returns empty so callers fail closed.
+// Standalone relayLLM (not launched by relay) never dials the bridge — it
+// returns empty so callers fail closed.
 func TestResolveProjectToken_StandaloneEmpty(t *testing.T) {
-	t.Setenv(relay.EnvServiceToken, "")
-	t.Setenv(relay.EnvServiceTokenLegacy, "")
+	relay.ResetLaunchForTesting()
 	if got := ResolveProjectToken(&types.Session{ID: "s1", ProjectID: "proj-1"}); got != "" {
 		t.Errorf("token = %q, want empty", got)
 	}
