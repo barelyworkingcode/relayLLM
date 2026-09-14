@@ -36,8 +36,10 @@ env var to pin it).
 ```
 
 Builds both binaries and registers the service with relay. When relay spawns it,
-relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` + `RELAY_SERVICE_TOKEN`
-and registers a manifest (see [Service manifest](#service-manifest)).
+relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` + `RELAY_LAUNCH_FD`,
+reads a one-time launch secret from that fd, authenticates with a `Hello`, and
+registers a manifest (see [Service manifest](#service-manifest)). No relay
+credential is ever held in the environment.
 
 ## Configuration
 
@@ -232,7 +234,9 @@ relayLLM detects its run mode from `RELAY_BRIDGE_SOCKET`:
 - **Standalone** (unset) — binds its own socket, serves direct clients.
 - **Enhanced** (set) — same listener and wire language, plus it dials relay's
   bridge with a `RegisterManifest` payload declaring its routes, internal socket
-  + token, status endpoint, and actions. relay's dispatcher forwards matching
+  + relayLLM's own bearer token, status endpoint, and actions. Bridge requests
+  carry no relay credential: relay recognises relayLLM by the launch identity
+  bound at `Hello`. relay's dispatcher forwards matching
   front-door traffic over that socket.
 
 The mode switch is a deployment fact, not a code fork — one config loader, two

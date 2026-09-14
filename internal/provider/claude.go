@@ -120,15 +120,15 @@ func (p *ClaudeProvider) relayMCPConfigJSON(projectToken string) string {
 // child. It resolves just-in-time from relay's bridge by project id — relay is
 // the sole authority, so this is restart- and rotation-safe and never depends
 // on a stored/eve-supplied token. Returns "" when not relay-managed; callers
-// degrade (they never fall back to the full-access service token).
+// then give the child no relay token at all.
 func (p *ClaudeProvider) resolveMCPToken() string {
 	return spawn.ResolveProjectToken(p.session)
 }
 
 // refreshHostSpec re-resolves the session's Host via relay's bridge before
 // each spawn, so a probe update (new claude_path, host record edit) takes
-// effect on the next turn. On any failure — including a standalone run with
-// no service token — it leaves the already-stored Host untouched: a Host is
+// effect on the next turn. On any failure — including a standalone run relay
+// did not launch — it leaves the already-stored Host untouched: a Host is
 // a routing fact, not a credential, so falling back to the stored value (not
 // clearing it) is what lets a persisted host session resume after a
 // relayLLM restart while relay is briefly unreachable.
@@ -140,7 +140,7 @@ func (p *ClaudeProvider) resolveMCPToken() string {
 // terminal the way there is for a headless CLI restart — re-resolving on
 // every keystroke would buy nothing a session actually needs.
 func (p *ClaudeProvider) refreshHostSpec() {
-	if relay.ServiceToken() == "" {
+	if !relay.Launched() {
 		return
 	}
 	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: p.session.ProjectID, Directory: p.directory})
@@ -247,8 +247,8 @@ func (p *ClaudeProvider) buildClaudeArgs(mcpCfg string) []string {
 // environment (spawn.ChildBaseEnv after spawn.EnsurePath); mcpToken is the resolved
 // project-scoped relay token — "" when the session is not relay-managed.
 //
-// Fail-closed contract: an empty mcpToken sets NO project-token var (never the
-// full-access service token — see spawn.SetProjectTokenEnv). RELAY_LLM_HEADLESS is
+// Fail-closed contract: an empty mcpToken sets NO project-token var, and a child
+// never holds more than a project token (see spawn.SetProjectTokenEnv). RELAY_LLM_HEADLESS is
 // set if and only if the effective permission mode is bypassPermissions, so the
 // hook's auto-approve only ever fires for a session that is actually headless.
 func (p *ClaudeProvider) buildClaudeEnv(base []string, mcpToken string) []string {

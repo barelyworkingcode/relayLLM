@@ -476,7 +476,7 @@ func TestSession_CreateSession_ResolvesHostFromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	host := &types.HostSpec{ID: "h1", Name: "devbox", SSHArgv: []string{"ssh", "admin@devbox"}, ClaudePath: "/opt/homebrew/bin/claude"}
 	fb.SetHostPtyEnv("/home/admin/proj", host)
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	sess, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "fake/m1", "", false, "fake", nil)
 	if err != nil {
@@ -494,7 +494,7 @@ func TestSession_CreateSession_NoProjectIDNeverResolvesHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("/home/admin/proj", &types.HostSpec{ID: "h1", Name: "devbox"})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	sess, err := mgr.CreateSession("", t.TempDir(), "s", "fake/m1", "", false, "fake", nil)
 	if err != nil {
@@ -514,7 +514,7 @@ func TestSession_CreateSession_RefusesPiOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("/home/admin/proj", &types.HostSpec{ID: "h1", Name: "devbox"})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	_, err := mgr.CreateSession("proj-1", "/home/admin/proj", "s", "pi/anthropic/claude-sonnet-4", "", false, "pi", nil)
 	if err == nil {
@@ -539,7 +539,7 @@ func TestSession_CreateSession_SkipsClaudeMdReadOnHost(t *testing.T) {
 	mgr := newTestSessionManager(t)
 	fb := testutil.NewFakeBridge(t)
 	fb.SetHostPtyEnv("", &types.HostSpec{ID: "h1", Name: "devbox"})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("local secrets"), 0o644); err != nil {

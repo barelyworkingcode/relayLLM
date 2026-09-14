@@ -2,8 +2,8 @@ package testutil
 
 // FakeBridge — minimal Unix-socket implementation of relay's bridge wire
 // protocol, for tests of anything that dials relay's bridge socket
-// (PTY env resolution, manifest registration, host-project template
-// resolution).
+// (launch Hello, PTY env resolution, manifest registration, host-project
+// template resolution).
 
 import (
 	"bufio"
@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,14 +22,23 @@ import (
 // FakeBridge accepts newline-delimited JSON requests on a Unix socket,
 // records them, and replies with scripted responses. One connection per
 // request matches relayLLM's relay.SendBridgeRequest behavior.
+//
+// Hello requests are recorded separately (Hellos) and answered with an OK
+// naming the requested service unless SetHelloResponse overrides it. Any
+// other request carrying a non-empty token is answered with an unauthorized
+// Error, as relay does for a token that is not a project token.
 type FakeBridge struct {
 	socketPath string
 	listener   net.Listener
 
-	mu          sync.Mutex
-	requests    []relay.BridgeRequest
-	respondWith relay.BridgeResponse
+	mu            sync.Mutex
+	requests      []relay.BridgeRequest
+	hellos        []relay.BridgeRequest
+	respondWith   relay.BridgeResponse
+	helloResponse *relay.BridgeResponse
 }
+
+const unauthorizedCode = -32001
 
 // NewFakeBridge listens on a Unix socket and returns the running instance.
 // macOS has a 104-char limit on socket paths, so t.TempDir() (which buries
@@ -65,11 +75,18 @@ func NewFakeBridge(t *testing.T) *FakeBridge {
 // SocketPath is the path callers should set RELAY_BRIDGE_SOCKET to.
 func (b *FakeBridge) SocketPath() string { return b.socketPath }
 
-// SetResponse replaces the scripted reply. Useful for forcing an Error.
+// SetResponse replaces the scripted reply to non-Hello requests.
 func (b *FakeBridge) SetResponse(resp relay.BridgeResponse) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.respondWith = resp
+}
+
+// SetHelloResponse replaces the reply to Hello requests.
+func (b *FakeBridge) SetHelloResponse(resp relay.BridgeResponse) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.helloResponse = &resp
 }
 
 // SetHostPtyEnv scripts a ResolvePtyEnv response carrying a host, letting a
@@ -82,12 +99,21 @@ func (b *FakeBridge) SetHostPtyEnv(workingDir string, host *types.HostSpec) {
 	b.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
 }
 
-// Requests returns a snapshot of every request the bridge has received.
+// Requests returns a snapshot of every non-Hello request the bridge received.
 func (b *FakeBridge) Requests() []relay.BridgeRequest {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]relay.BridgeRequest, len(b.requests))
 	copy(out, b.requests)
+	return out
+}
+
+// Hellos returns a snapshot of every Hello request the bridge received.
+func (b *FakeBridge) Hellos() []relay.BridgeRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]relay.BridgeRequest, len(b.hellos))
+	copy(out, b.hellos)
 	return out
 }
 
@@ -112,35 +138,68 @@ func (b *FakeBridge) handleConn(conn net.Conn) {
 	if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
 		return
 	}
+
 	b.mu.Lock()
-	b.requests = append(b.requests, req)
-	resp := b.respondWith
+	var resp relay.BridgeResponse
+	switch {
+	case req.Type == relay.ReqHello:
+		b.hellos = append(b.hellos, req)
+		if b.helloResponse != nil {
+			resp = *b.helloResponse
+		} else {
+			data, _ := json.Marshal(relay.HelloResult{ServiceID: req.Name, RelayPID: os.Getpid()})
+			resp = relay.BridgeResponse{Type: relay.RespOK, Data: data}
+		}
+	case req.Token != "":
+		b.requests = append(b.requests, req)
+		resp = relay.BridgeResponse{Type: relay.RespError, Code: unauthorizedCode, Message: "unauthorized"}
+	default:
+		b.requests = append(b.requests, req)
+		resp = b.respondWith
+	}
 	b.mu.Unlock()
 
 	out, _ := json.Marshal(resp)
 	_, _ = conn.Write(append(out, '\n'))
 }
 
-// WithBridgeEnv sets the three env vars relayLLM looks for and restores them
-// on cleanup. Test isolation: never leak env changes to other tests.
-func WithBridgeEnv(t *testing.T, sockPath, serviceID, token string) {
+// WithBridgeEnv sets the non-secret env vars relay injects (bridge socket and
+// service id) without performing a launch, so relay.Launched() stays false.
+// Restores them on cleanup.
+func WithBridgeEnv(t *testing.T, sockPath, serviceID string) {
 	t.Helper()
-	keys := []string{relay.EnvBridgeSocket, relay.EnvServiceID, relay.EnvServiceToken, relay.EnvServiceTokenLegacy}
-	prev := map[string]string{}
-	for _, k := range keys {
-		prev[k] = os.Getenv(k)
+	t.Setenv(relay.EnvBridgeSocket, sockPath)
+	t.Setenv(relay.EnvServiceID, serviceID)
+	relay.ResetLaunchForTesting()
+	t.Cleanup(relay.ResetLaunchForTesting)
+}
+
+// LaunchViaBridge simulates relay launching this process: it sets the bridge
+// env, writes a fresh launch secret into a real pipe, and completes the Hello
+// handshake against b. Afterwards relay.Launched() is true until cleanup.
+func LaunchViaBridge(t *testing.T, b *FakeBridge, serviceID string) {
+	t.Helper()
+	WithBridgeEnv(t, b.SocketPath(), serviceID)
+	r := LaunchPipe(t, strings.Repeat("0123456789abcdef", 4))
+	if _, err := relay.CompleteLaunch(r); err != nil {
+		t.Fatalf("launch handshake: %v", err)
 	}
-	_ = os.Setenv(relay.EnvBridgeSocket, sockPath)
-	_ = os.Setenv(relay.EnvServiceID, serviceID)
-	_ = os.Setenv(relay.EnvServiceToken, token)
-	_ = os.Setenv(relay.EnvServiceTokenLegacy, "") // deterministic: token rides the new name only
-	t.Cleanup(func() {
-		for k, v := range prev {
-			if v == "" {
-				_ = os.Unsetenv(k)
-			} else {
-				_ = os.Setenv(k, v)
-			}
-		}
-	})
+}
+
+// LaunchPipe returns the read end of a pipe whose write end has received
+// content and been closed — the shape relay hands a service on fd 3.
+func LaunchPipe(t *testing.T, content string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(content); err != nil {
+		t.Fatalf("write launch pipe: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close launch pipe writer: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return r
 }

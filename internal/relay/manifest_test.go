@@ -130,7 +130,7 @@ func TestManifest_MaybeRegister_StandaloneMode_IsNoOp(t *testing.T) {
 
 func TestManifest_MaybeRegister_SendsCorrectPayload(t *testing.T) {
 	bridge := testutil.NewFakeBridge(t)
-	testutil.WithBridgeEnv(t, bridge.SocketPath(), "relayllm-test", "service-token-xyz")
+	testutil.LaunchViaBridge(t, bridge, "relayllm-test")
 
 	relay.MaybeRegisterManifest(t.TempDir(), "/tmp/internal.sock", "internal-token-abc")
 
@@ -145,8 +145,8 @@ func TestManifest_MaybeRegister_SendsCorrectPayload(t *testing.T) {
 	if req.Type != relay.ReqRegisterManifest {
 		t.Errorf("Type: got %q, want %q", req.Type, relay.ReqRegisterManifest)
 	}
-	if req.Token != "service-token-xyz" {
-		t.Errorf("Token: got %q, want %q", req.Token, "service-token-xyz")
+	if req.Token != "" {
+		t.Errorf("Token: got %q, want empty (relay authenticates by peer identity)", req.Token)
 	}
 	var args relay.RegisterManifestRequest
 	if err := json.Unmarshal(req.Arguments, &args); err != nil {
@@ -171,17 +171,17 @@ func TestManifest_MaybeRegister_SendsCorrectPayload(t *testing.T) {
 	}
 }
 
-func TestManifest_MaybeRegister_MissingServiceID_IsNoOp(t *testing.T) {
+func TestManifest_MaybeRegister_BridgeEnvWithoutLaunch_IsNoOp(t *testing.T) {
 	bridge := testutil.NewFakeBridge(t)
-	// Set the socket but deliberately omit the service id.
-	testutil.WithBridgeEnv(t, bridge.SocketPath(), "", "tok")
+	// Bridge env present but no Hello: not launched, so no identity to use.
+	testutil.WithBridgeEnv(t, bridge.SocketPath(), "relayllm-test")
 
 	relay.MaybeRegisterManifest(t.TempDir(), "/tmp/x.sock", "internal")
 
 	// MaybeRegisterManifest is synchronous; if it dialed at all the request
 	// would already be on the bridge by the time we return here.
 	if len(bridge.Requests()) != 0 {
-		t.Errorf("missing serviceID should skip registration; got %d requests", len(bridge.Requests()))
+		t.Errorf("unlaunched process should skip registration; got %d requests", len(bridge.Requests()))
 	}
 }
 
@@ -192,7 +192,7 @@ func TestManifest_MaybeRegister_BridgeErrorIsSwallowed(t *testing.T) {
 		Code:    500,
 		Message: "internal error",
 	})
-	testutil.WithBridgeEnv(t, bridge.SocketPath(), "relayllm-test", "tok")
+	testutil.LaunchViaBridge(t, bridge, "relayllm-test")
 
 	// The contract: registration failure logs + continues. The test asserts
 	// "doesn't panic" — if MaybeRegisterManifest ever started propagating

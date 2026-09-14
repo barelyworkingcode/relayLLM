@@ -24,17 +24,18 @@ func ApplyEnvPassthrough(env []string, keys []string) []string {
 	return env
 }
 
-// relaySecretEnvKeys are the relay credentials relay injected into THIS relayLLM
-// process. They must never be inherited by a spawned child (shell, LLM CLI, or
-// the `relay mcp` subprocess): a child gets only a project-scoped
-// RELAY_PROJECT_TOKEN, injected explicitly. Inheriting the service token would
-// hand the child full bridge access; inheriting the frontend token would hand it
-// relay's front-door bearer. (relayLLM keeps these in its OWN env to call the
-// bridge — ChildBaseEnv only strips them from what we hand to children.)
+// relaySecretEnvKeys must never be inherited by a spawned child (shell, LLM CLI,
+// or the `relay mcp` subprocess): a child gets only a project-scoped
+// RELAY_PROJECT_TOKEN, injected explicitly.
 var relaySecretEnvKeys = []string{
-	relay.EnvServiceToken,       // RELAY_SERVICE_TOKEN — full bridge access
-	relay.EnvServiceTokenLegacy, // RELAY_MCP_TOKEN — legacy alias of the above
-	relay.EnvFrontendToken,      // RELAY_FRONTEND_TOKEN — relay front-door bearer (unused by relayLLM)
+	// Removed credential names, stripped defensively so a stale value from an
+	// older relay or the user's shell cannot reach a child.
+	relay.EnvServiceToken,
+	relay.EnvServiceTokenLegacy,
+	relay.EnvFrontendToken,
+	// A child must never believe it holds a launch pipe: the identity relay
+	// binds is this process's, and a child presenting Hello would fail anyway.
+	relay.EnvLaunchFD,
 	// Project-token names too: relayLLM resolves and injects the correct
 	// per-child project token explicitly (SetProjectTokenEnv). Stripping any
 	// inherited value first means a stale/cross-project token in relayLLM's own
@@ -57,9 +58,9 @@ func SetProjectTokenEnv(env []string, token string) []string {
 	return env
 }
 
-// ChildBaseEnv returns os.Environ() with relayLLM's own relay credentials
+// ChildBaseEnv returns os.Environ() with every relaySecretEnvKeys entry
 // stripped. Use it as the base environment for every spawned child instead of
-// os.Environ() directly, so relay secrets never leak into a shell/LLM/mcp child.
+// os.Environ() directly, so no stale relay credential reaches a shell/LLM/mcp child.
 func ChildBaseEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
@@ -162,15 +163,13 @@ func (r RelayManagedSpec) labelOrDefault() string {
 // authority: relayLLM never persists the token and never accepts it from eve —
 // it asks relay for it at spawn time, injects it, and discards it.
 //
-// Fails closed: returns "" when this process is not relay-managed (no service
-// token in the env → standalone/dev run) or when resolution fails. Callers must
-// spawn without a token rather than substitute the full-access service token —
-// handing a child the service token would grant it god-mode bridge access.
+// Fails closed: returns "" when relay did not launch this process (standalone
+// or dev run) or when resolution fails. Callers must spawn without a token.
 func ResolveProjectToken(session *types.Session) string {
 	if session == nil {
 		return ""
 	}
-	if relay.ServiceToken() == "" {
+	if !relay.Launched() {
 		return "" // standalone: no relay bridge to ask
 	}
 	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{
