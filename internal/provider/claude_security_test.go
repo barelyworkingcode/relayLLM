@@ -50,9 +50,9 @@ func TestSec_ClaudeSpawn_HeadlessSessionMarksHeadlessEnv(t *testing.T) {
 // Project-token fail-closed (claude.go + internal/spawn)
 // ---------------------------------------------------------------------------
 //
-// When relay can't resolve a project token, the child must get NO token — never
-// the full-access service token. Guards the documented invariant in
-// CLAUDE.md / relay ADR-007.
+// When relay can't resolve a project token, the child must get NO token, and
+// no removed credential name may appear in its env. Guards the documented
+// invariant in CLAUDE.md / relay ADR-007.
 
 func TestSec_ClaudeEnv_EmptyProjectTokenInjectsNoToken(t *testing.T) {
 	p := &ClaudeProvider{session: &types.Session{ID: "s"}}
@@ -75,7 +75,6 @@ func TestSec_ClaudeEnv_ResolvedProjectTokenInjectedDualNamed(t *testing.T) {
 	if v, ok := envValue(env, relay.EnvProjectTokenLegacy); !ok || v != "proj-token-xyz" {
 		t.Errorf("%s = %q (present=%v); want proj-token-xyz", relay.EnvProjectTokenLegacy, v, ok)
 	}
-	// The service token must never be how we authenticate a child.
 	if _, ok := envValue(env, relay.EnvServiceToken); ok {
 		t.Errorf("%s leaked into child env", relay.EnvServiceToken)
 	}

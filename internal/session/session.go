@@ -259,7 +259,7 @@ func (m *SessionManager) CreateSession(projectID, directory, name, model, system
 	// every session create on relay's availability; a genuinely host-scoped
 	// session that can't actually resolve fails later, at provider Start.
 	var host *types.HostSpec
-	if projectID != "" && relay.ServiceToken() != "" {
+	if projectID != "" && relay.Launched() {
 		if resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: projectID, Directory: dir}); err == nil {
 			host = resp.Host
 		} else {

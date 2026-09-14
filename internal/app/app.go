@@ -31,6 +31,17 @@ import (
 )
 
 func Main() {
+	// Deliberate: first, before anything that can spawn a child (providers,
+	// terminals, managed servers, the permission hook) or start a goroutine
+	// that might. It closes the inherited launch fd and scrubs RELAY_LAUNCH_FD
+	// from this process's environment, so no child can inherit either.
+	if launched, hello, err := relay.BootstrapLaunch(); err != nil {
+		slog.Error("relay launch handshake failed; refusing to start", "error", err)
+		os.Exit(1)
+	} else if launched {
+		slog.Info("launched by relay; bridge identity bound", "serviceId", hello.ServiceID, "relayPid", hello.RelayPID)
+	}
+
 	startTime := time.Now()
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
 	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")

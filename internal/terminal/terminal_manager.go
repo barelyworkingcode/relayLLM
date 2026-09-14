@@ -289,7 +289,7 @@ func (m *TerminalManager) StopAll() {
 // failure degrades to "not a host" rather than blocking terminal creation on
 // relay's availability.
 func resolveTerminalHost(projectID, directory string) *types.HostSpec {
-	if projectID == "" || relay.ServiceToken() == "" {
+	if projectID == "" || !relay.Launched() {
 		return nil
 	}
 	resp, err := relay.ResolvePtyEnv(relay.RelayPtyEnvRequest{ProjectID: projectID, Directory: directory})

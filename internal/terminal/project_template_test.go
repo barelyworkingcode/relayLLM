@@ -22,7 +22,7 @@ func TestResolveRelayProjectTemplate_RoundTrip(t *testing.T) {
 		Icon:        "shell",
 	})
 	fb.SetResponse(relay.BridgeResponse{Type: relay.RespProjectTemplate, Data: data})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	tmpl, err := relay.ResolveProjectTemplate("proj-1", "ssh-box")
 	if err != nil {
@@ -65,11 +65,10 @@ func TestTerminalCreate_MissNoProject_NoFallback(t *testing.T) {
 	}
 }
 
-// A global-store miss WITH a project but no reachable relay (standalone: no
-// service token) must fail closed — the resolve errors out and nothing spawns.
+// A global-store miss WITH a project but no reachable relay (standalone: not
+// launched by relay) must fail closed — the resolve errors out and nothing spawns.
 func TestTerminalCreate_ProjectFallback_FailsClosed(t *testing.T) {
-	t.Setenv(relay.EnvServiceToken, "")
-	t.Setenv(relay.EnvServiceTokenLegacy, "")
+	relay.ResetLaunchForTesting()
 	store := NewTemplateStore(t.TempDir())
 	mgr := NewTerminalManager(store, t.TempDir())
 	if _, err := mgr.Create("private-id", "", t.TempDir(), "proj-1", 80, 24, nil); err == nil ||

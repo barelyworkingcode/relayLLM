@@ -16,8 +16,8 @@ func TestClaudeRelayMCPConfig_Disabled(t *testing.T) {
 }
 
 // Refuse to inject the relay MCP without a token — better a loud log
-// than Claude silently auth-failing every tool call. Critically, we must NOT
-// fall back to the full-access service token here.
+// than Claude silently auth-failing every tool call. There is no broader
+// credential to fall back to, and none may be added.
 func TestClaudeRelayMCPConfig_NoToken(t *testing.T) {
 	t.Setenv("RELAY_MCP_COMMAND", "/usr/local/bin/relay")
 
@@ -62,8 +62,8 @@ func TestClaudeRelayMCPConfig_Enabled(t *testing.T) {
 	if server.Env[relay.EnvProjectToken] != "proj-token-abc" {
 		t.Errorf("%s = %q, want proj-token-abc", relay.EnvProjectToken, server.Env[relay.EnvProjectToken])
 	}
-	if _, leaked := server.Env["RELAY_MCP_TOKEN"]; leaked {
-		t.Errorf("relay MCP child env leaked a service-token slot: %v", server.Env)
+	if _, leaked := server.Env[relay.EnvServiceTokenLegacy]; leaked {
+		t.Errorf("relay MCP child env carries removed credential name %s: %v", relay.EnvServiceTokenLegacy, server.Env)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	data, _ := json.Marshal(relay.RelayPtyEnvResponse{RelayToken: "resolved-token-xyz", WorkingDir: "/proj"})
 	fb.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
-	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm", "svc-token")
+	testutil.LaunchViaBridge(t, fb, "relay-llm")
 
 	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1", Directory: "/proj"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "resolved-token-xyz" {
@@ -94,11 +94,10 @@ func TestClaudeResolveMCPToken_ResolvesFromBridge(t *testing.T) {
 	}
 }
 
-// Standalone relayLLM (no service token in env) has no bridge to ask; return
-// empty rather than dialing and warning — and never escalate to a service token.
+// Standalone relayLLM (not launched by relay) has no bridge to ask; return
+// empty rather than dialing and warning.
 func TestClaudeResolveMCPToken_StandaloneReturnsEmpty(t *testing.T) {
-	t.Setenv(relay.EnvServiceToken, "")
-	t.Setenv(relay.EnvServiceTokenLegacy, "")
+	relay.ResetLaunchForTesting()
 	p := &ClaudeProvider{session: &types.Session{ID: "s1", ProjectID: "proj-1"}, directory: "/proj"}
 	if got := p.resolveMCPToken(); got != "" {
 		t.Errorf("token = %q, want empty (standalone)", got)
