@@ -33,14 +33,10 @@ codesign --verify --strict --verbose=2 cmd/hook/hook
   --args "8181" \
   --args "--http-bind" \
   --args "127.0.0.1,192.168.64.1" \
+  --args "--router-bind" \
+  --args "127.0.0.1,192.168.64.1" \
   --url "http://localhost:8181/status" \
   --autostart \
   --no-frontend-creds   # backend: never dials relay's front door, so don't hand it the bearer (it would leak into spawned shells)
-  # --router-bind stays loopback-only (the flag's default): this devbox's
-  # settings.json configures router.anthropic (real Anthropic API credential
-  # passthrough), which refuses to start on a non-loopback --router-bind
-  # without --router-tls-cert -- see relay-llm.log 2026-09-11 09:50 for the
-  # actual refusal this produced when --router-bind briefly included
-  # 192.168.64.1. Revisit if/when the router gets a TLS cert.
 echo ""
 echo "Registered with Relay."

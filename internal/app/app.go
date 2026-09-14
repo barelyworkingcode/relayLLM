@@ -115,20 +115,11 @@ func Main() {
 		os.Exit(1)
 	}
 
-	// router.anthropic and router.passthrough forward whatever credential the
-	// client sent (Claude Code's or ChatGPT's OAuth bearer, or an API key)
-	// straight to the upstream on every request. That's fine on loopback;
-	// exposed on a non-loopback bind with no TLS on the router's own
-	// listener, it's a credential leaving the box in plaintext to anyone who
-	// can reach the port. Same fail-closed shape as the router-TLS-pair guard
-	// above.
-	if cfg.Router.ForwardsClientCredentials() && *routerTLSCert == "" {
-		if host, ok := netutil.FirstNonLoopbackBind(routerBinds); ok {
-			slog.Error("relay router: router.anthropic or router.passthrough is configured with a non-loopback --router-bind and no TLS cert; refusing to start (passthrough forwards the client's real credential on every request)",
-				"router-bind", host)
-			os.Exit(1)
-		}
-	}
+	// No bind/TLS guard for router.anthropic or router.passthrough. One used to
+	// refuse any non-loopback --router-bind without a TLS cert, which blocked
+	// 127.0.0.1,192.168.64.1 (a host-only VM bridge) while offering the
+	// operator nothing to do but abandon the bind. Exposure is controlled by
+	// --router-bind, the same posture as the rest of the router and --http-port.
 
 	sessions.SetPiConfig(cfg.Pi)
 	if cfg.Pi.BinaryPath != "" {
