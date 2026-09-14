@@ -133,7 +133,11 @@ func NewTestServer(t *testing.T, opts *TestServerOptions) *TestServer {
 	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	recovered := RecoverMiddleware(mux)
-	handler := BearerAuth(supportBearerToken, recovered)
+	// HookScopedBearerAuth, not plain BearerAuth: mirrors app.go's real
+	// wiring so tests can exercise the per-session hook-token exception on
+	// /api/permission, not just the master-bearer path BearerAuth alone
+	// would give them.
+	handler := HookScopedBearerAuth(supportBearerToken, perms.ValidateHookToken, recovered)
 	srv := httptest.NewServer(handler)
 
 	t.Cleanup(func() {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
+	"relayllm/internal/spawn"
 	"relayllm/internal/types"
 	"sort"
 	"strconv"
@@ -533,6 +534,12 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 		"binary", binPath, "port", port, "estimated", formatGB(memory), "args", args)
 
 	cmd := exec.Command(binPath, args...)
+	// Explicit scrubbed env, not the exec.Command default of full
+	// inheritance: llama-server/mlx-serve is a managed child like any
+	// other spawn path and must not inherit relayLLM's own credentials
+	// (internal bearer, project tokens) just because nothing here ever
+	// set cmd.Env before.
+	cmd.Env = spawn.ChildBaseEnv()
 	logProcessOutput(cmd, m.profile.Kind, alias)
 
 	if err := cmd.Start(); err != nil {

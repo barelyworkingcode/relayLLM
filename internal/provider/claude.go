@@ -51,7 +51,7 @@ type ClaudeProvider struct {
 	model           string
 	directory       string
 	hookSocket      string // Unix socket path the hook subprocess dials for /api/permission
-	hookToken       string // bearer token the hook will send when calling /api/permission
+	hookToken       string // per-session credential minted by perms.MintHookToken; never relayLLM's internal bearer
 
 	// perms services a host session's control_request permission prompts
 	// (../relay/docs/ssh-hosts.md decision 5). nil-safe: a provider built
@@ -79,7 +79,15 @@ type ClaudeProvider struct {
 	snapNextIdx   int    // next global block index to assign
 }
 
-func NewClaudeProvider(session *types.Session, handler types.EventHandler, hookSocket, hookToken string, perms *permission.PermissionManager) *ClaudeProvider {
+// NewClaudeProvider mints this session's own hook credential rather than
+// accepting one — the caller (SessionManager) never holds relayLLM's
+// internal bearer for this purpose at all, only the perms store new
+// tokens are minted into. See permission.PermissionManager.MintHookToken.
+func NewClaudeProvider(session *types.Session, handler types.EventHandler, hookSocket string, perms *permission.PermissionManager) *ClaudeProvider {
+	var hookToken string
+	if perms != nil {
+		hookToken = perms.MintHookToken(session.ID)
+	}
 	return &ClaudeProvider{
 		session:    session,
 		handler:    handler,
@@ -1038,8 +1046,15 @@ func (p *ClaudeProvider) Kill() {
 	// The process that would read a control_response is going away — deny
 	// every request that's still waiting on one rather than let it burn its
 	// full 60s timeout. No-op if p.perms is nil or nothing is pending.
+	//
+	// Revoking the hook token here, not just on session end/delete, matters:
+	// SendMessage/ClearSession replace a dead or reset provider by calling
+	// Kill() and then building a fresh one, and the fresh one mints its own
+	// token — the old one must stop working at the same moment, or a second
+	// live token would work for a provider process that no longer exists.
 	if p.perms != nil {
 		p.perms.DenyAllForSession(p.session.ID, "session stopped")
+		p.perms.RevokeHookToken(p.session.ID)
 	}
 
 	if p.cmd == nil || p.cmd.Process == nil {
