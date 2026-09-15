@@ -90,6 +90,20 @@ type RelayRouter struct {
 	// mux is kept so setPassthrough can mount its configured /<name>/ routes
 	// after construction, before Serve.
 	mux *http.ServeMux
+
+	// passthroughNames is every router.passthrough entry setPassthrough
+	// actually mounted on mux (valid name, not reserved) — SocketHandler
+	// reads this to refuse the same paths outright on router.sock rather
+	// than letting them fall through to handleProxy's model dispatch (C9).
+	passthroughNames []string
+
+	// socketSrv/socketLn/socketPath are router.sock's listener, server and
+	// filesystem path, present only in launched mode (ListenSocket). Close
+	// tears down socketSrv/socketLn alongside the TCP listener(s);
+	// socketPath backs SocketPath() for status reporting (api_status_detailed.go).
+	socketSrv  *http.Server
+	socketLn   net.Listener
+	socketPath string
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -248,6 +262,9 @@ func (p *RelayRouter) Serve() {
 }
 
 func (p *RelayRouter) Close() error {
+	if p.socketSrv != nil {
+		_ = p.socketSrv.Close()
+	}
 	return p.server.Close()
 }
 
@@ -287,6 +304,19 @@ func (p *RelayRouter) Addrs() []string {
 		addrs[i] = ln.Addr().String()
 	}
 	return addrs
+}
+
+// SocketPath returns the filesystem path router.sock is bound to, or "" for
+// a nil router or one ListenSocket was never called on — standalone, or
+// launched but not yet past that point in startup. Status reporting
+// (api_status_detailed.go) uses this to tell a socket-only router (launched,
+// no --router-port) apart from one serving neither transport, since Addr()
+// and Addrs() alone can't: both report empty/nil in either case.
+func (p *RelayRouter) SocketPath() string {
+	if p == nil {
+		return ""
+	}
+	return p.socketPath
 }
 
 // TLSEnabled reports whether the router listener serves TLS.
@@ -514,6 +544,12 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// has not chosen an instance yet, and the dashboard's target should mean
 	// "is being served by", not "wants".
 	conn.setTarget("managed", mgr.Profile().Kind+":"+alias)
+	// C9: relay's model broker reads this off every proxied response to
+	// record which backend actually served the call, then strips it before
+	// the response reaches its own caller — set before ServeHTTP, since
+	// httputil.ReverseProxy ADDS the upstream's headers onto whatever is
+	// already in w.Header() rather than clearing it first.
+	setModelTargetHeader(w, alias)
 
 	// No model swap needed here — the client already sent the bare alias the
 	// managed server expects — but the reasoning_effort rewrite still applies
@@ -545,6 +581,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
 func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep config.OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
 	conn.setTarget("endpoint", ep.Name+"/"+upstreamID)
+	setModelTargetHeader(w, ep.Name+"/"+upstreamID)
 	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
@@ -562,10 +599,66 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep con
 	proxy.ServeHTTP(w, r)
 }
 
+// modelTargetSetter lets a wrapping http.ResponseWriter redirect
+// X-Relay-Model-Target onto whatever writer the caller ultimately reads
+// from. translatingResponseWriter (relay_router_anthropic.go's Anthropic
+// redirect path) implements this: setModelTargetHeader's usual
+// w.Header().Set would otherwise land on that writer's own buffered header
+// map, which is never copied onto the real response (see its Header method's
+// doc comment) — the header would silently vanish for exactly the requests
+// C9's /v1/messages modelMap dispatch produces.
+type modelTargetSetter interface {
+	SetModelTarget(value string)
+}
+
+// setModelTargetHeader sets X-Relay-Model-Target, walking down a chain of
+// Unwrap() http.ResponseWriter wrappers (the same interface
+// http.ResponseController uses, already implemented by meteredResponseWriter
+// and virtualResponseRecorder) until it finds a modelTargetSetter or runs
+// out of wrappers. Called BEFORE the proxy that will use value is invoked —
+// every call site knows its target synchronously, before any response byte
+// exists — so this is always safe even for a streaming response, where
+// headers are flushed on the first upstream byte.
+func setModelTargetHeader(w http.ResponseWriter, value string) {
+	for {
+		if s, ok := w.(modelTargetSetter); ok {
+			s.SetModelTarget(value)
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = u.Unwrap()
+	}
+	w.Header().Set("X-Relay-Model-Target", value)
+}
+
 // newUpstreamProxy builds the reverse proxy shared by every branch. The
 // Director replaces (or clears) Authorization so the inbound bearer token —
 // which is relayLLM's internal token, meaningless to upstreams — never
-// leaks across the trust boundary.
+// leaks across the trust boundary. It also strips X-Api-Key and any
+// inbound X-Relay-* header: on router.sock the caller is relay's model
+// broker, which already strips these before forwarding a call
+// (../relay/docs/model-endpoint.md), but relayLLM's own dispatch must not
+// depend on that — a caller that reached this far by any other path (a
+// direct socket/TCP client, a future bug upstream of here) must not be able
+// to smuggle its own credential, or a forged X-Relay-* signal, on to a real
+// backend.
+//
+// ModifyResponse strips any X-Relay-* header the UPSTREAM sent back, before
+// httputil.ReverseProxy copies its headers onto the response this handler is
+// building. Every dispatch call site (routeManaged, routeOpenAI,
+// attemptVirtual) calls setModelTargetHeader BEFORE invoking this proxy, so
+// by the time a response exists, the outbound header map already carries
+// relayLLM's own X-Relay-Model-Target; ReverseProxy's default behavior is to
+// ADD each upstream header rather than replace, so an upstream — compromised
+// or merely echoing back whatever it was sent — that includes its own
+// X-Relay-Model-Target (or any other X-Relay-* name) would otherwise leave
+// TWO values on the wire, one of them relay never asked for and cannot
+// distinguish from the real one. Stripping first makes ours the only one
+// possible, by construction rather than by hoping nothing upstream ever
+// echoes the name back.
 //
 // onError, when non-nil, is consulted before the default 502 is written on a
 // backend failure. httputil.ReverseProxy only invokes ErrorHandler on a
@@ -590,6 +683,12 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 			} else {
 				req.Header.Del("Authorization")
 			}
+			req.Header.Del("X-Api-Key")
+			deleteRelayHeaders(req.Header)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			deleteRelayHeaders(resp.Header)
+			return nil
 		},
 		FlushInterval: -1, // flush immediately for SSE streaming
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -601,6 +700,18 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 			w.WriteHeader(http.StatusBadGateway)
 			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("backend error: %v", err)})
 		},
+	}
+}
+
+// deleteRelayHeaders removes every X-Relay-* header (case-insensitive) from
+// h in place — relayLLM's own internal signalling, never something a client
+// should be able to inject going out, or an upstream should be able to
+// inject coming back.
+func deleteRelayHeaders(h http.Header) {
+	for k := range h {
+		if strings.HasPrefix(strings.ToLower(k), "x-relay-") {
+			h.Del(k)
+		}
 	}
 }
 
@@ -675,22 +786,38 @@ func upstreamPath(basePath, inbound string) string {
 // there's no per-bind TLS config — so the cert must be valid for all of
 // them if more than one is configured.
 func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
-	if len(addrs) == 0 {
+	p := BuildRelayRouter(managers, registry, virtual, router, tlsCert, tlsKey)
+	started, err := p.MaybeServeTCP(addrs, router)
+	if err != nil {
+		return nil, err
+	}
+	if !started {
 		return nil, nil
 	}
-	p := NewRelayRouter(addrs[0], managers, registry, virtual)
-	// A router with no managed servers and no OpenAI endpoints would
-	// otherwise dispatch nothing — except router.anthropic's passthrough is
-	// a real destination in its own right (api.anthropic.com), needing
-	// neither. Without this check, a deployment using relayLLM purely as a
-	// Claude Code proxy (router.anthropic configured, nothing else) got no
-	// router at all: /v1/messages, the /api/* bootstrap passthrough,
-	// everything 404'd with no indication why. router.passthrough upstreams
-	// are real destinations the same way.
-	hasPassthrough := router.ForwardsClientCredentials()
-	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
-		return nil, nil
-	}
+	return p, nil
+}
+
+// BuildRelayRouter constructs and fully configures a RelayRouter — managers,
+// registry, virtual config, and every setting router.sock's TCP sibling
+// applies (reasoningEffortMap, anthropic, passthrough, TLS) — without
+// binding or serving any listener.
+//
+// Split out of StartRelayRouter so a caller that needs the router object
+// purely to serve router.sock has it available even when there is no
+// --router-port to bind: C9 requires router.sock to exist whenever relay
+// launched this process, independent of whether the TCP listener is
+// configured at all, and MaybeServeTCP's "nothing to serve" check only makes
+// sense for that TCP listener's own decision — it says nothing about
+// whether router.sock should exist. Calling this exactly ONCE per process,
+// then passing the result to MaybeServeTCP, is load-bearing: setAnthropic
+// and setPassthrough both log a warning per invalid config entry, so
+// building twice (once discarded, once kept) would double every one of
+// those log lines for no reason — internal/app/app.go builds once and reuses
+// the same *RelayRouter for both the TCP decision and router.sock.
+// addr is left empty; a caller that also wants TCP calls Listen/Serve itself
+// (MaybeServeTCP does, for StartRelayRouter's benefit).
+func BuildRelayRouter(managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) *RelayRouter {
+	p := NewRelayRouter("", managers, registry, virtual)
 	if router != nil {
 		p.setReasoningEffortMap(router.ReasoningEffortMap)
 		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
@@ -698,9 +825,39 @@ func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, r
 		p.setPassthrough(router.Passthrough)
 	}
 	p.setTLS(tlsCert, tlsKey)
+	return p
+}
+
+// MaybeServeTCP binds and serves p on addrs, if there is anything worth
+// serving. A router with no managed servers and no OpenAI endpoints would
+// otherwise dispatch nothing — except router.anthropic's passthrough is a
+// real destination in its own right (api.anthropic.com), needing neither.
+// Without this check, a deployment using relayLLM purely as a Claude Code
+// proxy (router.anthropic configured, nothing else) got no router at all:
+// /v1/messages, the /api/* bootstrap passthrough, everything 404'd with no
+// indication why. router.passthrough upstreams are real destinations the
+// same way. routerCfg is read here (via ForwardsClientCredentials, the raw
+// pre-setter config) rather than p's own post-setter state, matching
+// StartRelayRouter's original check exactly: a configured-but-invalid
+// router.anthropic (setAnthropic already logged and left p.anthropic nil)
+// still counts as "this deployment wanted a passthrough router", not as
+// "nothing to serve".
+//
+// Returns (false, nil) when addrs is empty or there is nothing to route to —
+// a caller decides for itself whether that means the router object itself
+// is now pointless (drop it) or still needed for something else (router.sock,
+// C9 — keep it and call ListenSocket instead).
+func (p *RelayRouter) MaybeServeTCP(addrs []string, routerCfg *config.RouterConfig) (bool, error) {
+	if len(addrs) == 0 {
+		return false, nil
+	}
+	hasPassthrough := routerCfg.ForwardsClientCredentials()
+	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
+		return false, nil
+	}
 	if err := p.Listen(addrs); err != nil {
-		return nil, err
+		return false, err
 	}
 	p.Serve()
-	return p, nil
+	return true, nil
 }
