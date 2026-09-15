@@ -265,6 +265,14 @@ func (p *RelayRouter) newAnthropicPassthroughProxy() *httputil.ReverseProxy {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			pr.Out.Host = upstream.Host
+			// C10: X-Relay-Router-Key authenticates the caller to relayLLM
+			// ITSELF on this route (auth.go's requiresRouterKeyHeader) —
+			// Authorization is the client's own real Anthropic credential
+			// and must reach api.anthropic.com untouched (see this
+			// function's doc comment), but the local router key must never
+			// ride along even though this proxy deliberately forwards
+			// everything else byte-for-byte.
+			pr.Out.Header.Del("X-Relay-Router-Key")
 		},
 		Transport:     p.anthropic.transport,
 		FlushInterval: -1, // flush immediately for SSE streaming

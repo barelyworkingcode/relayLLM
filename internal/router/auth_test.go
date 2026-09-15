@@ -8,6 +8,7 @@ package router
 // pins that at the app.go wiring layer this package doesn't own).
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -235,5 +236,82 @@ func TestStandaloneRouterKeys_WrongRouterKeyOnPassthroughRefused(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 for a wrong X-Relay-Router-Key", resp.StatusCode)
+	}
+}
+
+// TestStandaloneRouterKeys_AnthropicPassthroughLeak pins a security-review
+// finding on the original C10 implementation: /v1/messages, /v1/messages/
+// count_tokens and /api/ can all forward a caller's Authorization to a real
+// third-party upstream (api.anthropic.com) via newAnthropicPassthroughProxy
+// when the request isn't a modelMap hit — router_anthropic.go's own doc
+// comment says so. The original middleware only special-cased
+// router.passthrough's /<name>/ mounts, so a router key presented via
+// Authorization/x-api-key on these three routes authenticated locally AND
+// then rode along to Anthropic. This must behave exactly like a
+// router.passthrough route: only X-Relay-Router-Key authenticates, and it
+// must never reach the upstream, while the caller's real Anthropic
+// credential on Authorization is forwarded untouched.
+func TestStandaloneRouterKeys_AnthropicPassthroughLeak(t *testing.T) {
+	dir := t.TempDir()
+	plaintext, err := AddRouterKey(dir, "hermes")
+	if err != nil {
+		t.Fatalf("AddRouterKey: %v", err)
+	}
+
+	var gotAuth string
+	var sawRouterKeyHeader bool
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, sawRouterKeyHeader = r.Header["X-Relay-Router-Key"]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer fake.Close()
+
+	r := NewRelayRouter(":0", nil, nil, nil)
+	r.setAnthropic(&config.AnthropicRouterConfig{Upstream: fake.URL, PingIntervalSeconds: 3600})
+	r.EnableStandaloneRouterKeys(RouterKeysPath(dir))
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	body := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`)
+
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens", "/api/hello"} {
+		// The router key on Authorization must NOT authenticate — it would
+		// otherwise be indistinguishable from, and leak alongside, the
+		// client's real Anthropic credential.
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+plaintext)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s: Authorization=router key alone = %d, want 401", path, resp.StatusCode)
+		}
+
+		// The dedicated header authenticates; the real Anthropic credential
+		// on Authorization reaches the upstream untouched, and
+		// X-Relay-Router-Key never does.
+		gotAuth, sawRouterKeyHeader = "", false
+		req2, _ := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(body))
+		req2.Header.Set("X-Relay-Router-Key", plaintext)
+		req2.Header.Set("Authorization", "Bearer real-anthropic-oauth-token")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status with X-Relay-Router-Key = %d, want 200", path, resp2.StatusCode)
+		}
+		if sawRouterKeyHeader {
+			t.Errorf("%s: upstream received X-Relay-Router-Key; it must be stripped", path)
+		}
+		if gotAuth != "Bearer real-anthropic-oauth-token" {
+			t.Errorf("%s: upstream Authorization = %q, want the client's real credential forwarded untouched", path, gotAuth)
+		}
 	}
 }
