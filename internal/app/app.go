@@ -54,6 +54,7 @@ func Main() {
 	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Include 0.0.0.0 to accept connections from other hosts.")
 	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
 	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
+	routerSocketPath := flag.String("router-socket", envOrDefault("RELAY_ROUTER_SOCKET", ""), "Unix socket path for relay's private, tokenless path into the relay-router (default: {data-dir}/router.sock). Only opened when launched by relay (RELAY_LAUNCH_FD set); ignored standalone. See plan-broker-and-sessions.md §2 C9.")
 	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving ONLY the read-only /status diagnostics dashboard (GET /status, /api/status, /api/status/detailed) — protected by --http-bind, not a bearer token, same as --router-port. Every other route, including /ws and all mutating routes, 404s on this port; use the bearer-authenticated --socket for those. Empty to disable.")
 	httpBind := flag.String("http-bind", envOrDefault("RELAY_LLM_HTTP_BIND", "127.0.0.1"), "Comma-separated bind addresses for the --http-port listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Set to 0.0.0.0 to accept connections from other hosts.")
 	httpTLSCert := flag.String("http-tls-cert", envOrDefault("RELAY_LLM_HTTP_TLS_CERT", ""), "TLS certificate file for the --http-port listener. Requires --http-tls-key; empty (with key also empty) serves plain http.")
@@ -272,24 +273,61 @@ func Main() {
 	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
 	routerAddrs := netutil.ListenAddrs(routerBinds, *routerPort)
-	// cfg.Router is passed straight into StartRelayRouter rather than set on
-	// the router afterward — see StartRelayRouter's doc comment for why a
-	// separate post-construction setter call raced the router's first
-	// accepted connection. Each configured address binds best-effort (see
+	// Built exactly once — see BuildRelayRouter's doc comment for why:
+	// setAnthropic/setPassthrough each log a warning per invalid config
+	// entry, so building a second router.RelayRouter from the same config
+	// (the shape an earlier version of this file had, gating a rebuild on
+	// StartRelayRouter having returned nil) would double every one of those
+	// log lines for no reason. cfg.Router is passed straight in rather than
+	// set on the router afterward — see BuildRelayRouter's own setters for
+	// why a separate post-construction call would race the router's first
+	// accepted connection.
+	relayRouter := router.BuildRelayRouter(managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// MaybeServeTCP binds every configured address best-effort (see
 	// listenAll) — one that can't be bound in this deployment is logged and
 	// skipped, not fatal, since --router-bind may legitimately name an
 	// address that's only assignable in some environments. Only if every
-	// single one fails does StartRelayRouter return an error, the same as
-	// the http front's below: that's the case where the router would
-	// otherwise be silently absent from a healthy-looking process.
-	relayRouter, err := router.StartRelayRouter(routerAddrs, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// single one fails does it return an error, the same as the http
+	// front's below: that's the case where the router would otherwise be
+	// silently absent from a healthy-looking process.
+	tcpStarted, err := relayRouter.MaybeServeTCP(routerAddrs, cfg.Router)
 	if err != nil {
 		slog.Error("failed to start relay router", "error", err)
 		os.Exit(1)
 	}
+	if !tcpStarted && !relay.Launched() {
+		// Nothing to serve over TCP (no --router-port, or nothing configured
+		// to route to) and no router.sock to keep the object alive for
+		// either: drop it, matching the pre-router.sock "no router at all"
+		// nil every other reader below (sessions.SetRouterPort, the
+		// dashboard) already treats as absent.
+		relayRouter = nil
+	}
 	sessions.SetRouterPort(*routerPort)
 	sessions.SetRouterHosts(routerBinds)
 	terminalMgr.SetPiOverlay(cfg.Pi, sessions.PiOverlayInputs)
+
+	// router.sock (C9): relay's private, tokenless path into the relay-router,
+	// opened only when relay actually launched this process — RelayIdentity()
+	// is what admits a caller, and standalone has no such identity to admit
+	// against. relayRouter is guaranteed non-nil here whenever launched (the
+	// drop-to-nil branch above requires !relay.Launched()): a relay-launched
+	// relayLLM must register as relay's model host regardless of whether it
+	// also serves TCP, or relay's own model.sock 503s "no host" forever for
+	// a deployment that never set --router-port.
+	var resolvedRouterSocketPath string
+	if relay.Launched() {
+		resolvedRouterSocketPath, err = resolveRouterSocketPath(*routerSocketPath, *dataDir)
+		if err != nil {
+			slog.Error("failed to resolve router socket path", "error", err)
+			os.Exit(1)
+		}
+		if err := relayRouter.ListenSocket(resolvedRouterSocketPath, relay.RelayIdentity); err != nil {
+			slog.Error("failed to listen on router socket", "path", resolvedRouterSocketPath, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("router.sock listening", "path", resolvedRouterSocketPath)
+	}
 
 	mux := http.NewServeMux()
 	api.RegisterSessionRoutes(mux, sessions)
@@ -366,10 +404,20 @@ func Main() {
 		os.Exit(1)
 	}
 
-	// Tell relay (if present) where to dispatch front-door traffic.
-	// Standalone runs are a clean no-op. Run in a goroutine so a slow
-	// relay-bridge round-trip doesn't delay the listener accepting traffic.
-	go relay.MaybeRegisterManifest(*dataDir, *socketPath, *internalToken)
+	// Tell relay (if present) where to dispatch front-door traffic, then
+	// (C9) where to reach the relay-router's socket. Standalone runs are a
+	// clean no-op (both calls check relay.Launched() themselves). Run in a
+	// goroutine so a slow relay-bridge round-trip doesn't delay the listener
+	// accepting traffic — but RegisterModelHost's refusal must still exit the
+	// whole process (RegisterModelHostOrExit calls os.Exit(78) from inside
+	// this goroutine, which is as fatal to the process as calling it from
+	// Main would be): unlike a manifest-dispatch miss, which just means eve
+	// can't reach this service through relay yet, a refused model host means
+	// relayLLM believes router.sock is relay's upstream when relay actually
+	// disagrees — every model call routed through relay would silently 503
+	// forever. See model_host.go's registerWithRelay for why this does NOT
+	// skip RegisterModelHost just because RegisterManifest failed.
+	go registerWithRelay(*dataDir, *socketPath, *internalToken, resolvedRouterSocketPath, os.Exit)
 
 	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
 	go func() {

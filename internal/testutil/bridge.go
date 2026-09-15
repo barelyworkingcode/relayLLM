@@ -31,11 +31,12 @@ type FakeBridge struct {
 	socketPath string
 	listener   net.Listener
 
-	mu            sync.Mutex
-	requests      []relay.BridgeRequest
-	hellos        []relay.BridgeRequest
-	respondWith   relay.BridgeResponse
-	helloResponse *relay.BridgeResponse
+	mu             sync.Mutex
+	requests       []relay.BridgeRequest
+	hellos         []relay.BridgeRequest
+	respondWith    relay.BridgeResponse
+	helloResponse  *relay.BridgeResponse
+	responseByType map[string]relay.BridgeResponse
 }
 
 const unauthorizedCode = -32001
@@ -80,6 +81,21 @@ func (b *FakeBridge) SetResponse(resp relay.BridgeResponse) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.respondWith = resp
+}
+
+// SetResponseForType scripts a reply for one non-Hello request Type only,
+// overriding SetResponse's blanket default for that Type — a test that needs
+// one bridge call (e.g. RegisterManifest) to fail while a different one
+// (e.g. RegisterModelHost) succeeds cannot express that through SetResponse
+// alone, since every non-Hello, tokenless request otherwise shares one
+// scripted reply.
+func (b *FakeBridge) SetResponseForType(reqType string, resp relay.BridgeResponse) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.responseByType == nil {
+		b.responseByType = make(map[string]relay.BridgeResponse)
+	}
+	b.responseByType[reqType] = resp
 }
 
 // SetHelloResponse replaces the reply to Hello requests.
@@ -155,7 +171,11 @@ func (b *FakeBridge) handleConn(conn net.Conn) {
 		resp = relay.BridgeResponse{Type: relay.RespError, Code: unauthorizedCode, Message: "unauthorized"}
 	default:
 		b.requests = append(b.requests, req)
-		resp = b.respondWith
+		if r, ok := b.responseByType[req.Type]; ok {
+			resp = r
+		} else {
+			resp = b.respondWith
+		}
 	}
 	b.mu.Unlock()
 

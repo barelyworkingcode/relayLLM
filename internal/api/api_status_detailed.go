@@ -47,6 +47,13 @@ var statusFileServer = http.FileServerFS(statusAssets)
 // overview.router.enabled == false and an empty proxy-connections/virtual
 // section; a nil Registry yields an empty endpoints array; nil Managers,
 // Virtual, and Terminals behave the same way. Clock nil -> DefaultClock.
+//
+// Router is non-nil, with router.enabled == true, whenever relay launched
+// this process (C9) even with --router-port unset: router.sock (C9) needs a
+// live router.RelayRouter regardless of TCP. overview.router.tcp and .socket
+// distinguish the two transports — enabled alone can no longer be read as
+// "TCP is bound", since a socket-only router reports enabled: true with an
+// empty addr/addrs.
 type DetailedStatusDeps struct {
 	Sessions  *session.SessionManager
 	Terminals *terminal.TerminalManager
@@ -54,7 +61,7 @@ type DetailedStatusDeps struct {
 	Managers  []*servermanager.ServerManager // dispatch priority order: llama, then mlx
 	Registry  *registry.ProxyRegistry        // may be nil
 	Virtual   *config.VirtualLLMConfig
-	Router    *router.RelayRouter // may be nil (--router-port unset)
+	Router    *router.RelayRouter // may be nil (standalone with nothing to serve)
 	StartTime time.Time
 	Clock     clk.Clock
 }
@@ -186,11 +193,19 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 	routerAddr := ""
 	var routerAddrs []string
 	routerTLS := false
+	routerSocket := ""
 	if deps.Router != nil {
 		routerAddr = deps.Router.Addr()
 		routerAddrs = deps.Router.Addrs()
 		routerTLS = deps.Router.TLSEnabled()
+		routerSocket = deps.Router.SocketPath()
 	}
+	// tcp and socket are reported separately because router.sock (C9) can be
+	// live with no TCP listener bound at all (relay launched this process
+	// with --router-port unset): Addr()/Addrs() alone would otherwise read as
+	// "router disabled" even though it is actively serving relay's model
+	// broker over the socket.
+	routerTCPEnabled := routerAddr != "" || len(routerAddrs) > 0
 
 	connections := make([]map[string]any, 0, len(proxyInfos)+len(wsConns)+len(chatRows))
 	for _, info := range proxyInfos {
@@ -224,9 +239,11 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 			"endpointsConfigured":  len(epStatuses),
 			"router": map[string]any{
 				"enabled": deps.Router != nil,
+				"tcp":     routerTCPEnabled,
 				"addr":    routerAddr,
 				"addrs":   routerAddrs,
 				"tls":     routerTLS,
+				"socket":  routerSocket,
 			},
 			"throughput": map[string]any{
 				"bytesInPerSec":  proxyAgg.BytesInPerSec,

@@ -60,6 +60,7 @@ func TestReadLaunchSecret_Malformed(t *testing.T) {
 }
 
 func TestHello_Success(t *testing.T) {
+	t.Cleanup(relay.ResetRelayIdentityForTesting)
 	fb := testutil.NewFakeBridge(t)
 	res, err := relay.Hello(fb.SocketPath(), "relay-llm", validSecret)
 	if err != nil {
@@ -74,6 +75,43 @@ func TestHello_Success(t *testing.T) {
 	}
 	if h := hellos[0]; h.Type != relay.ReqHello || h.Name != "relay-llm" || h.Token != validSecret || len(h.Arguments) != 0 {
 		t.Errorf("hello request = %+v", h)
+	}
+
+	// C9/SP1: FakeBridge's Hello handler runs in this same test process, so
+	// the connecting end's LOCAL_PEERTOKEN (read by Hello) names THIS
+	// process — exactly the self-dial shape spike SP1 measured. RelayIdentity
+	// must reflect it once Hello has returned.
+	proc, ok := relay.RelayIdentity()
+	if !ok {
+		t.Fatal("RelayIdentity() not set after a successful Hello")
+	}
+	if int(proc.PID) != os.Getpid() {
+		t.Errorf("captured identity pid = %d, want %d", proc.PID, os.Getpid())
+	}
+	if proc.PIDVersion == 0 {
+		t.Error("captured identity pidversion is zero; the peer token read is wrong")
+	}
+}
+
+// TestHello_PeerTokenPidMismatchFailsClosed pins C9's cross-check: the OK
+// reply's relay_pid must agree with the kernel's own account of who answered
+// the connection (spike SP1), or Hello fails and no identity is stored — a
+// process able to forge the JSON reply must not be able to forge the token.
+func TestHello_PeerTokenPidMismatchFailsClosed(t *testing.T) {
+	t.Cleanup(relay.ResetRelayIdentityForTesting)
+	fb := testutil.NewFakeBridge(t)
+	// FakeBridge is this test process, so the real peer token's pid is
+	// os.Getpid() — scripting any other relay_pid manufactures exactly the
+	// disagreement Hello must refuse to trust.
+	other := os.Getpid() + 1
+	raw, _ := json.Marshal(relay.HelloResult{ServiceID: "relay-llm", RelayPID: other})
+	fb.SetHelloResponse(relay.BridgeResponse{Type: relay.RespOK, Data: raw})
+
+	if _, err := relay.Hello(fb.SocketPath(), "relay-llm", validSecret); err == nil {
+		t.Fatal("want error on a relay_pid / peer-token mismatch")
+	}
+	if _, ok := relay.RelayIdentity(); ok {
+		t.Error("RelayIdentity() must stay unset after a failed Hello")
 	}
 }
 
