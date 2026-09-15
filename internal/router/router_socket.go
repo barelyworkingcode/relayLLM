@@ -26,10 +26,12 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 
 	"relayllm/internal/peertoken"
@@ -48,7 +50,7 @@ func (p *RelayRouter) SocketHandler() http.Handler {
 	mux.HandleFunc("GET /health", p.handleHealth)
 	mux.HandleFunc("POST /v1/audio/transcriptions", p.handleAudioTranscription)
 	mux.HandleFunc("POST /v1/messages", p.handleAnthropicMessagesSocket)
-	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleAnthropicMessagesSocket)
+	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleAnthropicCountTokensSocket)
 	mux.HandleFunc("/api/", socketRouteRefused)
 	for _, name := range p.passthroughNames {
 		mux.HandleFunc("/"+name+"/", socketRouteRefused)
@@ -65,6 +67,45 @@ func socketRouteRefused(w http.ResponseWriter, r *http.Request) {
 	writeRouterError(w, http.StatusNotFound, "not routable on router.sock")
 }
 
+// removeStaleSocket removes path only when it already exists AND is a
+// socket, refusing to silently unlink and recreate a regular file, a
+// directory, or anything else a misconfigured --router-socket might name. A
+// prior crashed relayLLM leaves exactly a stale socket file here — the same
+// convention bridge.NewBridgeServer and relay's own model.sock use — and
+// anything else at this path is a configuration mistake this must surface,
+// not paper over by deleting whatever was there.
+func removeStaleSocket(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("router.sock: refusing to remove %s: not a socket (mode %s)", path, info.Mode())
+	}
+	return os.Remove(path)
+}
+
+// listenUnixRestricted binds a Unix socket under a temporarily tightened
+// process umask, so the socket file cannot exist — even for the instant
+// between creation and the caller's own os.Chmod — with looser permissions
+// than 0600 grants. Without this, net.Listen creates the file at the
+// process's ordinary umask (often world-or-group-readable), and a peer
+// admission model that's supposed to be "relay only" would briefly rest on a
+// filesystem permission that says otherwise.
+//
+// syscall.Umask is process-global and races a concurrent Umask call from
+// another goroutine; ListenSocket runs once, synchronously, during startup
+// wiring (internal/app/app.go), before anything else in this process has a
+// reason to touch the umask.
+func listenUnixRestricted(path string) (net.Listener, error) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	return net.Listen("unix", path)
+}
+
 // ListenSocket binds path (0600), replacing any stale file a prior crashed
 // process left behind — the same convention relay's own model.sock and
 // bridge.NewBridgeServer use. want is consulted fresh on every accepted
@@ -74,8 +115,10 @@ func socketRouteRefused(w http.ResponseWriter, r *http.Request) {
 // live rather than snapshotting at construction costs nothing and removes an
 // ordering assumption between the two.
 func (p *RelayRouter) ListenSocket(path string, want func() (peertoken.Process, bool)) error {
-	_ = os.Remove(path)
-	ln, err := net.Listen("unix", path)
+	if err := removeStaleSocket(path); err != nil {
+		return err
+	}
+	ln, err := listenUnixRestricted(path)
 	if err != nil {
 		return err
 	}
