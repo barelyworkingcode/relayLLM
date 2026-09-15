@@ -89,17 +89,29 @@ router is also served on a Unix socket (`--router-socket`, default
 `{data-dir}/router.sock`) that admits exactly one peer — relay itself,
 identified by the kernel audit token relayLLM captured off its own launch
 `Hello` handshake, not a bearer. relayLLM registers this socket with relay
-(`RegisterModelHost`) once its manifest registration succeeds; relay refusing
-that registration (the service record lacks the `model_host` capability) is
-fatal — relayLLM exits 78 rather than run believing it is relay's model
-broker upstream when relay disagrees. The socket serves the same dispatch as
-`--router-port` minus the two route families that would forward a caller's
-own upstream credential off this box: the `/api/` Claude Code OAuth
-passthrough and any configured `router.passthrough` `/<name>/` route both
-404 here, and `/v1/messages` only serves `router.anthropic.modelMap` targets
-(anything else 404s rather than reaching the real Anthropic API). See
-`internal/router/router_socket.go` and
+(`RegisterModelHost`) whenever it is launched, independent of whether its
+front-door manifest registration succeeded (the two are separate relay
+capabilities); relay refusing the model-host registration (the service
+record lacks the `model_host` capability) is fatal — relayLLM exits 78
+rather than run believing it is relay's model broker upstream when relay
+disagrees. The socket serves the same dispatch as `--router-port` minus the
+two route families that would forward a caller's own upstream credential off
+this box: the `/api/` Claude Code OAuth passthrough and any configured
+`router.passthrough` `/<name>/` route both 404 here, and `/v1/messages` only
+serves `router.anthropic.modelMap` targets (anything else 404s rather than
+reaching the real Anthropic API). See `internal/router/router_socket.go` and
 [`../relay/docs/model-endpoint.md`](../relay/docs/model-endpoint.md).
+
+**Behavior change**: every managed-server, endpoint, and virtual-model
+dispatch (`--router-port` and router.sock alike — NOT the `/api/` Anthropic
+passthrough or a `router.passthrough` `/<name>/` route, which still forward
+a caller's real credential byte-for-byte on purpose) now strips an inbound
+`X-Api-Key` header, and any `X-Relay-*` header in either direction, before
+talking to the actual backend — see CLAUDE.md's Relay-router section for
+why. Nothing in this repo relies on forwarding `X-Api-Key` to a managed
+server or OpenAI endpoint, but a standalone client that previously got away
+with sending its own upstream API key that way will need to configure it in
+`settings.json`'s `openai.endpoints[].apiKey` instead.
 
 Configure `virtual-llms` in `settings.json` to expose a stable model name backed
 by an ordered list of fallback targets. An endpoint target reuses a name from

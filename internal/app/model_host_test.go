@@ -1,25 +1,35 @@
 package app
 
-// Coverage for model_host.go's C9 wiring — specifically the two should-fix
-// bugs a security review found in the original app.go integration:
+// Coverage for model_host.go's C9 wiring and the app.go "build the router
+// exactly once" flow around it — specifically the should-fix bugs a security
+// review found in the original app.go integration:
 //
 //  1. router.sock (and RegisterModelHost) silently never happened for a
 //     relay-launched relayLLM with no --router-port configured, because both
-//     were gated on StartRelayRouter's return value being non-nil.
+//     were gated on the router having already been built and bound for TCP.
 //  2. RegisterModelHost was skipped entirely whenever RegisterManifest
 //     failed, silently stranding relay's model broker even though the two
 //     are independent relay capabilities.
+//  3. The fix for #1 originally rebuilt a second router.RelayRouter (via
+//     router.BuildRelayRouter) whenever the first one wasn't bound for TCP —
+//     doubling every setAnthropic/setPassthrough invalid-config log line.
+//     app.go now builds once and reuses the same object for both the TCP
+//     decision (RelayRouter.MaybeServeTCP) and router.sock.
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"relayllm/internal/config"
 	"relayllm/internal/relay"
 	"relayllm/internal/router"
 	"relayllm/internal/testutil"
@@ -55,47 +65,92 @@ func launchedTestSetup(t *testing.T) *testutil.FakeBridge {
 }
 
 // ---------------------------------------------------------------------------
-// ensureModelHostRouter
+// Build-once flow: router.BuildRelayRouter + RelayRouter.MaybeServeTCP,
+// mirroring exactly what app.go's Main does (see its comment there).
 // ---------------------------------------------------------------------------
 
-func TestEnsureModelHostRouter_StandaloneReturnsNilUnchanged(t *testing.T) {
-	// Not launched: relay.Launched() is false by default in a fresh test
-	// process/without LaunchViaBridge, so this must be a no-op.
-	got := ensureModelHostRouter(nil, nil, nil, nil, nil, "", "")
-	if got != nil {
-		t.Fatalf("got %v, want nil for a standalone (non-launched) process", got)
-	}
-}
-
-func TestEnsureModelHostRouter_AlreadyBuiltIsReturnedUnchanged(t *testing.T) {
-	launchedTestSetup(t)
-	existing := router.NewRelayRouter(":0", nil, nil, nil)
-	got := ensureModelHostRouter(existing, nil, nil, nil, nil, "", "")
-	if got != existing {
-		t.Fatalf("ensureModelHostRouter replaced an already-built router")
-	}
-}
-
-// TestEnsureModelHostRouter_LaunchedBuildsRouterWithoutRouterPort is should-fix
-// #4's core assertion: StartRelayRouter returns nil when --router-port is
-// unset (len(routerAddrs) == 0) — a relay-launched process must still get a
-// router object to serve router.sock on.
-func TestEnsureModelHostRouter_LaunchedBuildsRouterWithoutRouterPort(t *testing.T) {
+// TestBuildOnceFlow_LaunchedWithoutRouterPortKeepsRouterForSocket is
+// should-fix #4's core assertion: MaybeServeTCP returning false (no
+// --router-port, i.e. an empty addrs) must not mean the router.RelayRouter
+// object itself goes away — a relay-launched process still needs it for
+// router.sock.
+func TestBuildOnceFlow_LaunchedWithoutRouterPortKeepsRouterForSocket(t *testing.T) {
 	launchedTestSetup(t)
 
-	// Mirrors what app.go's Main does with an empty --router-port: routerAddrs
-	// ends up empty, and StartRelayRouter's own early return kicks in.
-	nilFromStart, err := router.StartRelayRouter(nil, nil, nil, nil, nil, "", "")
+	relayRouter := router.BuildRelayRouter(nil, nil, nil, nil, "", "")
+	started, err := relayRouter.MaybeServeTCP(nil, nil)
 	if err != nil {
-		t.Fatalf("setup: StartRelayRouter: %v", err)
+		t.Fatalf("MaybeServeTCP: %v", err)
 	}
-	if nilFromStart != nil {
-		t.Fatal("setup: expected StartRelayRouter to return nil with no addrs")
+	if started {
+		t.Fatal("setup: expected MaybeServeTCP to report false with no addrs")
 	}
 
-	got := ensureModelHostRouter(nilFromStart, nil, nil, nil, nil, "", "")
-	if got == nil {
-		t.Fatal("ensureModelHostRouter must build a router when launched, even with no TCP addrs configured")
+	// This is the exact decision app.go's Main makes: drop the router only
+	// when BOTH nothing was served over TCP AND relay didn't launch this
+	// process. Launched here, so the router must be kept.
+	if !relay.Launched() {
+		t.Fatal("setup: expected to be launched")
+	}
+	if relayRouter == nil {
+		t.Fatal("the router object must not be nil'd out while launched, even with no TCP addrs configured")
+	}
+}
+
+// TestBuildOnceFlow_StandaloneWithNothingToServeDropsRouter pins the other
+// half of the same decision: unlaunched AND nothing to serve over TCP really
+// is "no router at all", matching the pre-router.sock behavior every other
+// reader of relayRouter (sessions.SetRouterPort, the dashboard) expects.
+func TestBuildOnceFlow_StandaloneWithNothingToServeDropsRouter(t *testing.T) {
+	relayRouter := router.BuildRelayRouter(nil, nil, nil, nil, "", "")
+	started, err := relayRouter.MaybeServeTCP(nil, nil)
+	if err != nil {
+		t.Fatalf("MaybeServeTCP: %v", err)
+	}
+	if started {
+		t.Fatal("setup: expected MaybeServeTCP to report false with no addrs")
+	}
+	if relay.Launched() {
+		t.Fatal("setup: expected NOT launched in this test")
+	}
+	// app.go's own logic: `if !tcpStarted && !relay.Launched() { relayRouter = nil }`.
+	if !started && !relay.Launched() {
+		relayRouter = nil
+	}
+	if relayRouter != nil {
+		t.Fatal("expected the router to be dropped: unlaunched and nothing to serve over TCP")
+	}
+}
+
+// TestBuildOnceFlow_InvalidPassthroughLoggedOnce is the direct proof for
+// should-fix #4/#5's "build once" requirement: setPassthrough logs one
+// warning per invalid entry, so building the router twice from the same
+// config (the shape ensureModelHostRouter used to have, rebuilding whenever
+// the first build wasn't bound for TCP) would double it. Going through the
+// intended flow — one BuildRelayRouter call, then MaybeServeTCP deciding
+// whether to bind TCP — must log it exactly once.
+func TestBuildOnceFlow_InvalidPassthroughLoggedOnce(t *testing.T) {
+	launchedTestSetup(t)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	// "api" is a reserved passthrough name (newPassthroughProxy refuses it),
+	// so setPassthrough logs "router.passthrough entry disabled" for it.
+	routerCfg := &config.RouterConfig{Passthrough: map[string]config.PassthroughConfig{
+		"api": {Upstream: "https://example.com"},
+	}}
+
+	relayRouter := router.BuildRelayRouter(nil, nil, nil, routerCfg, "", "")
+	if _, err := relayRouter.MaybeServeTCP(nil, routerCfg); err != nil {
+		t.Fatalf("MaybeServeTCP: %v", err)
+	}
+
+	got := strings.Count(buf.String(), "router.passthrough entry disabled")
+	if got != 1 {
+		t.Errorf("\"passthrough entry disabled\" logged %d time(s), want exactly 1 (log:\n%s)", got, buf.String())
 	}
 }
 
@@ -223,14 +278,21 @@ func registerWithRelayForTest(t *testing.T, fb *testutil.FakeBridge, exitFn func
 func TestModelHostWiring_LaunchedWithoutRouterPort_OpensSocketAndRegisters(t *testing.T) {
 	fb := launchedTestSetup(t)
 
-	// routerAddrs empty, exactly like Main() with --router-port unset.
-	relayRouter, err := router.StartRelayRouter(nil, nil, nil, nil, nil, "", "")
+	// Exactly app.go's Main flow: build once, then MaybeServeTCP with an
+	// empty addrs (--router-port unset) reports false without touching the
+	// router object.
+	relayRouter := router.BuildRelayRouter(nil, nil, nil, nil, "", "")
+	started, err := relayRouter.MaybeServeTCP(nil, nil)
 	if err != nil {
-		t.Fatalf("setup: StartRelayRouter: %v", err)
+		t.Fatalf("setup: MaybeServeTCP: %v", err)
 	}
-	relayRouter = ensureModelHostRouter(relayRouter, nil, nil, nil, nil, "", "")
+	if started {
+		t.Fatal("setup: expected MaybeServeTCP to report false with no addrs")
+	}
+	// Launched, so app.go's `if !tcpStarted && !relay.Launched() { relayRouter = nil }`
+	// does not fire — the object is kept for router.sock.
 	if relayRouter == nil {
-		t.Fatal("ensureModelHostRouter returned nil while launched")
+		t.Fatal("relayRouter must not be nil while launched")
 	}
 
 	// /tmp directly, not t.TempDir() (buried under TestName/NNN/): a real

@@ -31,7 +31,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"syscall"
 	"time"
 
 	"relayllm/internal/peertoken"
@@ -88,24 +87,6 @@ func removeStaleSocket(path string) error {
 	return os.Remove(path)
 }
 
-// listenUnixRestricted binds a Unix socket under a temporarily tightened
-// process umask, so the socket file cannot exist — even for the instant
-// between creation and the caller's own os.Chmod — with looser permissions
-// than 0600 grants. Without this, net.Listen creates the file at the
-// process's ordinary umask (often world-or-group-readable), and a peer
-// admission model that's supposed to be "relay only" would briefly rest on a
-// filesystem permission that says otherwise.
-//
-// syscall.Umask is process-global and races a concurrent Umask call from
-// another goroutine; ListenSocket runs once, synchronously, during startup
-// wiring (internal/app/app.go), before anything else in this process has a
-// reason to touch the umask.
-func listenUnixRestricted(path string) (net.Listener, error) {
-	old := syscall.Umask(0o077)
-	defer syscall.Umask(old)
-	return net.Listen("unix", path)
-}
-
 // ListenSocket binds path (0600), replacing any stale file a prior crashed
 // process left behind — the same convention relay's own model.sock and
 // bridge.NewBridgeServer use. want is consulted fresh on every accepted
@@ -114,11 +95,20 @@ func listenUnixRestricted(path string) (net.Listener, error) {
 // runs once per process lifetime, before this is ever called, but reading it
 // live rather than snapshotting at construction costs nothing and removes an
 // ordering assumption between the two.
+//
+// This is deliberate: admission is by kernel peer token (ConnContext below),
+// not filesystem permission — a peer that isn't relay is refused regardless
+// of who else could open() this path — so the brief window between
+// net.Listen creating the file and the os.Chmod just below is not a real
+// exposure under an ordinary 022-or-tighter umask, and narrowing the
+// process-wide umask around the call (an earlier version of this function
+// did) is a global side effect with no test coverage to show it does
+// anything the chmod doesn't already guarantee once ListenSocket returns.
 func (p *RelayRouter) ListenSocket(path string, want func() (peertoken.Process, bool)) error {
 	if err := removeStaleSocket(path); err != nil {
 		return err
 	}
-	ln, err := listenUnixRestricted(path)
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return err
 	}
@@ -145,6 +135,7 @@ func (p *RelayRouter) ListenSocket(path string, want func() (peertoken.Process, 
 	}
 	p.socketSrv = srv
 	p.socketLn = ln
+	p.socketPath = path
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("router.sock: serve error", "error", err)
