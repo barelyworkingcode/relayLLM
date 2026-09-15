@@ -273,20 +273,35 @@ func Main() {
 	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
 	routerAddrs := netutil.ListenAddrs(routerBinds, *routerPort)
-	// cfg.Router is passed straight into StartRelayRouter rather than set on
-	// the router afterward — see StartRelayRouter's doc comment for why a
-	// separate post-construction setter call raced the router's first
-	// accepted connection. Each configured address binds best-effort (see
+	// Built exactly once — see BuildRelayRouter's doc comment for why:
+	// setAnthropic/setPassthrough each log a warning per invalid config
+	// entry, so building a second router.RelayRouter from the same config
+	// (the shape an earlier version of this file had, gating a rebuild on
+	// StartRelayRouter having returned nil) would double every one of those
+	// log lines for no reason. cfg.Router is passed straight in rather than
+	// set on the router afterward — see BuildRelayRouter's own setters for
+	// why a separate post-construction call would race the router's first
+	// accepted connection.
+	relayRouter := router.BuildRelayRouter(managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// MaybeServeTCP binds every configured address best-effort (see
 	// listenAll) — one that can't be bound in this deployment is logged and
 	// skipped, not fatal, since --router-bind may legitimately name an
 	// address that's only assignable in some environments. Only if every
-	// single one fails does StartRelayRouter return an error, the same as
-	// the http front's below: that's the case where the router would
-	// otherwise be silently absent from a healthy-looking process.
-	relayRouter, err := router.StartRelayRouter(routerAddrs, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// single one fails does it return an error, the same as the http
+	// front's below: that's the case where the router would otherwise be
+	// silently absent from a healthy-looking process.
+	tcpStarted, err := relayRouter.MaybeServeTCP(routerAddrs, cfg.Router)
 	if err != nil {
 		slog.Error("failed to start relay router", "error", err)
 		os.Exit(1)
+	}
+	if !tcpStarted && !relay.Launched() {
+		// Nothing to serve over TCP (no --router-port, or nothing configured
+		// to route to) and no router.sock to keep the object alive for
+		// either: drop it, matching the pre-router.sock "no router at all"
+		// nil every other reader below (sessions.SetRouterPort, the
+		// dashboard) already treats as absent.
+		relayRouter = nil
 	}
 	sessions.SetRouterPort(*routerPort)
 	sessions.SetRouterHosts(routerBinds)
@@ -295,13 +310,11 @@ func Main() {
 	// router.sock (C9): relay's private, tokenless path into the relay-router,
 	// opened only when relay actually launched this process — RelayIdentity()
 	// is what admits a caller, and standalone has no such identity to admit
-	// against. ensureModelHostRouter builds a TCP-unbound router when
-	// StartRelayRouter above returned nil (no --router-port, or no
-	// backends/passthrough configured): a relay-launched relayLLM must
-	// register as relay's model host regardless of whether it also serves
-	// TCP, or relay's own model.sock 503s "no host" forever for a
-	// deployment that never set --router-port. See model_host.go.
-	relayRouter = ensureModelHostRouter(relayRouter, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// against. relayRouter is guaranteed non-nil here whenever launched (the
+	// drop-to-nil branch above requires !relay.Launched()): a relay-launched
+	// relayLLM must register as relay's model host regardless of whether it
+	// also serves TCP, or relay's own model.sock 503s "no host" forever for
+	// a deployment that never set --router-port.
 	var resolvedRouterSocketPath string
 	if relay.Launched() {
 		resolvedRouterSocketPath, err = resolveRouterSocketPath(*routerSocketPath, *dataDir)

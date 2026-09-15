@@ -302,6 +302,32 @@ func TestRouterSocket_NoCapturedIdentityRefusesEveryone(t *testing.T) {
 	}
 }
 
+// TestRouterSocket_ListenSocketRefusesRegularFileAtPath pins
+// removeStaleSocket's refusal: a regular file at --router-socket's path is a
+// configuration mistake (or worse, something else's file), never a stale
+// socket a prior crashed relayLLM could have left — ListenSocket must error
+// out and leave it untouched, not silently unlink and recreate it.
+func TestRouterSocket_ListenSocketRefusesRegularFileAtPath(t *testing.T) {
+	sockPath := shortSocketPath(t)
+	const content = "not a socket"
+	if err := os.WriteFile(sockPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+
+	r := NewRelayRouter(":0", nil, nil, nil)
+	if err := r.ListenSocket(sockPath, relay.RelayIdentity); err == nil {
+		t.Fatal("ListenSocket must refuse a path where a regular file already exists")
+	}
+
+	got, err := os.ReadFile(sockPath)
+	if err != nil {
+		t.Fatalf("the regular file was removed: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("the regular file's content changed: got %q, want %q", got, content)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Mux differences from the TCP router (httptest against SocketHandler
 // directly — these assert on routing decisions, not admission, so a real

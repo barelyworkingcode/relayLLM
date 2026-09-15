@@ -97,11 +97,13 @@ type RelayRouter struct {
 	// than letting them fall through to handleProxy's model dispatch (C9).
 	passthroughNames []string
 
-	// socketSrv/socketLn are router.sock's listener and server, present only
-	// in launched mode (ListenSocket). Close tears both down alongside the
-	// TCP listener(s).
-	socketSrv *http.Server
-	socketLn  net.Listener
+	// socketSrv/socketLn/socketPath are router.sock's listener, server and
+	// filesystem path, present only in launched mode (ListenSocket). Close
+	// tears down socketSrv/socketLn alongside the TCP listener(s);
+	// socketPath backs SocketPath() for status reporting (api_status_detailed.go).
+	socketSrv  *http.Server
+	socketLn   net.Listener
+	socketPath string
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -302,6 +304,19 @@ func (p *RelayRouter) Addrs() []string {
 		addrs[i] = ln.Addr().String()
 	}
 	return addrs
+}
+
+// SocketPath returns the filesystem path router.sock is bound to, or "" for
+// a nil router or one ListenSocket was never called on — standalone, or
+// launched but not yet past that point in startup. Status reporting
+// (api_status_detailed.go) uses this to tell a socket-only router (launched,
+// no --router-port) apart from one serving neither transport, since Addr()
+// and Addrs() alone can't: both report empty/nil in either case.
+func (p *RelayRouter) SocketPath() string {
+	if p == nil {
+		return ""
+	}
+	return p.socketPath
 }
 
 // TLSEnabled reports whether the router listener serves TLS.
@@ -771,26 +786,14 @@ func upstreamPath(basePath, inbound string) string {
 // there's no per-bind TLS config — so the cert must be valid for all of
 // them if more than one is configured.
 func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
-	if len(addrs) == 0 {
-		return nil, nil
-	}
 	p := BuildRelayRouter(managers, registry, virtual, router, tlsCert, tlsKey)
-	// A router with no managed servers and no OpenAI endpoints would
-	// otherwise dispatch nothing — except router.anthropic's passthrough is
-	// a real destination in its own right (api.anthropic.com), needing
-	// neither. Without this check, a deployment using relayLLM purely as a
-	// Claude Code proxy (router.anthropic configured, nothing else) got no
-	// router at all: /v1/messages, the /api/* bootstrap passthrough,
-	// everything 404'd with no indication why. router.passthrough upstreams
-	// are real destinations the same way.
-	hasPassthrough := router.ForwardsClientCredentials()
-	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
-		return nil, nil
-	}
-	if err := p.Listen(addrs); err != nil {
+	started, err := p.MaybeServeTCP(addrs, router)
+	if err != nil {
 		return nil, err
 	}
-	p.Serve()
+	if !started {
+		return nil, nil
+	}
 	return p, nil
 }
 
@@ -803,11 +806,16 @@ func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, r
 // purely to serve router.sock has it available even when there is no
 // --router-port to bind: C9 requires router.sock to exist whenever relay
 // launched this process, independent of whether the TCP listener is
-// configured at all, and StartRelayRouter's early returns (no addrs, or no
-// backends/passthrough) only make sense for that TCP listener's own
-// "nothing to serve" checks — they say nothing about whether router.sock
-// should exist. addr is left empty; a caller that also wants TCP calls
-// Listen/Serve itself (StartRelayRouter does, for its own return value).
+// configured at all, and MaybeServeTCP's "nothing to serve" check only makes
+// sense for that TCP listener's own decision — it says nothing about
+// whether router.sock should exist. Calling this exactly ONCE per process,
+// then passing the result to MaybeServeTCP, is load-bearing: setAnthropic
+// and setPassthrough both log a warning per invalid config entry, so
+// building twice (once discarded, once kept) would double every one of
+// those log lines for no reason — internal/app/app.go builds once and reuses
+// the same *RelayRouter for both the TCP decision and router.sock.
+// addr is left empty; a caller that also wants TCP calls Listen/Serve itself
+// (MaybeServeTCP does, for StartRelayRouter's benefit).
 func BuildRelayRouter(managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) *RelayRouter {
 	p := NewRelayRouter("", managers, registry, virtual)
 	if router != nil {
@@ -818,4 +826,38 @@ func BuildRelayRouter(managers []*servermanager.ServerManager, registry *registr
 	}
 	p.setTLS(tlsCert, tlsKey)
 	return p
+}
+
+// MaybeServeTCP binds and serves p on addrs, if there is anything worth
+// serving. A router with no managed servers and no OpenAI endpoints would
+// otherwise dispatch nothing — except router.anthropic's passthrough is a
+// real destination in its own right (api.anthropic.com), needing neither.
+// Without this check, a deployment using relayLLM purely as a Claude Code
+// proxy (router.anthropic configured, nothing else) got no router at all:
+// /v1/messages, the /api/* bootstrap passthrough, everything 404'd with no
+// indication why. router.passthrough upstreams are real destinations the
+// same way. routerCfg is read here (via ForwardsClientCredentials, the raw
+// pre-setter config) rather than p's own post-setter state, matching
+// StartRelayRouter's original check exactly: a configured-but-invalid
+// router.anthropic (setAnthropic already logged and left p.anthropic nil)
+// still counts as "this deployment wanted a passthrough router", not as
+// "nothing to serve".
+//
+// Returns (false, nil) when addrs is empty or there is nothing to route to —
+// a caller decides for itself whether that means the router object itself
+// is now pointless (drop it) or still needed for something else (router.sock,
+// C9 — keep it and call ListenSocket instead).
+func (p *RelayRouter) MaybeServeTCP(addrs []string, routerCfg *config.RouterConfig) (bool, error) {
+	if len(addrs) == 0 {
+		return false, nil
+	}
+	hasPassthrough := routerCfg.ForwardsClientCredentials()
+	if len(p.managers) == 0 && p.registry == nil && !hasPassthrough {
+		return false, nil
+	}
+	if err := p.Listen(addrs); err != nil {
+		return false, err
+	}
+	p.Serve()
+	return true, nil
 }

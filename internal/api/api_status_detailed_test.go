@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"relayllm/internal/config"
+	"relayllm/internal/peertoken"
 	"relayllm/internal/permission"
 	"relayllm/internal/registry"
 	"relayllm/internal/router"
@@ -115,6 +118,56 @@ func TestDetailedStatus_Shape(t *testing.T) {
 		if _, ok := row["kind"]; !ok {
 			t.Errorf("connections[] row missing kind discriminator: %+v", row)
 		}
+	}
+}
+
+// TestDetailedStatus_SocketOnlyRouter pins the C9 should-fix: a router.sock-only
+// deployment (relay launched relayLLM with --router-port unset) must not
+// report overview.router.enabled == true with no other signal that TCP isn't
+// actually bound — a dashboard reader (or a future status.js feature) needs
+// tcp/socket to tell "live over the socket only" apart from "live over TCP".
+func TestDetailedStatus_SocketOnlyRouter(t *testing.T) {
+	// BuildRelayRouter, not NewRelayRouter(":0", ...) directly: production
+	// (app.go) always builds with an empty addr and lets MaybeServeTCP/Listen
+	// fill it in only if TCP actually binds — using ":0" here would report a
+	// non-empty Addr() even though nothing was ever bound, which is exactly
+	// the bug this test exists to catch.
+	rtr := router.BuildRelayRouter(nil, nil, nil, nil, "", "")
+	dir, err := os.MkdirTemp("/tmp", "statustest")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "r.sock")
+	if err := rtr.ListenSocket(sockPath, func() (peertoken.Process, bool) { return peertoken.Process{}, false }); err != nil {
+		t.Fatalf("ListenSocket: %v", err)
+	}
+	t.Cleanup(func() { _ = rtr.Close() })
+
+	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
+	deps := DetailedStatusDeps{
+		Sessions:  sessions,
+		Router:    rtr,
+		StartTime: time.Now(),
+	}
+	got := buildDetailedStatus(context.Background(), deps)
+
+	overview := got["overview"].(map[string]any)
+	routerJSON, ok := overview["router"].(map[string]any)
+	if !ok {
+		t.Fatalf("overview.router missing or wrong type: %+v", overview["router"])
+	}
+	if routerJSON["enabled"] != true {
+		t.Errorf("enabled = %v, want true (router.sock is live)", routerJSON["enabled"])
+	}
+	if routerJSON["tcp"] != false {
+		t.Errorf("tcp = %v, want false (no --router-port bound)", routerJSON["tcp"])
+	}
+	if routerJSON["addr"] != "" {
+		t.Errorf("addr = %v, want \"\" with no TCP listener", routerJSON["addr"])
+	}
+	if routerJSON["socket"] != sockPath {
+		t.Errorf("socket = %v, want %q", routerJSON["socket"], sockPath)
 	}
 }
 
