@@ -112,6 +112,13 @@ func newPassthroughProxy(name string, cfg config.PassthroughConfig) (*httputil.R
 			pr.Out.URL.RawPath = strings.TrimPrefix(pr.In.URL.RawPath, prefix)
 			pr.SetURL(upstream)
 			pr.Out.Host = upstream.Host
+			// C10: X-Relay-Router-Key authenticates the caller to relayLLM
+			// ITSELF on this route (auth.go) — Authorization/X-Api-Key are
+			// what's forwarded byte-for-byte, on purpose, to the real
+			// upstream above, so relayLLM's own local secret needs a header
+			// name the upstream has no other reason to see and must never
+			// receive.
+			pr.Out.Header.Del("X-Relay-Router-Key")
 		},
 		Transport:     transport,
 		FlushInterval: -1, // flush immediately for SSE streaming
