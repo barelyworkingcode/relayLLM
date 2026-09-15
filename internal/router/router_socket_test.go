@@ -12,6 +12,7 @@ package router
 // process can manufacture a second identity to dial from.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -23,12 +24,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/peertoken"
 	regpkg "relayllm/internal/registry"
 	"relayllm/internal/relay"
+	"relayllm/internal/servermanager"
 	"relayllm/internal/testutil"
 )
 
@@ -210,6 +214,39 @@ func TestRouterSocket_RestartedRelayRefused(t *testing.T) {
 	}
 }
 
+// TestRouterSocket_SamePidDifferentPidversionRefused pins the half of C9's
+// admission check dialFromSeparateProcess's tests cannot: every test above
+// exercises a peer with BOTH a different pid and a different pidversion (an
+// actual different process), which a mutant comparing pid alone would also
+// correctly refuse — so none of them would catch that mutation. This test
+// dials from THIS process (real pid, real pidversion) but gives ListenSocket
+// a `want` that reports the same pid with pidversion+1, isolating the
+// pidversion half of the (pid, pidversion) tuple compare
+// (peertoken.Process equality in router_socket.go's ConnContext).
+func TestRouterSocket_SamePidDifferentPidversionRefused(t *testing.T) {
+	selfHello(t)
+	real, ok := relay.RelayIdentity()
+	if !ok {
+		t.Fatal("setup: selfHello must have captured an identity")
+	}
+
+	wantIdentity := peertoken.Process{PID: real.PID, PIDVersion: real.PIDVersion + 1}
+	r := NewRelayRouter(":0", nil, nil, nil)
+	sockPath := shortSocketPath(t)
+	if err := r.ListenSocket(sockPath, func() (peertoken.Process, bool) { return wantIdentity, true }); err != nil {
+		t.Fatalf("ListenSocket: %v", err)
+	}
+	defer r.Close()
+
+	// Dialing from THIS process presents the REAL (pid, pidversion) —
+	// same pid as wantIdentity, different pidversion. A pid-only compare
+	// would wrongly admit this.
+	status, body := dialRouterSocket(t, sockPath, "/health")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a same-pid/different-pidversion peer (real=%+v, admitted=%+v); body=%s", status, real, wantIdentity, body)
+	}
+}
+
 // TestRouterSocket_TCPStillServedAlongside pins P1's rule (C9: "--router-port
 // while launched: allowed in P1"): router.sock and the TCP listener run on
 // the same *RelayRouter side by side, and ListenSocket must not disturb the
@@ -315,13 +352,47 @@ func TestRouterSocket_ConfiguredPassthrough404s(t *testing.T) {
 	}
 }
 
+// newFakeAnthropicUpstream returns an httptest server shaped like
+// api.anthropic.com, plus a hit counter. Tests point router.anthropic.Upstream
+// at it (instead of leaving the real "https://api.anthropic.com" default) so
+// a bug that fell through to the real passthrough would be caught locally —
+// asserting on the counter — rather than either silently passing (network
+// unreachable in a sandboxed run) or, worse, actually reaching the internet
+// from a hermetic test.
+func newFakeAnthropicUpstream(t *testing.T) (srv *httptest.Server, hits *int32) {
+	t.Helper()
+	hits = new(int32)
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, hits
+}
+
 func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
-	upstream := newFakeOpenAIUpstream(t, []string{"local-model"})
+	// newFakeOpenAIUpstream only serves /v1/models; the mapped-model case
+	// below needs a real /v1/chat/completions response too.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "local-model"}}})
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp","model":"local-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer upstream.Close()
 	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1", APIKey: "k"}}}
 	registry := regpkg.NewProxyRegistry(cfg)
+	anthropicUpstream, hits := newFakeAnthropicUpstream(t)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
+		Upstream: anthropicUpstream.URL,
 		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
 	})
 	srv := httptest.NewServer(r.SocketHandler())
@@ -342,6 +413,83 @@ func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
 	}
 	if err := json.Unmarshal(body, &errBody); err != nil || errBody.Error.Type != "not_found_error" {
 		t.Errorf("error body = %s, want an Anthropic not_found_error", body)
+	}
+	if got := atomic.LoadInt32(hits); got != 0 {
+		t.Errorf("fake Anthropic upstream hit %d time(s) for a non-mapped model; router.sock must never reach the real passthrough", got)
+	}
+
+	// Mapped: succeeds via the redirect path — and still never touches the
+	// Anthropic upstream, only the modelMap's OpenAI-endpoint target.
+	resp2 := postBytes(t, srv.URL+"/v1/messages", []byte(`{"model":"claude-mapped","stream":false,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("mapped model: status = %d, want 200; body=%s", resp2.StatusCode, body2)
+	}
+	if got := atomic.LoadInt32(hits); got != 0 {
+		t.Errorf("fake Anthropic upstream hit %d time(s) for a MAPPED model; it must be served by the mapped target only", got)
+	}
+}
+
+// TestRouterSocket_CountTokensNeverGenerates pins the should-fix: an earlier
+// version of router_socket.go wired /v1/messages/count_tokens to the SAME
+// handler as /v1/messages, so a mapped model ran a full upstream
+// /v1/chat/completions call (and returned an Anthropic `message` body) where
+// only a byte-based estimate was ever wanted.
+func TestRouterSocket_CountTokensNeverGenerates(t *testing.T) {
+	var chatCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "local-model"}}})
+		case "/v1/chat/completions":
+			atomic.AddInt32(&chatCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp","choices":[]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1", APIKey: "k"}}}
+	registry := regpkg.NewProxyRegistry(cfg)
+	r := NewRelayRouter(":0", nil, registry, nil)
+	r.setAnthropic(&config.AnthropicRouterConfig{
+		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
+	})
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/messages/count_tokens", []byte(`{"model":"claude-mapped","messages":[{"role":"user","content":"hello there, how many tokens is this"}]}`))
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	var out struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("body not the expected {input_tokens} shape: %s: %v", body, err)
+	}
+	if out.InputTokens <= 0 {
+		t.Errorf("input_tokens = %d, want > 0", out.InputTokens)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("count_tokens made %d upstream /v1/chat/completions call(s); it must only estimate, never generate", got)
+	}
+
+	// Unmapped model: 404, same shape as /v1/messages, still zero upstream
+	// calls.
+	resp2 := postBytes(t, srv.URL+"/v1/messages/count_tokens", []byte(`{"model":"not-mapped","messages":[]}`))
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("unmapped count_tokens status = %d, want 404; body=%s", resp2.StatusCode, body2)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("count_tokens made %d upstream call(s) for an unmapped model", got)
 	}
 }
 
@@ -410,5 +558,231 @@ func TestRouter_XRelayModelTargetHeader_EndpointDispatch(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Relay-Model-Target"); got != "fakeep/Qwen" {
 		t.Errorf("X-Relay-Model-Target = %q, want %q", got, "fakeep/Qwen")
+	}
+}
+
+// TestRouterSocket_XRelayModelTargetHeader_ManagedAlias pins the header's
+// managed-alias shape (a bare alias) over SocketHandler() specifically, not
+// just the TCP mux — router.sock is relay's only path to this signal.
+// InjectInstanceForTest fabricates a healthy instance bound to port 9000
+// (the fixed port endpointForPort always reports for a fabricated instance);
+// a real httptest server is bound there so Acquire's returned endpoint
+// actually answers.
+func TestRouterSocket_XRelayModelTargetHeader_ManagedAlias(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:9000")
+	if err != nil {
+		t.Skipf("cannot bind 127.0.0.1:9000 for this test: %v", err)
+	}
+	upstream := &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","choices":[]}`))
+	})}}
+	upstream.Start()
+	defer upstream.Close()
+
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "test-alias"}},
+	}, "")
+	mgr.InjectInstanceForTest("test-alias", 0, time.Now())
+
+	r := NewRelayRouter(":0", []*servermanager.ServerManager{mgr}, nil, nil)
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"test-alias"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if got, want := resp.Header.Get("X-Relay-Model-Target"), "test-alias"; got != want {
+		t.Errorf("X-Relay-Model-Target = %q, want %q", got, want)
+	}
+}
+
+// TestRouterSocket_XRelayModelTargetHeader_VirtualFailover pins that the
+// header reflects the LAST attempted (successful) candidate, not the first —
+// routeVirtual calls setModelTargetHeader before every attempt, so a
+// regression that hoisted the call above the retry loop (setting it once,
+// for the first candidate only) would leave this pointing at a target that
+// never actually served the request.
+func TestRouterSocket_XRelayModelTargetHeader_VirtualFailover(t *testing.T) {
+	// Both endpoints must answer /v1/models (so the registry's reachability
+	// probe puts BOTH in the "fresh"/declared-order set — CandidatesForVirtual
+	// would otherwise already reorder a probe-time-unreachable endpoint to
+	// the back on its own, which would make candidates[0] equal the
+	// surviving target from the start and defeat the point of this test).
+	// "primary" only fails at actual DISPATCH time (hijack+close, a
+	// pre-response failure indistinguishable from a dial error), which is
+	// what forces the retry this test is pinning the header through.
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "primary-model"}}})
+		case "/v1/chat/completions":
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+		}
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "secondary-model"}}})
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer secondary.Close()
+
+	registry := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{
+		{Name: "primary", BaseURL: primary.URL + "/v1"},
+		{Name: "secondary", BaseURL: secondary.URL + "/v1"},
+	}})
+	r := NewRelayRouter(":0", nil, registry, &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+		Name: "vRetry", Targets: []config.VirtualLLMTarget{
+			{Endpoint: "primary", Model: "primary-model"},
+			{Endpoint: "secondary", Model: "secondary-model"},
+		},
+	}}})
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"vRetry"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if got, want := resp.Header.Get("X-Relay-Model-Target"), "secondary/secondary-model"; got != want {
+		t.Errorf("X-Relay-Model-Target = %q, want %q (the second, actually-successful candidate — declared FIRST is \"primary\", which failed at dispatch time)", got, want)
+	}
+}
+
+// TestRouterSocket_XRelayModelTargetHeader_AnthropicRedirect pins the header
+// through the /v1/messages modelMap redirect path specifically —
+// translatingResponseWriter buffers headers set via its own Header() call
+// separately from the real ResponseWriter (see its doc comment), so this is
+// the one dispatch path where a plain w.Header().Set would silently vanish;
+// only the modelTargetSetter/SetModelTarget interposition makes it survive.
+func TestRouterSocket_XRelayModelTargetHeader_AnthropicRedirect(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "local-model"}}})
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp","model":"local-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1", APIKey: "k"}}}
+	registry := regpkg.NewProxyRegistry(cfg)
+	r := NewRelayRouter(":0", nil, registry, nil)
+	r.setAnthropic(&config.AnthropicRouterConfig{
+		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
+	})
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/messages", []byte(`{"model":"claude-mapped","stream":false,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if got, want := resp.Header.Get("X-Relay-Model-Target"), "ep/local-model"; got != want {
+		t.Errorf("X-Relay-Model-Target = %q, want %q (body=%s)", got, want, body)
+	}
+}
+
+// TestRouterSocket_ForwardsCleanRequest_StripsCredentialAndRelayHeaders is
+// the "check what you forward" test the plan's review-driven amendment
+// calls for, one hop further down than relay's own broker: relayLLM's own
+// dispatch must not forward a caller's Authorization/X-Api-Key/X-Relay-*
+// headers to the real backend regardless of who sent them (defense in
+// depth — relay's broker already strips these before a call ever reaches
+// router.sock, but relayLLM must not depend on that), and must not let an
+// upstream's own spoofed X-Relay-Model-Target survive into the response
+// relayLLM sends back.
+func TestRouterSocket_ForwardsCleanRequest_StripsCredentialAndRelayHeaders(t *testing.T) {
+	var seenAuth, seenAPIKey, seenModel string
+	var seenXRelay []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "local-model"}}})
+		case "/v1/chat/completions":
+			seenAuth = r.Header.Get("Authorization")
+			seenAPIKey = r.Header.Get("X-Api-Key")
+			for k := range r.Header {
+				if strings.HasPrefix(strings.ToLower(k), "x-relay-") {
+					seenXRelay = append(seenXRelay, k)
+				}
+			}
+			var body struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			seenModel = body.Model
+			w.Header().Set("Content-Type", "application/json")
+			// A malicious or merely-echoing upstream trying to smuggle its
+			// own X-Relay-Model-Target into the response — must never
+			// survive to the caller.
+			w.Header().Set("X-Relay-Model-Target", "spoofed")
+			_, _ = w.Write([]byte(`{"id":"resp","choices":[]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "fakeep", BaseURL: upstream.URL + "/v1", APIKey: "upstream-key"}}}
+	registry := regpkg.NewProxyRegistry(cfg)
+	r := NewRelayRouter(":0", nil, registry, nil)
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", bytes.NewReader([]byte(`{"model":"fakeep/local-model"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer client-side-leaked-token")
+	req.Header.Set("X-Api-Key", "client-side-leaked-key")
+	req.Header.Set("X-Relay-Session", "should-never-reach-upstream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, body)
+	}
+
+	if seenModel != "local-model" {
+		t.Errorf("upstream saw model %q, want %q", seenModel, "local-model")
+	}
+	if seenAuth != "Bearer upstream-key" {
+		t.Errorf("upstream saw Authorization %q, want the endpoint's OWN api key, not the caller's", seenAuth)
+	}
+	if seenAPIKey != "" {
+		t.Errorf("upstream saw X-Api-Key %q; the caller's header must never be forwarded", seenAPIKey)
+	}
+	if len(seenXRelay) != 0 {
+		t.Errorf("upstream saw x-relay-* headers %v; must never be forwarded", seenXRelay)
+	}
+
+	got := resp.Header.Values("X-Relay-Model-Target")
+	if len(got) != 1 || got[0] != "fakeep/local-model" {
+		t.Errorf("X-Relay-Model-Target values = %v, want exactly [%q] (the upstream's spoofed value must be stripped)", got, "fakeep/local-model")
 	}
 }

@@ -105,15 +105,14 @@ func (p *RelayRouter) handleAnthropicMessages(w http.ResponseWriter, r *http.Req
 	p.anthropicPassthroughBody(w, r, body)
 }
 
-// handleAnthropicMessagesSocket is router.sock's /v1/messages and
-// /v1/messages/count_tokens handler (C9): identical to handleAnthropicMessages
-// except that a model absent from router.anthropic.modelMap 404s instead of
-// falling through to anthropicPassthroughBody. The real Anthropic passthrough
-// forwards whatever credential the CALLER presents straight to
-// api.anthropic.com — on router.sock the caller is relay's model broker
-// acting on a project or service grant, never a holder of its own Anthropic
-// credential, so passthrough has nothing to forward and must never be
-// reached from here.
+// handleAnthropicMessagesSocket is router.sock's /v1/messages handler (C9):
+// identical to handleAnthropicMessages except that a model absent from
+// router.anthropic.modelMap 404s instead of falling through to
+// anthropicPassthroughBody. The real Anthropic passthrough forwards whatever
+// credential the CALLER presents straight to api.anthropic.com — on
+// router.sock the caller is relay's model broker acting on a project or
+// service grant, never a holder of its own Anthropic credential, so
+// passthrough has nothing to forward and must never be reached from here.
 func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *http.Request) {
 	if p.anthropic == nil {
 		writeAnthropicError(w, http.StatusNotFound, "not_found_error", "anthropic compatibility is not configured on this router")
@@ -131,6 +130,35 @@ func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *ht
 		return
 	}
 	p.handleAnthropicRedirect(w, r, body, model, target)
+}
+
+// handleAnthropicCountTokensSocket is router.sock's own
+// /v1/messages/count_tokens handler. This is deliberately NOT
+// handleAnthropicMessagesSocket reused for both routes (an earlier version
+// of this file did that): count_tokens must answer with an estimate,
+// never a real generation. Routing a modelMap hit through
+// handleAnthropicRedirect the way /v1/messages does would silently turn a
+// token-count probe into one full upstream /v1/chat/completions call,
+// billing and latency a caller asking "how many tokens is this" never
+// expects. A model outside the map 404s, matching handleAnthropicMessagesSocket
+// — the real Anthropic token counter is exactly as off-limits here as the
+// real Anthropic passthrough is.
+func (p *RelayRouter) handleAnthropicCountTokensSocket(w http.ResponseWriter, r *http.Request) {
+	if p.anthropic == nil {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", "anthropic compatibility is not configured on this router")
+		return
+	}
+	body, err := readAnthropicBody(w, r)
+	if err != nil {
+		return
+	}
+
+	model := anthropicRequestModel(body)
+	if target, ok := p.anthropic.modelMap[model]; !ok || target == "" {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock", model))
+		return
+	}
+	writeRouterJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateAnthropicInputTokens(body)})
 }
 
 // handleAnthropicCountTokens answers /v1/messages/count_tokens. For a
