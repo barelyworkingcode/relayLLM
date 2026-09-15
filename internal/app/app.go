@@ -295,17 +295,20 @@ func Main() {
 	// router.sock (C9): relay's private, tokenless path into the relay-router,
 	// opened only when relay actually launched this process — RelayIdentity()
 	// is what admits a caller, and standalone has no such identity to admit
-	// against. Gated on relayRouter != nil the same way the TCP listener
-	// above already is: a router with no managed servers, no OpenAI
-	// endpoints and no passthrough/anthropic config has nothing to broker,
-	// and relay's own model.sock already has a defined degrade path for "no
-	// host registered at all" (503) — there is no separate "host registered
-	// but empty" state worth adding here.
-	resolvedRouterSocketPath := *routerSocketPath
-	if resolvedRouterSocketPath == "" {
-		resolvedRouterSocketPath = filepath.Join(*dataDir, "router.sock")
-	}
-	if relay.Launched() && relayRouter != nil {
+	// against. ensureModelHostRouter builds a TCP-unbound router when
+	// StartRelayRouter above returned nil (no --router-port, or no
+	// backends/passthrough configured): a relay-launched relayLLM must
+	// register as relay's model host regardless of whether it also serves
+	// TCP, or relay's own model.sock 503s "no host" forever for a
+	// deployment that never set --router-port. See model_host.go.
+	relayRouter = ensureModelHostRouter(relayRouter, managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	var resolvedRouterSocketPath string
+	if relay.Launched() {
+		resolvedRouterSocketPath, err = resolveRouterSocketPath(*routerSocketPath, *dataDir)
+		if err != nil {
+			slog.Error("failed to resolve router socket path", "error", err)
+			os.Exit(1)
+		}
 		if err := relayRouter.ListenSocket(resolvedRouterSocketPath, relay.RelayIdentity); err != nil {
 			slog.Error("failed to listen on router socket", "path", resolvedRouterSocketPath, "error", err)
 			os.Exit(1)
@@ -390,25 +393,18 @@ func Main() {
 
 	// Tell relay (if present) where to dispatch front-door traffic, then
 	// (C9) where to reach the relay-router's socket. Standalone runs are a
-	// clean no-op. Run in a goroutine so a slow relay-bridge round-trip
-	// doesn't delay the listener accepting traffic — but RegisterModelHost's
-	// refusal must still exit the whole process (RegisterModelHostOrExit
-	// calls os.Exit(78) from inside this goroutine, which is as fatal to the
-	// process as calling it from Main would be): unlike a manifest-dispatch
-	// miss, which just means eve can't reach this service through relay yet,
-	// a refused model host means relayLLM believes router.sock is relay's
-	// upstream when relay actually disagrees — every model call routed
-	// through relay would silently 503 forever.
-	go func() {
-		// relayRouter != nil is sufficient here, not relay.Launched() again:
-		// Launched() is set once, before either this goroutine or the
-		// router.sock ListenSocket call above can run, and MaybeRegisterManifest
-		// only returns true when it was already true — so a non-nil
-		// relayRouter at this point already has router.sock listening.
-		if relay.MaybeRegisterManifest(*dataDir, *socketPath, *internalToken) && relayRouter != nil {
-			relay.RegisterModelHostOrExit(resolvedRouterSocketPath, os.Exit)
-		}
-	}()
+	// clean no-op (both calls check relay.Launched() themselves). Run in a
+	// goroutine so a slow relay-bridge round-trip doesn't delay the listener
+	// accepting traffic — but RegisterModelHost's refusal must still exit the
+	// whole process (RegisterModelHostOrExit calls os.Exit(78) from inside
+	// this goroutine, which is as fatal to the process as calling it from
+	// Main would be): unlike a manifest-dispatch miss, which just means eve
+	// can't reach this service through relay yet, a refused model host means
+	// relayLLM believes router.sock is relay's upstream when relay actually
+	// disagrees — every model call routed through relay would silently 503
+	// forever. See model_host.go's registerWithRelay for why this does NOT
+	// skip RegisterModelHost just because RegisterManifest failed.
+	go registerWithRelay(*dataDir, *socketPath, *internalToken, resolvedRouterSocketPath, os.Exit)
 
 	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
 	go func() {
