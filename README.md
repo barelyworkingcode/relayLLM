@@ -54,6 +54,7 @@ credential is ever held in the environment.
 | `--mlx-serve-path` | `MLX_SERVE_PATH` | `mlx-serve` (PATH) | mlx-serve binary |
 | `--router-port` | `RELAY_ROUTER_PORT` | *(disabled)* | Port for the unified OpenAI-compatible router |
 | `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. `127.0.0.1,192.168.64.1`); include `0.0.0.0` to accept connections from other hosts |
+| `--router-socket` | `RELAY_ROUTER_SOCKET` | `{data-dir}/router.sock` | Relay's private, tokenless path into the relay-router. Only opened when launched by relay; ignored standalone |
 
 Provider configuration lives in `{data-dir}/settings.json`. See
 [Providers](#providers) and the inline schema in `internal/config/config.go`.
@@ -82,6 +83,23 @@ first use, poll `/health` until ready, and are shared across sessions.
 every managed-server alias and every reachable OpenAI endpoint, so any OpenAI
 client can reach all local models through one URL. Details in
 [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
+
+**router.sock** (launched mode only): when relay launches relayLLM, this same
+router is also served on a Unix socket (`--router-socket`, default
+`{data-dir}/router.sock`) that admits exactly one peer — relay itself,
+identified by the kernel audit token relayLLM captured off its own launch
+`Hello` handshake, not a bearer. relayLLM registers this socket with relay
+(`RegisterModelHost`) once its manifest registration succeeds; relay refusing
+that registration (the service record lacks the `model_host` capability) is
+fatal — relayLLM exits 78 rather than run believing it is relay's model
+broker upstream when relay disagrees. The socket serves the same dispatch as
+`--router-port` minus the two route families that would forward a caller's
+own upstream credential off this box: the `/api/` Claude Code OAuth
+passthrough and any configured `router.passthrough` `/<name>/` route both
+404 here, and `/v1/messages` only serves `router.anthropic.modelMap` targets
+(anything else 404s rather than reaching the real Anthropic API). See
+`internal/router/router_socket.go` and
+[`../relay/docs/model-endpoint.md`](../relay/docs/model-endpoint.md).
 
 Configure `virtual-llms` in `settings.json` to expose a stable model name backed
 by an ordered list of fallback targets. An endpoint target reuses a name from

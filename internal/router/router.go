@@ -90,6 +90,18 @@ type RelayRouter struct {
 	// mux is kept so setPassthrough can mount its configured /<name>/ routes
 	// after construction, before Serve.
 	mux *http.ServeMux
+
+	// passthroughNames is every router.passthrough entry setPassthrough
+	// actually mounted on mux (valid name, not reserved) — SocketHandler
+	// reads this to refuse the same paths outright on router.sock rather
+	// than letting them fall through to handleProxy's model dispatch (C9).
+	passthroughNames []string
+
+	// socketSrv/socketLn are router.sock's listener and server, present only
+	// in launched mode (ListenSocket). Close tears both down alongside the
+	// TCP listener(s).
+	socketSrv *http.Server
+	socketLn  net.Listener
 }
 
 // setReasoningEffortMap installs the router-level reasoning_effort rewrite
@@ -248,6 +260,9 @@ func (p *RelayRouter) Serve() {
 }
 
 func (p *RelayRouter) Close() error {
+	if p.socketSrv != nil {
+		_ = p.socketSrv.Close()
+	}
 	return p.server.Close()
 }
 
@@ -514,6 +529,12 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// has not chosen an instance yet, and the dashboard's target should mean
 	// "is being served by", not "wants".
 	conn.setTarget("managed", mgr.Profile().Kind+":"+alias)
+	// C9: relay's model broker reads this off every proxied response to
+	// record which backend actually served the call, then strips it before
+	// the response reaches its own caller — set before ServeHTTP, since
+	// httputil.ReverseProxy ADDS the upstream's headers onto whatever is
+	// already in w.Header() rather than clearing it first.
+	setModelTargetHeader(w, alias)
 
 	// No model swap needed here — the client already sent the bare alias the
 	// managed server expects — but the reasoning_effort rewrite still applies
@@ -545,6 +566,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 // et al. see their own name, not "omlx/X") and forwards to the endpoint.
 func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep config.OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
 	conn.setTarget("endpoint", ep.Name+"/"+upstreamID)
+	setModelTargetHeader(w, ep.Name+"/"+upstreamID)
 	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
@@ -560,6 +582,41 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep con
 	proxy := newUpstreamProxy(target, rewritten, ep.APIKey, "openai", ep.Name, nil)
 	proxy.Transport = ep.Transport()
 	proxy.ServeHTTP(w, r)
+}
+
+// modelTargetSetter lets a wrapping http.ResponseWriter redirect
+// X-Relay-Model-Target onto whatever writer the caller ultimately reads
+// from. translatingResponseWriter (relay_router_anthropic.go's Anthropic
+// redirect path) implements this: setModelTargetHeader's usual
+// w.Header().Set would otherwise land on that writer's own buffered header
+// map, which is never copied onto the real response (see its Header method's
+// doc comment) — the header would silently vanish for exactly the requests
+// C9's /v1/messages modelMap dispatch produces.
+type modelTargetSetter interface {
+	SetModelTarget(value string)
+}
+
+// setModelTargetHeader sets X-Relay-Model-Target, walking down a chain of
+// Unwrap() http.ResponseWriter wrappers (the same interface
+// http.ResponseController uses, already implemented by meteredResponseWriter
+// and virtualResponseRecorder) until it finds a modelTargetSetter or runs
+// out of wrappers. Called BEFORE the proxy that will use value is invoked —
+// every call site knows its target synchronously, before any response byte
+// exists — so this is always safe even for a streaming response, where
+// headers are flushed on the first upstream byte.
+func setModelTargetHeader(w http.ResponseWriter, value string) {
+	for {
+		if s, ok := w.(modelTargetSetter); ok {
+			s.SetModelTarget(value)
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = u.Unwrap()
+	}
+	w.Header().Set("X-Relay-Model-Target", value)
 }
 
 // newUpstreamProxy builds the reverse proxy shared by every branch. The
