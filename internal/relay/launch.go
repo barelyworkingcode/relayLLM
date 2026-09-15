@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"relayllm/internal/peertoken"
 )
 
 // Launch identity: relay hands this process a one-time secret on an inherited
@@ -44,6 +46,39 @@ func Launched() bool { return launched.Load() }
 // ResetLaunchForTesting clears the launched state. It can only ever turn
 // bridge features off; turning them on requires a successful Hello.
 func ResetLaunchForTesting() { launched.Store(false) }
+
+// relayIdentityStore and haveRelayIdentity hold the (pid, pidversion) pair
+// Hello captured off relay's own connection (see Hello below) — the one peer
+// router.sock admits (C9). Two atomics rather than one atomic.Value holding
+// a nil-able pointer: BootstrapLaunch runs before any other goroutine
+// starts, but router.sock's admission check (a later connection, from
+// relay's http.Server goroutines) reads this concurrently, and a bool that
+// is only ever set true (never back to false in production — only
+// ResetRelayIdentityForTesting does that) is simpler to reason about here
+// than a typed nil.
+var (
+	relayIdentityStore atomic.Value // holds peertoken.Process
+	haveRelayIdentity  atomic.Bool
+)
+
+func storeRelayIdentity(p peertoken.Process) {
+	relayIdentityStore.Store(p)
+	haveRelayIdentity.Store(true)
+}
+
+// RelayIdentity returns the identity Hello bound relay to, or (zero, false)
+// before any successful Hello — which matches no real peer, so a caller that
+// races BootstrapLaunch fails closed rather than admitting everyone.
+func RelayIdentity() (peertoken.Process, bool) {
+	if !haveRelayIdentity.Load() {
+		return peertoken.Process{}, false
+	}
+	return relayIdentityStore.Load().(peertoken.Process), true
+}
+
+// ResetRelayIdentityForTesting clears the captured identity. Test-only,
+// mirroring ResetLaunchForTesting.
+func ResetRelayIdentityForTesting() { haveRelayIdentity.Store(false) }
 
 // HelloResult is the data of relay's OK response to Hello.
 type HelloResult struct {
@@ -128,8 +163,20 @@ func ReadLaunchSecret(f *os.File) (string, error) {
 
 // Hello presents the launch secret to relay's bridge on one connection and
 // returns relay's acknowledgement. The response must name the same service.
+//
+// It also captures relay's own identity off that same connection (spike SP1,
+// plan-broker-and-sessions.md §2 C9): on the connecting end of a Unix stream
+// socket, LOCAL_PEERTOKEN names the ACCEPTING process — symmetric with the
+// well-known accepting-side use for LOCAL_PEERCRED, and not obvious without
+// the spike. Requiring that token's pid to agree with the OK reply's
+// relay_pid, rather than trusting either alone, is what makes router.sock's
+// later admission check (C9) mean something: a process that could forge the
+// JSON reply still cannot forge the kernel's account of who actually
+// answered the connection. Any failure here — the token unreadable at all,
+// or a pid mismatch — fails Hello closed exactly like every other launch
+// failure (BootstrapLaunch's caller, app.go, treats a Hello error as fatal).
 func Hello(socketPath, serviceID, secret string) (HelloResult, error) {
-	resp, err := roundTrip(socketPath, BridgeRequest{Type: ReqHello, Name: serviceID, Token: secret})
+	resp, peerTok, err := helloRoundTrip(socketPath, BridgeRequest{Type: ReqHello, Name: serviceID, Token: secret})
 	if err != nil {
 		// Deliberate: relay promises never to echo the secret, but the error
 		// ends up in logs, so do not rely on that.
@@ -148,5 +195,9 @@ func Hello(socketPath, serviceID, secret string) (HelloResult, error) {
 	if res.RelayPID <= 0 {
 		return HelloResult{}, fmt.Errorf("relay hello: invalid relay_pid %d", res.RelayPID)
 	}
+	if !peerTok.Valid() || peerTok.PID() != int32(res.RelayPID) {
+		return HelloResult{}, fmt.Errorf("relay hello: peer audit token pid %d does not match relay_pid %d", peerTok.PID(), res.RelayPID)
+	}
+	storeRelayIdentity(peerTok.Process())
 	return res, nil
 }

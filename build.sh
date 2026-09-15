@@ -36,7 +36,17 @@ codesign --verify --strict --verbose=2 cmd/hook/hook
   --url "http://localhost:8181/status" \
   --autostart \
   --capability manifest \
-  --capability projects
+  --capability projects \
+  --capability model_host
+  # model_host (C9, plan-broker-and-sessions.md §2) is what lets relay accept
+  # this service's RegisterModelHost call for router.sock; a service record
+  # missing it makes relay refuse the registration and relayLLM exit 78. This
+  # line is a deployment step, not automatic: re-running build.sh re-registers
+  # with the added capability only after the corresponding relay unit
+  # (R-M1b) that recognizes model_host is installed. Until then, an existing
+  # "Relay LLM" registration lacking model_host must be updated the same way
+  # any other capability change is (unregister, then re-register — see
+  # build.sh's own instruction print below for services already registered).
   # --router-bind stays loopback-only (the flag's default): this devbox's
   # settings.json configures router.anthropic (real Anthropic API credential
   # passthrough), which refuses to start on a non-loopback --router-bind

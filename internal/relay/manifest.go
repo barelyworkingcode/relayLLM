@@ -283,14 +283,17 @@ func settingsSchema() []FieldDecl {
 
 // MaybeRegisterManifest tells relay where to dispatch front-door traffic
 // for this service. A process relay did not launch is a clean no-op — direct
-// clients still reach the listener.
+// clients still reach the listener. Returns whether registration actually
+// succeeded (false for standalone mode too), so a caller with its own,
+// stricter follow-up request — RegisterModelHost (C9) fails closed where
+// this one fails open — knows whether it is worth sending at all.
 //
 // Failure is logged and swallowed: the listener is already up, so missing
 // the relay-dispatch path is a partial degradation, not a hard error.
-func MaybeRegisterManifest(dataDir, internalSocket, internalToken string) {
+func MaybeRegisterManifest(dataDir, internalSocket, internalToken string) bool {
 	if !Launched() {
 		slog.Info("standalone mode — skipping manifest registration")
-		return
+		return false
 	}
 	serviceID := os.Getenv(EnvServiceID)
 
@@ -303,14 +306,15 @@ func MaybeRegisterManifest(dataDir, internalSocket, internalToken string) {
 	})
 	if err != nil {
 		slog.Error("marshal manifest registration failed", "error", err)
-		return
+		return false
 	}
 	if _, err := SendBridgeRequest(ReqRegisterManifest, args); err != nil {
 		slog.Error("manifest registration failed; running without relay dispatch", "error", err)
-		return
+		return false
 	}
 	slog.Info("manifest registered with relay",
 		"serviceId", serviceID,
 		"internalSocket", internalSocket,
 		"routes", len(manifest.Routes))
+	return true
 }

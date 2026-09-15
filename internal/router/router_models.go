@@ -182,10 +182,18 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 			seen[key] = true
 			data = append(data, map[string]any{
-				"id":           key,
-				"object":       "model",
-				"created":      0,
-				"owned_by":     "anthropic-map",
+				"id":       key,
+				"object":   "model",
+				"created":  0,
+				"owned_by": "anthropic-map",
+				// target names the router-dispatchable id this key redirects
+				// to (a managed alias, virtual name, or "endpoint/model") —
+				// relay's model broker surfaces it the same way it does for a
+				// proxied response's X-Relay-Model-Target (C9,
+				// ../relay/docs/model-endpoint.md), and a caller deciding
+				// whether a mapped key is worth calling needs to know what it
+				// actually resolves to.
+				"target":       p.anthropic.modelMap[key],
 				"status":       map[string]any{"value": servermanager.ModelStatusLoaded},
 				"architecture": map[string]any{"input_modalities": []string{"text"}},
 			})

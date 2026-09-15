@@ -105,6 +105,34 @@ func (p *RelayRouter) handleAnthropicMessages(w http.ResponseWriter, r *http.Req
 	p.anthropicPassthroughBody(w, r, body)
 }
 
+// handleAnthropicMessagesSocket is router.sock's /v1/messages and
+// /v1/messages/count_tokens handler (C9): identical to handleAnthropicMessages
+// except that a model absent from router.anthropic.modelMap 404s instead of
+// falling through to anthropicPassthroughBody. The real Anthropic passthrough
+// forwards whatever credential the CALLER presents straight to
+// api.anthropic.com — on router.sock the caller is relay's model broker
+// acting on a project or service grant, never a holder of its own Anthropic
+// credential, so passthrough has nothing to forward and must never be
+// reached from here.
+func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *http.Request) {
+	if p.anthropic == nil {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", "anthropic compatibility is not configured on this router")
+		return
+	}
+	body, err := readAnthropicBody(w, r)
+	if err != nil {
+		return
+	}
+
+	model := anthropicRequestModel(body)
+	target, ok := p.anthropic.modelMap[model]
+	if !ok || target == "" {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock", model))
+		return
+	}
+	p.handleAnthropicRedirect(w, r, body, model, target)
+}
+
 // handleAnthropicCountTokens answers /v1/messages/count_tokens. For a
 // redirected model there is no real backend token counter to ask (OpenAI
 // compat servers don't standardize one), so this returns the same crude
@@ -355,6 +383,21 @@ func (tw *translatingResponseWriter) Header() http.Header {
 		tw.hdr = make(http.Header)
 	}
 	return tw.hdr
+}
+
+// SetModelTarget implements router.go's modelTargetSetter. tw.Header()
+// (above) returns tw's own buffered map, which finish() never copies onto
+// tw.real — beginReal only ever sets Content-Type/Cache-Control/Connection
+// there for a streaming response, and the non-streaming path sets only
+// Content-Type. X-Relay-Model-Target has to reach the real ResponseWriter
+// some other way, and it can: every call site in router.go/router_virtual.go
+// calls this before invoking the proxy that will use value, which is
+// strictly before p.handleProxy(tw, innerReq) ever produces a byte for tw to
+// translate — so setting tw.real.Header() directly here, immediately, is
+// always ahead of tw.beginReal's first WriteHeader on tw.real, streaming or
+// not.
+func (tw *translatingResponseWriter) SetModelTarget(value string) {
+	tw.real.Header().Set("X-Relay-Model-Target", value)
 }
 
 func (tw *translatingResponseWriter) WriteHeader(status int) {

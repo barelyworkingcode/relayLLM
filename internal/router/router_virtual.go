@@ -64,6 +64,21 @@ func (t ResolvedVirtualTarget) Identity() string {
 	return "endpoint:" + escapeIdentityPart(t.endpoint.Name) + "/" + escapeIdentityPart(t.upstreamID)
 }
 
+// TargetHeaderValue is what X-Relay-Model-Target reports when this
+// candidate serves a request: a bare managed alias, or "endpoint/upstreamID"
+// for an endpoint target — the same shapes routeManaged and routeOpenAI use
+// for a direct (non-virtual) dispatch. Deliberately not Identity()'s
+// escaped, "alias:"/"endpoint:"-prefixed form: that string is this router's
+// own affinity-pin matching key and never meant to leave the process, while
+// this one is relay's audit record of which backend actually served the
+// call (C9, ../relay/docs/model-endpoint.md).
+func (t ResolvedVirtualTarget) TargetHeaderValue() string {
+	if t.manager != nil {
+		return t.alias
+	}
+	return t.endpoint.Name + "/" + t.upstreamID
+}
+
 // EndpointTargetIdentity computes the Identity() string for an endpoint
 // target without needing to construct a ResolvedVirtualTarget (whose fields
 // are unexported) — a test-only seam for callers outside this package that
@@ -290,6 +305,11 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 		}
 		conn.noteAttempt()
 		conn.setTarget("virtual", name+" → "+target.Label())
+		// Set before the attempt, like routeManaged/routeOpenAI: a failed
+		// attempt never writes (wrote == false, see below), so a later
+		// candidate's Set simply overwrites this one's — only the candidate
+		// that actually flushes a response leaves its value on the wire.
+		setModelTargetHeader(w, target.TargetHeaderValue())
 		wrote, status, err := p.attemptVirtual(w, r, target, body)
 		if err == nil {
 			// Pin only a response the backend actually stands behind. A 5xx
