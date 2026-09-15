@@ -283,6 +283,12 @@ func Main() {
 	// why a separate post-construction call would race the router's first
 	// accepted connection.
 	relayRouter := router.BuildRelayRouter(managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
+	// C10: standalone router keys. Factored into a plain function (see its
+	// own doc comment) so a *testing.T can drive the exact same decision
+	// Main makes, rather than a test re-implementing the condition
+	// alongside it — a re-implemented condition would still pass if the
+	// real guard here were ever deleted.
+	maybeEnableStandaloneRouterKeys(relayRouter, *dataDir)
 	// MaybeServeTCP binds every configured address best-effort (see
 	// listenAll) — one that can't be bound in this deployment is logged and
 	// skipped, not fatal, since --router-bind may legitimately name an
