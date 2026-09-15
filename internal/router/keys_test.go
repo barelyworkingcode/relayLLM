@@ -437,17 +437,56 @@ func TestRouterKeyStore_ReloadsWithinPollWindow(t *testing.T) {
 // never a short-circuiting ==/bytes.Equal on secret-derived material, so a
 // future edit that "simplifies" Authenticate back to bytes.Equal fails the
 // build's own test suite rather than only a security review.
+//
+// Scoped to the Authenticate function body specifically, not the whole
+// file: a security review of the first version of this test caught that
+// searching the whole file for the string "subtle.ConstantTimeCompare"
+// passes even if the real comparison is swapped to bytes.Equal, because
+// this very doc comment also contains that string.
 func TestRouterKeyStore_AuthenticateUsesConstantTimeCompare(t *testing.T) {
 	src, err := os.ReadFile("keys.go")
 	if err != nil {
 		t.Fatalf("read keys.go: %v", err)
 	}
-	if !strings.Contains(string(src), "subtle.ConstantTimeCompare") {
+	body := extractFuncBody(t, string(src), "func (s *RouterKeyStore) Authenticate(")
+	if !strings.Contains(body, "subtle.ConstantTimeCompare") {
 		t.Fatal("Authenticate must compare hashes via crypto/subtle.ConstantTimeCompare")
 	}
-	if strings.Contains(string(src), "bytes.Equal(sum") || strings.Contains(string(src), "bytes.Equal(e.hash") {
-		t.Fatal("found a bytes.Equal comparison against hash material; must use crypto/subtle.ConstantTimeCompare instead")
+	if strings.Contains(body, "bytes.Equal(") {
+		t.Fatal("found a bytes.Equal comparison inside Authenticate; must use crypto/subtle.ConstantTimeCompare exclusively for hash material")
 	}
+}
+
+// extractFuncBody returns the source text from sig (a function signature
+// prefix, e.g. "func Foo(") up to the top-level closing brace that matches
+// its opening one — a minimal brace-depth scan, not a full Go parser, but
+// enough to isolate one function's body from the rest of the file for a
+// source-scan test like the one above.
+func extractFuncBody(t *testing.T, src, sig string) string {
+	t.Helper()
+	start := strings.Index(src, sig)
+	if start == -1 {
+		t.Fatalf("function signature %q not found in source", sig)
+	}
+	openBrace := strings.Index(src[start:], "{")
+	if openBrace == -1 {
+		t.Fatalf("no opening brace found after %q", sig)
+	}
+	openBrace += start
+	depth := 0
+	for i := openBrace; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[openBrace : i+1]
+			}
+		}
+	}
+	t.Fatalf("unterminated function body starting at %q", sig)
+	return ""
 }
 
 func TestRouterKeyStore_KeyFromEnvVarIsIgnored(t *testing.T) {

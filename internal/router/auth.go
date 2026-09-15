@@ -35,17 +35,27 @@ func (p *RelayRouter) EnableStandaloneRouterKeys(routerKeysPath string) {
 }
 
 // routerKeyAuthMiddleware is C10's gate in front of next: every route,
-// including /health, requires a valid router key. Passthrough routes
-// (router.passthrough, router_passthrough.go — forwards Authorization/
-// x-api-key byte-for-byte to a real third-party upstream on purpose) must
-// not have those same headers repurposed as the local router-key credential,
-// since that would send relayLLM's own local secret to that upstream; they
-// authenticate with their own header, X-Relay-Router-Key, instead.
+// including /health, requires a valid router key. Passthrough-shaped routes
+// — router.passthrough's /<name>/ mounts (router_passthrough.go), and the
+// three Anthropic routes that can forward a caller's own Authorization
+// byte-for-byte to api.anthropic.com when the request isn't a modelMap hit
+// (/api/, POST /v1/messages, POST /v1/messages/count_tokens —
+// router_anthropic.go's newAnthropicPassthroughProxy) — must not have those
+// same headers repurposed as the local router-key credential, since that
+// would send relayLLM's own local secret to that upstream. A security
+// review caught exactly this: /v1/messages can't be told apart from a
+// modelMap-routed call (safe; dispatches through newUpstreamProxy, which
+// already strips Authorization/X-Api-Key/X-Relay-*) until the handler reads
+// the request body, so it and the other two get the X-Relay-Router-Key
+// carve-out unconditionally rather than only when router.anthropic happens
+// to be configured — the routes 404 without it either way, and requiring
+// the same header on both outcomes keeps this middleware's decision
+// independent of the handler's own routing logic.
 func routerKeyAuthMiddleware(store *RouterKeyStore, passthroughNames []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var presented string
-			if isPassthroughPath(r.URL.Path, passthroughNames) {
+			if requiresRouterKeyHeader(r.URL.Path, passthroughNames) {
 				presented = r.Header.Get("X-Relay-Router-Key")
 			} else {
 				presented = routerKeyCredentialFromHeaders(r.Header)
@@ -59,10 +69,26 @@ func routerKeyAuthMiddleware(store *RouterKeyStore, passthroughNames []string) f
 	}
 }
 
-// isPassthroughPath reports whether path is served by one of the /<name>/
-// routes setPassthrough actually mounted — the same set SocketHandler reads
-// to refuse passthrough paths outright on router.sock (C9).
-func isPassthroughPath(path string, passthroughNames []string) bool {
+// anthropicPassthroughPaths are the exact route patterns router.go registers
+// for router_anthropic.go's handlers — mirrored here rather than imported
+// from a shared slice because they're mux patterns (some exact, one prefix),
+// not names, and this is the only other place that needs to enumerate them.
+var anthropicPassthroughPaths = []string{"/v1/messages", "/v1/messages/count_tokens"}
+
+// requiresRouterKeyHeader reports whether path must present the local
+// router key via X-Relay-Router-Key rather than Authorization/X-Api-Key —
+// every route that can forward those headers to a real third-party upstream
+// (see routerKeyAuthMiddleware's doc comment for why /v1/messages* is in
+// this set unconditionally).
+func requiresRouterKeyHeader(path string, passthroughNames []string) bool {
+	if strings.HasPrefix(path, "/api/") {
+		return true
+	}
+	for _, p := range anthropicPassthroughPaths {
+		if path == p {
+			return true
+		}
+	}
 	for _, name := range passthroughNames {
 		if strings.HasPrefix(path, "/"+name+"/") {
 			return true

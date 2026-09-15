@@ -283,16 +283,12 @@ func Main() {
 	// why a separate post-construction call would race the router's first
 	// accepted connection.
 	relayRouter := router.BuildRelayRouter(managers, proxyRegistry, cfg.Virtual, cfg.Router, *routerTLSCert, *routerTLSKey)
-	// C10: standalone router keys. A launched relayLLM's only auth story is
-	// router.sock's kernel-peer-token admission (C9), wired below on a
-	// completely separate *http.Server — EnableStandaloneRouterKeys must
-	// never run when relay launched this process. There is deliberately no
-	// flag or environment variable for the key itself: {dataDir}/router_keys.json,
-	// managed by `relayllm router-key add/list/revoke`, is the only source
-	// of truth.
-	if !relay.Launched() {
-		relayRouter.EnableStandaloneRouterKeys(router.RouterKeysPath(*dataDir))
-	}
+	// C10: standalone router keys. Factored into a plain function (see its
+	// own doc comment) so a *testing.T can drive the exact same decision
+	// Main makes, rather than a test re-implementing the condition
+	// alongside it — a re-implemented condition would still pass if the
+	// real guard here were ever deleted.
+	maybeEnableStandaloneRouterKeys(relayRouter, *dataDir)
 	// MaybeServeTCP binds every configured address best-effort (see
 	// listenAll) — one that can't be bound in this deployment is logged and
 	// skipped, not fatal, since --router-bind may legitimately name an

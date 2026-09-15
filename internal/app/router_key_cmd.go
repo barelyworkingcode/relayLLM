@@ -11,8 +11,24 @@ import (
 	"os"
 	"path/filepath"
 
+	"relayllm/internal/relay"
 	"relayllm/internal/router"
 )
+
+// maybeEnableStandaloneRouterKeys wires C10's request-time gate onto
+// relayRouter, but only for a process relay did not launch — a launched
+// relayLLM's sole auth story is router.sock's kernel-peer-token admission
+// (C9), wired on a completely separate *http.Server this must never touch.
+// Factored out of app.Main into a plain function, mirroring model_host.go's
+// own rationale for doing the same to its wiring decisions, so a *testing.T
+// can call this directly and prove the real guard is exercised rather than
+// asserting against a second copy of the condition.
+func maybeEnableStandaloneRouterKeys(relayRouter *router.RelayRouter, dataDir string) {
+	if relay.Launched() {
+		return
+	}
+	relayRouter.EnableStandaloneRouterKeys(router.RouterKeysPath(dataDir))
+}
 
 // RouterKeyMain implements the router-key subcommand. args is os.Args with
 // the program name and the "router-key" argument already stripped off.
