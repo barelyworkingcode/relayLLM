@@ -1,19 +1,21 @@
 # relayLLM
 
-The LLM execution engine of the [relay](https://github.com/barelyworkingcode/relay)
-ecosystem. A Go service that runs LLM sessions across multiple providers, streams
-results, manages PTY-backed terminals, and exposes an HTTP + WebSocket API over a
-Unix socket. It runs standalone or as a relay-enhanced service.
+The model-hosting engine of the [relay](https://github.com/barelyworkingcode/relay)
+ecosystem. A Go service that launches and manages local model servers
+(llama.cpp, MLX) and fronts them — plus configured OpenAI-compatible
+endpoints and virtual models — behind one OpenAI-compatible router. It
+exposes a small HTTP status/diagnostics API over a Unix socket. It runs
+standalone or as a relay-enhanced service.
 
-relayLLM is **project-unaware**: projects live in relay, scheduled tasks live in
-relayScheduler. relayLLM serves sessions, models, permissions, terminals, and
-status — nothing else.
+relayLLM is **project- and session-unaware**: sessions, terminals, and
+permission hooks live in relay-sessions; projects live in relay; scheduled
+tasks live in relayScheduler. relayLLM hosts models and status — nothing
+else.
 
 ## Build
 
 ```bash
 go build -o relayllm ./cmd/relayllm
-go build -o cmd/hook/hook ./cmd/hook    # PreToolUse permission hook
 ```
 
 ## Run
@@ -25,9 +27,9 @@ go build -o cmd/hook/hook ./cmd/hook    # PreToolUse permission hook
 ```
 
 relayLLM listens on a **Unix domain socket** (`{data-dir}/relayllm.sock` by
-default; override with `--socket`) — there is no TCP API port. In standalone mode
-it auto-generates a bearer token if `--token` is unset (printed nowhere; set the
-env var to pin it).
+default; override with `--socket`) — there is no TCP API port for the
+authenticated surface. In standalone mode it auto-generates a bearer token
+if `--token` is unset (printed nowhere; set the env var to pin it).
 
 ### Via relay
 
@@ -35,46 +37,44 @@ env var to pin it).
 ./build.sh
 ```
 
-Builds both binaries and registers the service with relay. When relay spawns it,
-relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` + `RELAY_LAUNCH_FD`,
-reads a one-time launch secret from that fd, authenticates with a `Hello`, and
-registers a manifest (see [Service manifest](#service-manifest)). No relay
-credential is ever held in the environment.
+Builds the binary and registers the service with relay. When relay spawns
+it, relayLLM sees `RELAY_BRIDGE_SOCKET` + `RELAY_SERVICE_ID` +
+`RELAY_LAUNCH_FD`, reads a one-time launch secret from that fd, authenticates
+with a `Hello`, and registers a manifest (see
+[Service manifest](#service-manifest)). No relay credential is ever held in
+the environment.
 
 ## Configuration
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `--data-dir` | `RELAY_LLM_DATA` | `~/Library/Application Support/relayLLM` (macOS) | Data directory |
-| `--socket` | `RELAY_LLM_SOCKET` | `{data-dir}/relayllm.sock` | Unix socket the API listens on |
+| `--socket` | `RELAY_LLM_SOCKET` | `{data-dir}/relayllm.sock` | Unix socket the status API listens on |
 | `--token` | `RELAY_LLM_TOKEN` | *(auto 64-char hex)* | Bearer token for API auth |
-| `--ollama-url` | `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
 | `--openai-config` | `OPENAI_CONFIG` | *(settings.json)* | Override OpenAI endpoints config |
 | `--llama-server-path` | `LLAMA_SERVER_PATH` | `llama-server` (PATH) | llama-server binary |
 | `--mlx-serve-path` | `MLX_SERVE_PATH` | `mlx-serve` (PATH) | mlx-serve binary |
 | `--router-port` | `RELAY_ROUTER_PORT` | *(disabled)* | Port for the unified OpenAI-compatible router |
 | `--router-bind` | `RELAY_ROUTER_BIND` | `127.0.0.1` | Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. `127.0.0.1,192.168.64.1`); include `0.0.0.0` to accept connections from other hosts |
+| `--router-tls-cert` / `--router-tls-key` | `RELAY_LLM_ROUTER_TLS_CERT` / `RELAY_LLM_ROUTER_TLS_KEY` | *(plain http)* | TLS pair for the relay-router TCP listener |
 | `--router-socket` | `RELAY_ROUTER_SOCKET` | `{data-dir}/router.sock` | Relay's private, tokenless path into the relay-router. Only opened when launched by relay; ignored standalone |
+| `--http-port` | `RELAY_LLM_HTTP_PORT` | *(disabled)* | Port for an additional, unauthenticated TCP listener serving only the read-only `/status` diagnostics dashboard |
+| `--http-bind` | `RELAY_LLM_HTTP_BIND` | `127.0.0.1` | Comma-separated bind addresses for the `--http-port` listener |
+| `--http-tls-cert` / `--http-tls-key` | `RELAY_LLM_HTTP_TLS_CERT` / `RELAY_LLM_HTTP_TLS_KEY` | *(plain http)* | TLS pair for the `--http-port` listener |
 
 Provider configuration lives in `{data-dir}/settings.json`. See
-[Providers](#providers) and the inline schema in `internal/config/config.go`.
+[Managed servers and endpoints](#managed-servers-and-endpoints) and the
+inline schema in `internal/config/config.go`.
 
-## Providers
+## Managed servers and endpoints
 
-relayLLM normalizes every provider into one canonical event stream (see
-[`docs/event-protocol.md`](docs/event-protocol.md)), so the frontend renders all
-of them identically.
-
-- **Claude** — the `claude` CLI as a persistent `stream-json` process; resumes via `--resume`. Honors a PreToolUse permission hook (below).
-- **pi** — the `pi` coding agent (`--mode rpc`); model ids are `pi/<provider>/<model>`. Its RPC stream is translated into the canonical Claude envelope. No permission hook (pi auto-executes tools).
-- **Ollama** — HTTP/NDJSON. Base URL via `--ollama-url`.
-- **OpenAI-compatible** — HTTP/SSE for LM Studio, Ollama `/v1`, oMLX, etc. Configured under `settings.json` `openai`; model ids are `{endpoint}/{model}`.
 - **llama.cpp** — managed `llama-server` processes (`settings.json` `llama-server`); model ids `llama/{alias}`. Launched on demand, reused across sessions.
 - **MLX** — managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes (`settings.json` `mlx-serve`, same schema as llama-server); model ids `mlx/{alias}`.
+- **OpenAI-compatible** — HTTP/SSE for LM Studio, Ollama `/v1`, oMLX, etc. Configured under `settings.json` `openai`; model ids are `{endpoint}/{model}`.
 
 Each model entry's keys map 1:1 to the server's CLI flags, so any current or
-future flag works without code changes. Managed servers (llama + MLX) launch on
-first use, poll `/health` until ready, and are shared across sessions.
+future flag works without code changes. Managed servers (llama + MLX) launch
+on first use, poll `/health` until ready, and are shared across callers.
 
 ### Relay-router (optional)
 
@@ -202,44 +202,25 @@ picker.
 
 ## API
 
-The API is a Unix-socket HTTP + WebSocket surface. Treat it as a public API for
-direct (standalone) callers; through relay, Eve reaches it via the front-door
-dispatcher. The authoritative wire contract is
-[`docs/event-protocol.md`](docs/event-protocol.md) and the route/message
-constants in `internal/api/api.go` / `internal/events/ws_messages.go`.
+The authenticated API is a small Unix-socket HTTP surface, bearer-protected
+by `--token`/`RELAY_LLM_TOKEN`. Treat it as a public API for direct
+(standalone) callers; through relay, the front-door dispatcher reaches it
+per the registered manifest. Route constants live in `internal/api/api.go`.
 
-The routes below are the Unix socket's (bearer-authenticated). The optional
-`--http-port` TCP listener is a *different, much smaller* surface: a
-read-only diagnostics allowlist (`GET /status`, `/status/status.css`,
-`/status/status.js`, `/api/status`, `/api/status/detailed`) for the `/status`
-dashboard, served anonymously — see `internal/api/tcp_diagnostics.go`.
-Everything else, including `/ws` and every mutating route, 404s there.
+The optional `--http-port` TCP listener is a *different, much smaller*
+surface: a read-only diagnostics allowlist (`GET /status`,
+`/status/status.css`, `/status/status.js`, `/api/status`,
+`/api/status/detailed`) for the `/status` dashboard, served anonymously —
+see `internal/api/tcp_diagnostics.go`. Everything else 404s there.
 
-**HTTP** (all JSON):
+- `GET /api/status` — model-manager summary.
+- `GET /api/status/detailed` — full JSON status payload backing the `/status` dashboard.
+- `GET+DELETE /api/llama/instances[/{alias}]`; `GET+DELETE /api/mlx/instances[/{alias}]` — inspect/stop managed model-server instances.
 
-- `GET/POST /api/sessions`, `POST /api/sessions/:id/message` (sync), `DELETE /api/sessions/:id`, `POST /api/sessions/:id/delete`, `POST /api/sessions/:id/stop`; pi-only `PUT /api/sessions/:id/model` and `…/thinking-level`.
-- `GET /api/models` — models from Claude + Ollama + OpenAI endpoints + llama.cpp + MLX.
-- `GET/POST /api/terminals`, `DELETE /api/terminals/:id`, `GET /api/terminals/:id/log`; `GET /api/terminal/templates` (read-mostly).
-- `GET /api/status`; `GET+DELETE /api/llama/instances[/{alias}]`; `GET+DELETE /api/mlx/instances[/{alias}]`.
-- `POST /api/permission` — the hook posts here; held open until the user decides (60s timeout → deny).
-- `GET /api/generated/:filename` — serves images written by the relay-comfyui MCP tool.
-
-**WebSocket** (`/ws`): client sends `join_session` / `send_message` /
-`permission_response` / terminal ops; the server streams `llm_event` (a
-**canonical, provider-agnostic** stream event — not raw Claude output),
-`stats_update`, `message_complete`, `permission_request`, terminal frames, etc.
-Full catalog: `internal/events/ws_messages.go` + [`docs/event-protocol.md`](docs/event-protocol.md).
-
-### Permission flow
-
-The `claude` CLI runs the PreToolUse hook binary before each tool use; the hook
-dials relayLLM's Unix socket (`RELAY_LLM_HOOK_SOCKET`, with `RELAY_LLM_SESSION_ID`
-+ `RELAY_LLM_HOOK_TOKEN`), which holds the request open and asks the WebSocket
-client to approve/deny. `RELAY_LLM_HOOK_TOKEN` is **not** relayLLM's internal
-bearer — it's a random credential minted per session, valid only for that
-session's own `POST /api/permission` call and revoked when the session ends
-(see CLAUDE.md's "Local Auth" section). Headless sessions (`settings: {"headless": true}`,
-used by relayScheduler) set `RELAY_LLM_HEADLESS=true` so the hook auto-approves.
+The relay-router's own OpenAI-compatible surface (`/v1/...`) is a separate
+listener, reachable via `--router-port`/`--router-socket` — see
+[Relay-router](#relay-router-optional) above, not the bearer-authenticated
+socket described here.
 
 ## Data
 
@@ -247,12 +228,10 @@ Default `os.UserConfigDir()/relayLLM` (macOS `~/Library/Application Support/rela
 Linux `~/.config/relayLLM/`); override with `--data-dir`.
 
 - `settings.json` — unified provider config (falls back to `openai_endpoints.json` + `llama_models.json`, then env).
-- `sessions/<id>.json` — per-session state (a daily sweeper removes headless sessions older than 7 days).
-- `pi-sessions/` — pi session JSONLs.
-- `generated/` — images written by the relay-comfyui MCP tool, served via `/api/generated/`.
 
-Terminal templates live in the `pty` section of `settings.json` (seeded with
-built-ins on first run; relay's config editor manages them).
+Terminal templates (relay-sessions' PTY launch shapes, not spawned by
+relayLLM itself) live in the `pty` section of `settings.json`, retained only
+as an editable on-disk format; relay's config editor manages them.
 
 ## Testing
 
@@ -262,10 +241,10 @@ go test -tags=live ./...   # opt-in: needs Ollama / LM Studio / oMLX / relay run
 go test -tags=llm ./...    # opt-in: real llama-server against an installed GGUF
 ```
 
-The hermetic tier covers the WS protocol, HTTP API, session lifecycle, tool-call
-loop, pi event translation, and manifest registration via fakes
-(`internal/testutil` / `internal/api/testserver_test.go`). Install the pre-commit
-hook once: `git config core.hooksPath .githooks`.
+The hermetic tier covers the HTTP status API, managed-server lifecycle,
+relay-router dispatch, and manifest registration via fakes
+(`internal/testutil` / `internal/api/testserver_test.go`). Install the
+pre-commit hook once: `git config core.hooksPath .githooks`.
 
 ## Service manifest
 
@@ -285,7 +264,7 @@ sources. Protocol contract: [`../relay/docs/service-manifest.md`](../relay/docs/
 ## Ecosystem
 
 - **[relay](https://github.com/barelyworkingcode/relay)** — orchestrator + front-door dispatcher; spawns relayLLM and routes traffic per registered manifests.
-- **[Eve](https://github.com/barelyworkingcode/eve)** — browser frontend; reaches relayLLM through relay's front door.
+- **relay-sessions** — hosts LLM sessions, terminals, and the permission hook; the surface this repo used to serve before narrowing to model-hosting only.
 - **[relayScheduler](https://github.com/barelyworkingcode/relayScheduler)** — runs scheduled tasks against terminal templates.
 - **[relayTelegram](https://github.com/barelyworkingcode/relayTelegram)** — Telegram bot bridge.
 - **[relayComfy](https://github.com/barelyworkingcode/relayComfy)** — ComfyUI service; image generation reaches it as the `comfyui` MCP tool through relay.
