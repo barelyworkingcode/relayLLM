@@ -66,12 +66,10 @@ var (
 	proxyQuietAfter = 5 * time.Second
 )
 
-// Unified connection-state vocabulary, per RECONCILED_SCHEMA.md §4. Folds
-// backend.md's three proxy-only states (awaiting-upstream/streaming/stalled)
-// into this shared vocabulary so the dashboard's connections[] array can
-// discriminate on one `state` enum across proxy, WebSocket, and chat rows
-// alike (ws/chat only ever report active/idle — see ws.go's wsIdleAfter and
-// Session.IsProcessing's doc comments for why neither gets quiet/stalled).
+// Connection-state vocabulary for proxy connections, per RECONCILED_SCHEMA.md
+// §4. Folds backend.md's three proxy-only states
+// (awaiting-upstream/streaming/stalled) into the `state` enum the
+// dashboard's connections[] array reports.
 const (
 	ConnStateActive  = "active"
 	ConnStateIdle    = "idle"

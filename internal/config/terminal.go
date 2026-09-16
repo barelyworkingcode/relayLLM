@@ -10,8 +10,8 @@ package config
 // spawn-time env resolution against relay's bridge. Args may reference
 // ${PROJECT_PATH} and ${RELAY_TOKEN}; the skills directory is the convention
 // ${PROJECT_PATH}/.claude/skills (relay generates and manages the SKILL.md
-// files there). relayLLM itself no longer spawns terminals (L-S1) — this
-// shape is retained only as settings.json's on-disk/editable format.
+// files there). relayLLM itself does not spawn terminals — this shape is
+// retained only as settings.json's on-disk/editable format.
 type TerminalTemplate struct {
 	ID          string            `json:"id,omitempty"`
 	Name        string            `json:"name"`

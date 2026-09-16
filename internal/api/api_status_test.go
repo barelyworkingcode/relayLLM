@@ -35,8 +35,8 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	}
 
 	// Pull the raw JSON to confirm no stale `llamaInstances` count field
-	// leaks through, and that relayLLM no longer reports session/terminal
-	// counts on this payload now that it hosts neither (L-S1).
+	// leaks through, and that relayLLM does not report session/terminal
+	// counts on this payload, since it hosts neither.
 	var raw map[string]json.RawMessage
 	srv.GetJSON("/api/status", &raw)
 	if _, hasOldField := raw["llamaInstances"]; hasOldField {

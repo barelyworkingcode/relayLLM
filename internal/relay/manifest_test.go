@@ -30,8 +30,8 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 	m := relay.BuildManifest(dataDir)
 
 	// Routes the relay dispatcher must know about. relayLLM only hosts
-	// models now (L-S1) — session/terminal/permission/generated/ws routes
-	// are relay-sessions' territory. Adding a route is a protocol change —
+	// models — session/terminal/permission/generated/ws routes are
+	// relay-sessions' territory. Adding a route is a protocol change —
 	// break this test deliberately when adding one.
 	wantRoutes := []string{
 		"/api/status",

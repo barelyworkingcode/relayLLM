@@ -10,9 +10,8 @@ package app
 // reachability is gated purely by which --http-bind addresses actually
 // bound, matching --router-port's existing unauthenticated-by-bind-address
 // posture. The socket keeps requiring the token (it carries relay's
-// manifest bridging and the permission hook's callback). See auth.go's
-// bearerAuth doc comment and main.go's handler-chain comment for the full
-// reasoning.
+// manifest bridging). See auth.go's bearerAuth doc comment and main.go's
+// handler-chain comment for the full reasoning.
 //
 // Certificates come from tls_test_helpers_test.go — hermetic, loopback only.
 

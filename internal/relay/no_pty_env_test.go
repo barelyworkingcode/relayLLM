@@ -1,9 +1,9 @@
 package relay_test
 
-// L-S1 deleted relayLLM's PTY-env resolution (ResolvePtyEnv) along with the
-// terminal/session/provider packages that were its only callers — this walks
-// the module's own source tree and fails if any reference survived, rather
-// than trusting a human glance.
+// relayLLM has no PTY-env resolution (ResolvePtyEnv) and no
+// terminal/session/provider packages to call it — this walks the module's
+// own source tree and fails if any reference survived, rather than trusting
+// a human glance.
 
 import (
 	"bytes"
