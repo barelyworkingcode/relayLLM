@@ -10,9 +10,7 @@ import (
 	"time"
 
 	"relayllm/internal/config"
-	"relayllm/internal/permission"
 	"relayllm/internal/registry"
-	"relayllm/internal/session"
 )
 
 // Security regression suite. One file = one audit surface. Every test here
@@ -22,12 +20,6 @@ import (
 // Naming convention (borrowed from ../relay/security_regression_test.go): each
 // test is `TestSec_<surface>_<expected-behavior>` so a future audit can scan
 // one file and answer "is this covered?" without reading the bodies.
-//
-// Several guards here intentionally duplicate an assertion already made in a
-// mechanical test (e.g. headless flags in provider_claude_spawn_test.go). The
-// duplication is the point: a refactor that quietly relaxes the mechanical test
-// still has to get past the security file, which reads as a checklist of
-// invariants that must never regress.
 
 // ---------------------------------------------------------------------------
 // HTTP bearer auth boundary (auth.go)
@@ -140,12 +132,6 @@ func TestSec_GeneratedBearerToken_Is256BitHexAndUnique(t *testing.T) {
 	}
 }
 
-// Claude spawn/env/host-exec security tests moved to
-// internal/provider/claude_security_test.go when the Claude provider moved
-// to its own package. The host-terminal-exec security test moved to
-// internal/terminal/terminal_security_test.go when terminal_session.go
-// moved to its own package.
-
 // ---------------------------------------------------------------------------
 // GET /api/status/detailed must never leak an endpoint's credentials
 // (api_status_detailed.go). EndpointStatus embeds the full config.OpenAIEndpoint,
@@ -160,9 +146,7 @@ func TestSec_DetailedStatus_NeverLeaksEndpointSecrets(t *testing.T) {
 	reg := registry.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
 	reg.SetStatusForTest(ep, true, registry.UpstreamModel{ID: "m"})
 
-	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
 	deps := DetailedStatusDeps{
-		Sessions:  sessions,
 		Registry:  reg,
 		StartTime: time.Now(),
 	}
