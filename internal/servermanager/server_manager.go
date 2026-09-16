@@ -7,10 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
-	"relayllm/internal/spawn"
+	"relayllm/internal/relay"
 	"relayllm/internal/types"
 	"sort"
 	"strconv"
@@ -20,6 +21,44 @@ import (
 	"syscall"
 	"time"
 )
+
+// relaySecretEnvKeys are relay credentials a spawned llama-server/mlx-serve
+// child must never inherit — it is a managed subprocess like any other
+// spawn path, not a trusted extension of relayLLM itself. Mirrors
+// internal/relay's own removedCredentialEnvKeys plus the project-token and
+// internal-bearer names, since a model server has no legitimate use for any
+// of them.
+var relaySecretEnvKeys = []string{
+	relay.EnvServiceToken,
+	relay.EnvServiceTokenLegacy,
+	relay.EnvFrontendToken,
+	relay.EnvLaunchFD,
+	relay.EnvProjectToken,
+	relay.EnvProjectTokenLegacy,
+	"RELAY_LLM_TOKEN",
+	"RELAY_LLM_HOOK_TOKEN",
+}
+
+// childBaseEnv returns os.Environ() with every relaySecretEnvKeys entry
+// stripped, for use as a spawned child's environment instead of os.Environ()
+// directly.
+func childBaseEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		drop := false
+		for _, k := range relaySecretEnvKeys {
+			if strings.HasPrefix(kv, k+"=") {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
 
 var LlamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-server", Group: "llama.cpp", DefaultBasePort: 8090}
 
@@ -539,7 +578,7 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	// other spawn path and must not inherit relayLLM's own credentials
 	// (internal bearer, project tokens) just because nothing here ever
 	// set cmd.Env before.
-	cmd.Env = spawn.ChildBaseEnv()
+	cmd.Env = childBaseEnv()
 	logProcessOutput(cmd, m.profile.Kind, alias)
 
 	if err := cmd.Start(); err != nil {
