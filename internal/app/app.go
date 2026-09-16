@@ -55,9 +55,9 @@ func Main() {
 	httpTLSKey := flag.String("http-tls-key", envOrDefault("RELAY_LLM_HTTP_TLS_KEY", ""), "TLS private key file for the --http-port listener. Requires --http-tls-cert.")
 	flag.Parse()
 
-	// C9 (L-S1): a relay-launched relayLLM reaches relay only through
-	// router.sock; --router-port would be a second, ungated path to the same
-	// model broker.
+	// C9: a relay-launched relayLLM reaches relay only through router.sock;
+	// --router-port would be a second, ungated path to the same model
+	// broker.
 	refuseLaunchedRouterPortOrExit(*routerPort, os.Exit)
 
 	// Parsed once here; every downstream consumer (loopback validation,

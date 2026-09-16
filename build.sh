@@ -19,9 +19,9 @@ fi
 codesign "${SIGN_ARGS[@]}" relayllm
 codesign --verify --strict --verbose=2 relayllm
 
-# --router-port is dropped from this registration: P2 (C9, L-S1) refuses to
-# start with one configured while relay launched the process — relay now
-# reaches model routing only through router.sock, registered at runtime via
+# --router-port is dropped from this registration: C9 refuses to start with
+# one configured while relay launched the process — relay reaches model
+# routing only through router.sock, registered at runtime via
 # RegisterModelHost, not through a listed port here.
 /Applications/Relay.app/Contents/MacOS/relay service register \
   --name "Relay LLM" \
@@ -37,9 +37,8 @@ codesign --verify --strict --verbose=2 relayllm
   # model_host (C9, plan-broker-and-sessions.md §2) is what lets relay accept
   # this service's RegisterModelHost call for router.sock; a service record
   # missing it makes relay refuse the registration and relayLLM exit 78.
-  # "projects" is deliberately absent: relay retired that capability
-  # (R-S1/R-S2b) once relay-sessions took over session/project hosting, and
-  # relayLLM's own registration must never ask for a grant relay no longer
-  # issues.
+  # "projects" is deliberately absent: relay-sessions, not relayLLM, hosts
+  # sessions and projects, and relayLLM's own registration must never ask
+  # for a grant relay does not issue for this service.
 echo ""
 echo "Registered with Relay."

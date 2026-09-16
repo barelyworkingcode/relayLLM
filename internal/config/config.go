@@ -46,11 +46,11 @@ type LoadedConfig struct {
 // Empty BinaryPath falls back to the well-known fallback chain in
 // resolvePiPath (~/.local/bin/pi, npm globals, /usr/local/bin/pi, then PATH).
 //
-// The relay-managed fields (UseRelayToken / EnvPassthrough) mirror the pidev
-// PTY template's shape and trigger the same RelayManagedSpec.Resolve() prep
-// used by terminal_session.go — see relay_spawn.go. When set, each LLM-pi
-// spawn calls relay's bridge to fetch a project-scoped token and forwards
-// listed env vars from the relayLLM process into pi. Skills load from the
+// The relay-managed fields (UseRelayToken / EnvPassthrough) mirror
+// TerminalTemplate's shape (see terminal.go): they describe how a
+// relay-managed pi spawn should fetch a project-scoped token and which env
+// vars to forward from the relayLLM process into pi, on disk, but relayLLM
+// itself no longer performs any spawn using them. Skills load from the
 // project's .claude/skills directory (relay generates and manages them).
 type PiConfig struct {
 	BinaryPath string   `json:"binaryPath,omitempty"`

@@ -20,15 +20,15 @@ import (
 	"relayllm/internal/relay"
 )
 
-// refuseLaunchedRouterPortOrExit is C9's own rule for P2 (L-S1): a
-// relay-launched relayLLM exposes model routing to relay only through
-// router.sock — a --router-port TCP listener would be a second, ungated path
-// to the same broker, so a launched process refuses to start with one
-// configured, exiting 78 (matching RegisterModelHostOrExit's own convention
-// for a refused capability/config combination). Standalone (not launched)
-// keeps serving --router-port exactly as before (L-M2). exitFn is injected —
-// production (app.go) passes os.Exit — so a test can observe the refusal
-// without ending the test process.
+// refuseLaunchedRouterPortOrExit is C9's own rule: a relay-launched relayLLM
+// exposes model routing to relay only through router.sock — a --router-port
+// TCP listener would be a second, ungated path to the same broker, so a
+// launched process refuses to start with one configured, exiting 78
+// (matching RegisterModelHostOrExit's own convention for a refused
+// capability/config combination). Standalone (not launched) keeps serving
+// --router-port exactly as before. exitFn is injected — production (app.go)
+// passes os.Exit — so a test can observe the refusal without ending the
+// test process.
 func refuseLaunchedRouterPortOrExit(routerPort string, exitFn func(int)) {
 	if relay.Launched() && routerPort != "" {
 		slog.Error("--router-port is not permitted when relay launched this process; relay reaches model routing only through router.sock (C9)",

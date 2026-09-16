@@ -66,8 +66,10 @@ type DetailedStatusDeps struct {
 // listener (see J8 in backend.md's design notes): that listener is
 // unauthenticated by design (a local OpenAI-compatible endpoint), and this
 // page exposes model config and endpoint names. The main mux sits behind
-// bearerAuth, so /status reached from a browser goes through relay's front
-// door, which supplies the token.
+// bearerAuth on the Unix socket; a browser reaches /status only through the
+// optional --http-port TCP front (see main_http_listener_test.go), which
+// carries no bearer requirement of its own and is gated purely by which
+// --http-bind addresses are actually bound.
 func RegisterDetailedStatusRoutes(mux *http.ServeMux, deps DetailedStatusDeps) {
 	mux.HandleFunc("GET /api/status/detailed", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
