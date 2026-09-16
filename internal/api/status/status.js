@@ -198,11 +198,6 @@ function setEmpty(prefix, isEmpty, tableId, message) {
 // ------------------------------------------------------------ connections --
 
 function connBadgeSpec(kind, state) {
-  if (kind === 'ws' || kind === 'chat') {
-    return state === 'active'
-      ? { status: 'good', glyph: '●', word: 'ACTIVE', variant: 'outline' }
-      : { status: 'neutral', glyph: '○', word: 'IDLE', variant: 'outline' };
-  }
   switch (state) {
     case 'active': return { status: 'good', glyph: '●', word: 'ACTIVE', variant: 'outline' };
     case 'idle': return { status: 'neutral', glyph: '○', word: 'IDLE', variant: 'outline' };
@@ -277,7 +272,7 @@ function createConnRow(item) {
 function updateConnRow(tr, item) {
   tr.__item = item;
   const r = tr.__refs;
-  const state = item.state || (item.kind === 'ws' || item.kind === 'chat' ? 'idle' : 'active');
+  const state = item.state || 'active';
   const startedMs = item.startedAt ? Date.parse(item.startedAt) : null;
   const lastByteMs = item.lastByteAt ? Date.parse(item.lastByteAt) : null;
 
@@ -298,18 +293,8 @@ function updateConnRow(tr, item) {
 
   setText(r.kindCell, item.kind.toUpperCase());
 
-  let primaryText, secondaryText;
-  if (item.kind === 'chat') {
-    primaryText = item.name || item.model || item.id;
-    secondaryText = [item.providerType, item.model].filter(Boolean).join(' · ');
-  } else if (item.kind === 'ws') {
-    primaryText = 'viewer';
-    secondaryText = (item.sessions || []).length ? 'sessions ' + item.sessions.join(', ')
-      : (item.terminals || []).length ? 'terminals ' + item.terminals.join(', ') : '';
-  } else {
-    primaryText = item.model || item.target || item.path || '—';
-    secondaryText = (item.target && item.target !== item.model) ? item.target : (item.path || '');
-  }
+  const primaryText = item.model || item.target || item.path || '—';
+  const secondaryText = (item.target && item.target !== item.model) ? item.target : (item.path || '');
   setText(r.primary, primaryText);
   setText(r.secondary, secondaryText);
 
@@ -359,44 +344,18 @@ function updateConnRow(tr, item) {
 function connDetailFields(item) {
   const f = [];
   const add = (label, value) => { if (value !== undefined && value !== null && value !== '') f.push([label, value]); };
-  if (item.kind === 'sse' || item.kind === 'http') {
-    add('REQUEST ID', item.id);
-    add('OPENED', fmtAbs(item.startedAt));
-    add('LAST BYTE', item.lastByteAt ? fmtAbs(item.lastByteAt) : undefined);
-    add('PATH', [item.method, item.path].filter(Boolean).join(' '));
-    add('MODEL (ASKED)', item.model);
-    add('MODEL (SERVED)', item.target && item.target !== item.model ? item.target : undefined);
-    add('TARGET KIND', item.targetKind);
-    add('ATTEMPTS', item.attempts);
-    add('STATUS', item.status || undefined);
-    add('BYTES IN', fmtInt(item.bytesIn));
-    add('BYTES OUT', fmtInt(item.bytesOut));
-    add('VIA ANTHROPIC', item.viaAnthropic ? 'yes' : undefined);
-  } else if (item.kind === 'ws') {
-    add('CONN ID', item.id);
-    add('REMOTE', item.remoteAddr);
-    add('CONNECTED', fmtAbs(item.startedAt));
-    add('LAST ACTIVITY', item.lastByteAt ? fmtAbs(item.lastByteAt) : undefined);
-    add('MESSAGES IN', fmtInt(item.messagesIn));
-    add('MESSAGES OUT', fmtInt(item.messagesOut));
-    add('SESSIONS', (item.sessions || []).join(', '));
-    add('TERMINALS', (item.terminals || []).join(', '));
-  } else if (item.kind === 'chat') {
-    add('SESSION ID', item.id);
-    add('PROJECT', item.projectId);
-    add('PROVIDER', item.providerType);
-    add('MODEL', item.model);
-    add('DIRECTORY', item.directory);
-    add('MESSAGES', item.messageCount);
-    add('VIEWERS', item.viewers);
-    add('STARTED', fmtAbs(item.startedAt));
-    add('LAST MESSAGE', item.lastByteAt ? fmtAbs(item.lastByteAt) : undefined);
-    if (item.stats) {
-      add('TOKENS IN', fmtInt(item.stats.inputTokens));
-      add('TOKENS OUT', fmtInt(item.stats.outputTokens));
-      if (item.stats.costUsd) add('COST', '$' + item.stats.costUsd.toFixed(4));
-    }
-  }
+  add('REQUEST ID', item.id);
+  add('OPENED', fmtAbs(item.startedAt));
+  add('LAST BYTE', item.lastByteAt ? fmtAbs(item.lastByteAt) : undefined);
+  add('PATH', [item.method, item.path].filter(Boolean).join(' '));
+  add('MODEL (ASKED)', item.model);
+  add('MODEL (SERVED)', item.target && item.target !== item.model ? item.target : undefined);
+  add('TARGET KIND', item.targetKind);
+  add('ATTEMPTS', item.attempts);
+  add('STATUS', item.status || undefined);
+  add('BYTES IN', fmtInt(item.bytesIn));
+  add('BYTES OUT', fmtInt(item.bytesOut));
+  add('VIA ANTHROPIC', item.viaAnthropic ? 'yes' : undefined);
   return f;
 }
 
@@ -734,63 +693,15 @@ function renderEndpoints(json) {
   return rows;
 }
 
-// -------------------------------------------------------------- terminals --
-
-function createTerminalRow(item) {
-  const tr = document.createElement('tr');
-  const tdId = document.createElement('td'); tdId.className = 'mono';
-  const tdName = document.createElement('td');
-  const tdTemplate = document.createElement('td'); const chip = document.createElement('span'); chip.className = 'backend-chip'; tdTemplate.appendChild(chip);
-  const tdState = document.createElement('td'); const badge = buildBadge(); tdState.appendChild(badge.el);
-  const tdStarted = document.createElement('td'); tdStarted.className = 'num';
-  const startedSpan = document.createElement('span'); startedSpan.dataset.kind = 'dur'; tdStarted.appendChild(startedSpan);
-  tr.append(tdId, tdName, tdTemplate, tdState, tdStarted);
-  tr.__refs = { tdId, tdName, chip, badge, startedSpan };
-  updateTerminalRow(tr, item);
-  return tr;
-}
-
-function updateTerminalRow(tr, item) {
-  const r = tr.__refs;
-  const short = item.id.length > 8 ? item.id.slice(0, 8) : item.id;
-  setText(r.tdId, short); r.tdId.title = item.id;
-  setText(r.tdName, item.name || '—');
-  setText(r.chip, item.templateId);
-  const running = item.state === 'running';
-  setBadge(r.badge, running ? 'good' : 'neutral', null, running ? '●' : '○', running ? 'RUNNING' : 'STOPPED', item.state);
-  if (item.startedAt) {
-    const ms = Date.parse(item.startedAt);
-    r.startedSpan.dataset.since = String(ms);
-    r.startedSpan.title = fmtAbs(item.startedAt);
-    setText(r.startedSpan, fmtDuration((nowMs() - ms) / 1000));
-  }
-  tr.classList.toggle('row-idle', !running);
-}
-
-function renderTerminals(json) {
-  const rows = (json.terminals || []).slice().sort((a, b) => {
-    const ga = a.state === 'running' ? 0 : 1, gb = b.state === 'running' ? 0 : 1;
-    if (ga !== gb) return ga - gb;
-    return a.id.localeCompare(b.id);
-  });
-  const tbody = document.getElementById('terminals-tbody');
-  reconcileList(tbody, rows, (r) => 'terminal:' + r.id, createTerminalRow, updateTerminalRow);
-  setEmpty('terminals', rows.length === 0, 'terminals-table', 'No terminals');
-  const running = rows.filter((r) => r.state === 'running').length;
-  document.getElementById('terminals-count').textContent = rows.length
-    ? running + ' running · ' + (rows.length - running) + ' stopped' : 'No terminals';
-  return rows;
-}
-
 // --------------------------------------------------------------- overview --
 
-const TILE_ORDER = ['uptime', 'sessions', 'viewers', 'requests', 'in', 'out', 'attention'];
+const TILE_ORDER = ['uptime', 'requests', 'in', 'out', 'attention'];
 let overviewBuilt = false;
 
 function buildOverviewSkeleton() {
   const strip = document.getElementById('overview-strip');
   strip.innerHTML = '';
-  const labels = { uptime: 'UPTIME', sessions: 'SESSIONS', viewers: 'VIEWERS', requests: 'REQUESTS', in: 'IN', out: 'OUT', attention: 'ATTENTION' };
+  const labels = { uptime: 'UPTIME', requests: 'REQUESTS', in: 'IN', out: 'OUT', attention: 'ATTENTION' };
   const refs = {};
   for (const key of TILE_ORDER) {
     const tile = document.createElement('div'); tile.className = 'tile'; tile.dataset.tile = key;
@@ -817,12 +728,6 @@ function renderOverview(json, streamingCount) {
   if (startTimeMs === null) startTimeMs = nowMs() - (json.uptimeSeconds || 0) * 1000;
   setText(r.uptime.value, fmtDuration(json.uptimeSeconds || 0));
   setText(r.uptime.sub, 'since ' + fmtAbsShort(startTimeMs));
-
-  setText(r.sessions.value, String(o.sessions ?? 0));
-  setText(r.sessions.sub, o.sessionsProcessing ? o.sessionsProcessing + ' generating' : '—');
-
-  setText(r.viewers.value, String(o.websocketConnections ?? 0));
-  setText(r.viewers.sub, 'websocket');
 
   setText(r.requests.value, String(o.proxyConnections ?? 0));
   setText(r.requests.sub, 'proxied · ' + streamingCount + ' streaming');
@@ -989,7 +894,6 @@ function apply(json) {
   renderBudgets(json);
   renderVirtual(json);
   const endpointRows = renderEndpoints(json);
-  renderTerminals(json);
 
   attentionItems.length = 0;
   attentionItems.push(...buildAttention(json, modelRows, endpointRows));
