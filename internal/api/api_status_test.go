@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"relayllm/internal/servermanager"
-	"relayllm/internal/terminal"
 	"testing"
 )
 
@@ -18,10 +17,8 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 
 	var got struct {
 		UptimeSeconds int64                              `json:"uptimeSeconds"`
-		Sessions      int                                `json:"sessions"`
 		Instances     []servermanager.ServerInstanceInfo `json:"instances"`
 		MlxInstances  []servermanager.ServerInstanceInfo `json:"mlxInstances"`
-		Terminals     []terminal.TerminalSummary         `json:"terminals"`
 	}
 	resp := srv.GetJSON("/api/status", &got)
 	if resp.StatusCode != 200 {
@@ -36,13 +33,10 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	if got.MlxInstances == nil {
 		t.Fatal("mlxInstances field missing or null; want empty array []")
 	}
-	if got.Terminals == nil {
-		t.Fatal("terminals field missing or null; want empty array []")
-	}
 
 	// Pull the raw JSON to confirm no stale `llamaInstances` count field
-	// leaks through (consumers of the old shape should break loudly), and
-	// that the new `terminals` field is an array not a count.
+	// leaks through, and that relayLLM does not report session/terminal
+	// counts on this payload, since it hosts neither.
 	var raw map[string]json.RawMessage
 	srv.GetJSON("/api/status", &raw)
 	if _, hasOldField := raw["llamaInstances"]; hasOldField {
@@ -54,13 +48,10 @@ func TestAPI_Status_ShapeMatchesManifestForEach(t *testing.T) {
 	if _, hasMlx := raw["mlxInstances"]; !hasMlx {
 		t.Error("status payload missing mlxInstances array")
 	}
-	termRaw, hasTerminals := raw["terminals"]
-	if !hasTerminals {
-		t.Error("status payload missing terminals array")
-	}
-	// Guard against the previous int-count shape sneaking back in.
-	if len(termRaw) > 0 && termRaw[0] != '[' {
-		t.Errorf("terminals must be an array (was a count?); got %s", string(termRaw))
+	for _, stale := range []string{"sessions", "terminals"} {
+		if _, has := raw[stale]; has {
+			t.Errorf("status payload still carries %q; relayLLM no longer hosts sessions/terminals", stale)
+		}
 	}
 }
 

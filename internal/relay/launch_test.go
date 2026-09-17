@@ -188,7 +188,7 @@ func TestCompleteLaunch_MissingServiceIDClosesFdAndFails(t *testing.T) {
 func TestSendBridgeRequest_EmptyTokenOnlyAfterLaunch(t *testing.T) {
 	fb := testutil.NewFakeBridge(t)
 	testutil.WithBridgeEnv(t, fb.SocketPath(), "relay-llm")
-	if _, err := relay.SendBridgeRequest(relay.ReqResolvePtyEnv, json.RawMessage(`{}`)); err == nil {
+	if _, err := relay.SendBridgeRequest("SomeRequestType", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("unlaunched SendBridgeRequest must fail")
 	}
 	if len(fb.Requests()) != 0 {
@@ -196,7 +196,7 @@ func TestSendBridgeRequest_EmptyTokenOnlyAfterLaunch(t *testing.T) {
 	}
 
 	testutil.LaunchViaBridge(t, fb, "relay-llm")
-	for _, typ := range []string{relay.ReqResolvePtyEnv, relay.ReqResolveProjectTemplate, relay.ReqRegisterManifest, "ListProjects", "GetProject"} {
+	for _, typ := range []string{relay.ReqRegisterManifest, relay.ReqRegisterModelHost, "ListProjects", "GetProject"} {
 		if _, err := relay.SendBridgeRequest(typ, json.RawMessage(`{}`)); err != nil {
 			t.Fatalf("%s: %v", typ, err)
 		}

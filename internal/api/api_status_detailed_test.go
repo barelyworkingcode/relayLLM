@@ -12,23 +12,15 @@ import (
 	"path/filepath"
 	"relayllm/internal/config"
 	"relayllm/internal/peertoken"
-	"relayllm/internal/permission"
 	"relayllm/internal/registry"
 	"relayllm/internal/router"
-	"relayllm/internal/session"
-	"relayllm/internal/terminal"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestDetailedStatus_NilRouterAndRegistry(t *testing.T) {
-	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
-
-	deps := DetailedStatusDeps{
-		Sessions:  sessions,
-		StartTime: time.Now(),
-	}
+	deps := DetailedStatusDeps{StartTime: time.Now()}
 	got := buildDetailedStatus(context.Background(), deps)
 
 	overview, ok := got["overview"].(map[string]any)
@@ -42,7 +34,7 @@ func TestDetailedStatus_NilRouterAndRegistry(t *testing.T) {
 
 	// Every array must be [] not null — a null here breaks a JS .map() on
 	// the real page.
-	for _, key := range []string{"connections", "recentRequests", "budgets", "terminals"} {
+	for _, key := range []string{"connections", "recentRequests", "budgets"} {
 		v, ok := got[key]
 		if !ok {
 			t.Errorf("missing top-level key %q", key)
@@ -84,23 +76,16 @@ func assertJSONArray(t *testing.T, name string, v any) {
 }
 
 func TestDetailedStatus_Shape(t *testing.T) {
-	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
-	perms := permission.NewPermissionManager()
-	terminals := terminal.NewTerminalManager(terminal.NewTemplateStore(t.TempDir()), t.TempDir())
-	wsHub := NewWSHub(sessions, perms, terminals)
-
-	deps := DetailedStatusDeps{
-		Sessions:  sessions,
-		Terminals: terminals,
-		WSHub:     wsHub,
-		StartTime: time.Now(),
-	}
+	deps := DetailedStatusDeps{StartTime: time.Now()}
 	got := buildDetailedStatus(context.Background(), deps)
 
-	for _, key := range []string{"generatedAt", "uptimeSeconds", "overview", "connections", "recentRequests", "models", "budgets", "terminals"} {
+	for _, key := range []string{"generatedAt", "uptimeSeconds", "overview", "connections", "recentRequests", "models", "budgets"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("missing top-level key %q in %+v", key, got)
 		}
+	}
+	if _, has := got["terminals"]; has {
+		t.Error("detailed status still carries a top-level terminals key; relayLLM no longer hosts terminals")
 	}
 	if _, err := time.Parse(time.RFC3339, got["generatedAt"].(string)); err != nil {
 		t.Errorf("generatedAt = %v, want RFC3339: %v", got["generatedAt"], err)
@@ -144,12 +129,7 @@ func TestDetailedStatus_SocketOnlyRouter(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = rtr.Close() })
 
-	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
-	deps := DetailedStatusDeps{
-		Sessions:  sessions,
-		Router:    rtr,
-		StartTime: time.Now(),
-	}
+	deps := DetailedStatusDeps{Router: rtr, StartTime: time.Now()}
 	got := buildDetailedStatus(context.Background(), deps)
 
 	overview := got["overview"].(map[string]any)
@@ -197,9 +177,7 @@ func TestDetailedStatus_VirtualCandidateReachability(t *testing.T) {
 	onlineIdentity := router.EndpointTargetIdentity(onlineEP, "m")
 	rtr.RecordAffinityForTest("vMixed", "conv-1", onlineIdentity)
 
-	sessions := session.NewSessionManager(session.NewSessionStore(t.TempDir()), permission.NewPermissionManager())
 	deps := DetailedStatusDeps{
-		Sessions:  sessions,
 		Registry:  reg,
 		Virtual:   virtual,
 		Router:    rtr,

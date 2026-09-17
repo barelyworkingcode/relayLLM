@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -19,22 +18,18 @@ import (
 
 	"relayllm/internal/api"
 	"relayllm/internal/config"
-	"relayllm/internal/events"
 	"relayllm/internal/netutil"
-	"relayllm/internal/permission"
 	"relayllm/internal/registry"
 	"relayllm/internal/relay"
 	"relayllm/internal/router"
 	"relayllm/internal/servermanager"
-	"relayllm/internal/session"
-	"relayllm/internal/terminal"
 )
 
 func Main() {
-	// Deliberate: first, before anything that can spawn a child (providers,
-	// terminals, managed servers, the permission hook) or start a goroutine
-	// that might. It closes the inherited launch fd and scrubs RELAY_LAUNCH_FD
-	// from this process's environment, so no child can inherit either.
+	// Deliberate: first, before anything that can spawn a child (a managed
+	// model server) or start a goroutine that might. It closes the inherited
+	// launch fd and scrubs RELAY_LAUNCH_FD from this process's environment,
+	// so no child can inherit either.
 	if launched, hello, err := relay.BootstrapLaunch(); err != nil {
 		slog.Error("relay launch handshake failed; refusing to start", "error", err)
 		os.Exit(1)
@@ -44,7 +39,6 @@ func Main() {
 
 	startTime := time.Now()
 	dataDir := flag.String("data-dir", envOrDefault("RELAY_LLM_DATA", ""), "Data directory (default: ~/.config/relayLLM)")
-	ollamaURL := flag.String("ollama-url", envOrDefault("OLLAMA_URL", "http://localhost:11434"), "Ollama base URL")
 	openaiConfigPath := flag.String("openai-config", envOrDefault("OPENAI_CONFIG", ""), "Path to OpenAI-compatible endpoints config JSON (default: {data-dir}/openai_endpoints.json)")
 	socketPath := flag.String("socket", envOrDefault("RELAY_LLM_SOCKET", ""), "Unix domain socket path for this listener. Defaults to {data-dir}/relayllm.sock. Used by direct clients in standalone mode and by relay (via manifest registration) when running under relay.")
 	internalToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every request. Empty → auto-generated random hex (printed at startup).")
@@ -55,15 +49,20 @@ func Main() {
 	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
 	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
 	routerSocketPath := flag.String("router-socket", envOrDefault("RELAY_ROUTER_SOCKET", ""), "Unix socket path for relay's private, tokenless path into the relay-router (default: {data-dir}/router.sock). Only opened when launched by relay (RELAY_LAUNCH_FD set); ignored standalone. See plan-broker-and-sessions.md §2 C9.")
-	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving ONLY the read-only /status diagnostics dashboard (GET /status, /api/status, /api/status/detailed) — protected by --http-bind, not a bearer token, same as --router-port. Every other route, including /ws and all mutating routes, 404s on this port; use the bearer-authenticated --socket for those. Empty to disable.")
+	httpPort := flag.String("http-port", envOrDefault("RELAY_LLM_HTTP_PORT", ""), "Port for an additional, unauthenticated TCP listener serving ONLY the read-only /status diagnostics dashboard (GET /status, /api/status, /api/status/detailed) — protected by --http-bind, not a bearer token, same as --router-port. Every other route 404s on this port; use the bearer-authenticated --socket for those. Empty to disable.")
 	httpBind := flag.String("http-bind", envOrDefault("RELAY_LLM_HTTP_BIND", "127.0.0.1"), "Comma-separated bind addresses for the --http-port listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Set to 0.0.0.0 to accept connections from other hosts.")
 	httpTLSCert := flag.String("http-tls-cert", envOrDefault("RELAY_LLM_HTTP_TLS_CERT", ""), "TLS certificate file for the --http-port listener. Requires --http-tls-key; empty (with key also empty) serves plain http.")
 	httpTLSKey := flag.String("http-tls-key", envOrDefault("RELAY_LLM_HTTP_TLS_KEY", ""), "TLS private key file for the --http-port listener. Requires --http-tls-cert.")
 	flag.Parse()
 
+	// C9: a relay-launched relayLLM reaches relay only through router.sock;
+	// --router-port would be a second, ungated path to the same model
+	// broker.
+	refuseLaunchedRouterPortOrExit(*routerPort, os.Exit)
+
 	// Parsed once here; every downstream consumer (loopback validation,
-	// listenAddrs, the pi-overlay host, the manifest) works off these lists
-	// rather than re-splitting the raw flag value.
+	// listenAddrs, the manifest) works off these lists rather than
+	// re-splitting the raw flag value.
 	routerBinds := netutil.ParseBindList(*routerBind)
 	httpBinds := netutil.ParseBindList(*httpBind)
 
@@ -114,13 +113,6 @@ func Main() {
 		"dataDir", *dataDir,
 		"tokenAutoGenerated", tokenAutoGenerated)
 
-	sessionStore := session.NewSessionStore(filepath.Join(*dataDir, "sessions"))
-	perms := permission.NewPermissionManager()
-	sessions := session.NewSessionManager(sessionStore, perms)
-	sessions.SetDataDir(*dataDir)
-
-	// Load provider + pty config up front. Terminal subsystem needs the pty
-	// map to seed defaults before serving requests.
 	cfg, err := config.LoadConfig(*dataDir, *openaiConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -142,108 +134,15 @@ func Main() {
 		}
 	}
 
-	sessions.SetPiConfig(cfg.Pi)
-	if cfg.Pi.BinaryPath != "" {
-		slog.Info("pi binary configured", "path", cfg.Pi.BinaryPath)
-	}
-
-	// Terminal subsystem.
-	templateStore := terminal.NewTemplateStore(*dataDir)
-	if err := templateStore.Load(cfg.PTY); err != nil {
-		slog.Error("failed to load terminal templates", "error", err)
-	}
-	terminalLogDir := filepath.Join(*dataDir, "terminal_logs")
-	if err := os.MkdirAll(terminalLogDir, 0700); err != nil {
-		slog.Error("failed to create terminal log directory", "path", terminalLogDir, "error", err)
-		os.Exit(1)
-	}
-	terminalMgr := terminal.NewTerminalManager(templateStore, terminalLogDir)
-
-	// Daily log GC. 30 days time-based with a 500 MB byte cap as a safety
-	// net. Runs immediately at startup to catch up after a long downtime,
-	// then once per 24h. Idle process — no shutdown coordination needed.
-	go func() {
-		const (
-			sweepAge      = 30 * 24 * time.Hour
-			sweepMaxBytes = int64(500 * 1024 * 1024)
-			sweepInterval = 24 * time.Hour
-		)
-		for {
-			if removed, err := terminal.SweepTerminalLogs(terminalLogDir, sweepAge, sweepMaxBytes); err != nil {
-				slog.Warn("terminal log sweep failed", "error", err)
-			} else if removed > 0 {
-				slog.Info("terminal log sweep", "removed", removed)
-			}
-			time.Sleep(sweepInterval)
-		}
-	}()
-
-	// Daily GC: drop headless sessions/*.json older than 7d, then drop
-	// pi-sessions/*.jsonl whose piSessionId is no longer referenced by
-	// any survivor (1h cushion so we don't race a live pi writer).
-	go func() {
-		const (
-			headlessAge   = 7 * 24 * time.Hour
-			piOrphanAge   = 1 * time.Hour
-			sweepInterval = 24 * time.Hour
-		)
-		sessionsDir := filepath.Join(*dataDir, "sessions")
-		piDir := filepath.Join(*dataDir, "pi-sessions")
-		for {
-			removed, livePi, err := session.SweepSessions(sessionsDir, headlessAge)
-			if err != nil {
-				slog.Warn("session sweep failed", "error", err)
-			} else if removed > 0 {
-				slog.Info("session sweep", "removed", removed)
-			}
-			if livePi != nil {
-				if removed, err := session.SweepOrphanedPiSessions(piDir, livePi, piOrphanAge); err != nil {
-					slog.Warn("pi orphan sweep failed", "error", err)
-				} else if removed > 0 {
-					slog.Info("pi orphan sweep", "removed", removed)
-				}
-			}
-			time.Sleep(sweepInterval)
-		}
-	}()
-
-	wsHub := api.NewWSHub(sessions, perms, terminalMgr)
-	sessions.SetEventSink(wsHub)
-	perms.SetEventSink(wsHub)
-
-	// Wire terminal I/O to WebSocket hub.
-	terminalMgr.SetOutputHandler(func(terminalID string, data []byte) {
-		wsHub.SendToTerminal(terminalID, map[string]interface{}{
-			"type":       events.WSMsgTerminalOutput,
-			"terminalId": terminalID,
-			"data":       base64.StdEncoding.EncodeToString(data),
-		})
-	})
-	terminalMgr.SetExitHandler(func(terminalID string, exitCode int) {
-		wsHub.SendToTerminal(terminalID, map[string]interface{}{
-			"type":       events.WSMsgTerminalExit,
-			"terminalId": terminalID,
-			"exitCode":   exitCode,
-		})
-	})
-
-	// The Claude CLI hook subprocess (runs as the user) dials our Unix
-	// socket and authenticates with a per-session token minted for it
-	// (see HookScopedBearerAuth below) — never this process's own bearer.
-	sessions.SetHookSocket(*socketPath)
-	sessions.SetOllamaURL(*ollamaURL)
-
 	if len(cfg.OpenAI.Endpoints) > 0 {
 		slog.Info("openai endpoints loaded", "count", len(cfg.OpenAI.Endpoints), "names", cfg.OpenAI.Names())
 	}
-	sessions.SetOpenAIConfig(cfg.OpenAI)
 	var llamaManager *servermanager.ServerManager
 	if len(cfg.Llama.Models) > 0 {
 		llamaManager = servermanager.NewServerManager(servermanager.LlamaProfile, cfg.Llama, *llamaServerPath)
 		llamaManager.StartIdleReaper()
 		slog.Info("llama models configured", "count", len(cfg.Llama.Models), "binary", llamaManager.BinaryPath())
 	}
-	sessions.SetLlamaManager(llamaManager)
 
 	var mlxManager *servermanager.ServerManager
 	if len(cfg.Mlx.Models) > 0 {
@@ -251,13 +150,11 @@ func Main() {
 		mlxManager.StartIdleReaper()
 		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.BinaryPath())
 	}
-	sessions.SetMlxManager(mlxManager)
 
 	var proxyRegistry *registry.ProxyRegistry
 	if len(cfg.OpenAI.Endpoints) > 0 {
 		proxyRegistry = registry.NewProxyRegistry(cfg.OpenAI)
 	}
-	sessions.SetProxyRegistry(proxyRegistry)
 
 	// Slice order is the router's dispatch priority: llama wins alias
 	// collisions with mlx.
@@ -305,13 +202,10 @@ func Main() {
 		// Nothing to serve over TCP (no --router-port, or nothing configured
 		// to route to) and no router.sock to keep the object alive for
 		// either: drop it, matching the pre-router.sock "no router at all"
-		// nil every other reader below (sessions.SetRouterPort, the
-		// dashboard) already treats as absent.
+		// nil the dashboard (DetailedStatusDeps.Router) already treats as
+		// absent.
 		relayRouter = nil
 	}
-	sessions.SetRouterPort(*routerPort)
-	sessions.SetRouterHosts(routerBinds)
-	terminalMgr.SetPiOverlay(cfg.Pi, sessions.PiOverlayInputs)
 
 	// router.sock (C9): relay's private, tokenless path into the relay-router,
 	// opened only when relay actually launched this process — RelayIdentity()
@@ -336,44 +230,29 @@ func Main() {
 	}
 
 	mux := http.NewServeMux()
-	api.RegisterSessionRoutes(mux, sessions)
-	api.RegisterTerminalRoutes(mux, templateStore, terminalMgr)
-	api.RegisterPermissionRoutes(mux, perms, sessions)
-	api.RegisterModelRoutes(mux, *ollamaURL, proxyRegistry, llamaManager, mlxManager, cfg.Pi, sessions.PiOverlayInputs)
-	api.RegisterGeneratedImageRoutes(mux, *dataDir)
-	api.RegisterStatusRoutes(mux, sessions, terminalMgr, llamaManager, mlxManager, startTime)
+	api.RegisterStatusRoutes(mux, llamaManager, mlxManager, startTime)
 	api.RegisterDetailedStatusRoutes(mux, api.DetailedStatusDeps{
-		Sessions:  sessions,
-		Terminals: terminalMgr,
-		WSHub:     wsHub,
 		Managers:  managers,
 		Registry:  proxyRegistry,
 		Virtual:   cfg.Virtual,
 		Router:    relayRouter,
 		StartTime: startTime,
 	})
-	mux.HandleFunc("/ws", wsHub.HandleUpgrade)
 
 	// Build the handler chain. recoverMiddleware sits closest to the mux so it
 	// catches panics from real handlers regardless of which front is used.
 	//
 	// The Unix socket and the --http-port TCP front deliberately do NOT
 	// share one handler value: the socket carries relay's manifest bridging
-	// and the permission hook's callback (both machine clients, never a
-	// browser), so it keeps an auth layer in front and serves the full
-	// route table. The permission hook authenticates with a per-session
-	// token, not the internal bearer every other caller on this socket
-	// uses — see HookScopedBearerAuth's doc comment for the one route that
-	// exception applies to. The TCP front carries no bearer token at all —
-	// reachability there is still gated by --http-bind, the same posture
-	// --router-port has always had — but on top of that it is wrapped in
-	// api.TCPDiagnosticsOnly, which serves only the read-only /status
-	// dashboard and 404s everything else (every mutating route, /ws,
-	// terminal/session content). Anyone who can reach the TCP port can no
-	// longer create a terminal, drive a session, or open a WebSocket — only
-	// the authenticated socket can. See TCPDiagnosticsOnly's doc comment.
+	// (a machine client, never a browser), so it keeps an auth layer in
+	// front and serves the full route table. The TCP front carries no
+	// bearer token at all — reachability there is still gated by
+	// --http-bind, the same posture --router-port has always had — but on
+	// top of that it is wrapped in api.TCPDiagnosticsOnly, which serves only
+	// the read-only /status dashboard and 404s everything else. See
+	// TCPDiagnosticsOnly's doc comment.
 	recovered := api.RecoverMiddleware(mux)
-	socketHandler := api.HookScopedBearerAuth(*internalToken, perms.ValidateHookToken, recovered)
+	socketHandler := api.BearerAuth(*internalToken, recovered)
 	tcpHandler := api.TCPDiagnosticsOnly(recovered)
 
 	server := &http.Server{Handler: socketHandler}
@@ -425,7 +304,7 @@ func Main() {
 	// skip RegisterModelHost just because RegisterManifest failed.
 	go registerWithRelay(*dataDir, *socketPath, *internalToken, resolvedRouterSocketPath, os.Exit)
 
-	// Graceful shutdown: drain HTTP requests, then clean up providers and terminals.
+	// Graceful shutdown: drain HTTP requests, then stop managed model servers.
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -454,7 +333,6 @@ func Main() {
 	// Server stopped — clean up background resources. Managers stop in
 	// parallel so shutdown is bounded by one SIGTERM grace period, not one
 	// per manager.
-	sessions.StopAll()
 	if relayRouter != nil {
 		relayRouter.Close()
 	}
@@ -467,7 +345,6 @@ func Main() {
 		}()
 	}
 	wg.Wait()
-	terminalMgr.StopAll()
 	slog.Info("shutdown complete")
 }
 

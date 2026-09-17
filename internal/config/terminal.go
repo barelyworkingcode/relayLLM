@@ -7,10 +7,11 @@ package config
 // In-memory copies returned by Get/List have both populated for consumers.
 //
 // Relay-managed fields (UseRelayToken, EnvPassthrough) opt the template into
-// spawn-time resolution via relay's bridge ResolvePtyEnv. Args may reference
+// spawn-time env resolution against relay's bridge. Args may reference
 // ${PROJECT_PATH} and ${RELAY_TOKEN}; the skills directory is the convention
 // ${PROJECT_PATH}/.claude/skills (relay generates and manages the SKILL.md
-// files there). See terminal_session.go:Start for the substitution rules.
+// files there). relayLLM itself does not spawn terminals — this shape is
+// retained only as settings.json's on-disk/editable format.
 type TerminalTemplate struct {
 	ID          string            `json:"id,omitempty"`
 	Name        string            `json:"name"`

@@ -3,8 +3,6 @@ package api
 import (
 	"net/http"
 	"relayllm/internal/servermanager"
-	"relayllm/internal/session"
-	"relayllm/internal/terminal"
 	"time"
 )
 
@@ -14,8 +12,6 @@ import (
 // chain from main.go.
 func RegisterStatusRoutes(
 	mux *http.ServeMux,
-	sessions *session.SessionManager,
-	terminals *terminal.TerminalManager,
 	llama *servermanager.ServerManager,
 	mlx *servermanager.ServerManager,
 	startTime time.Time,
@@ -39,11 +35,9 @@ func RegisterStatusRoutes(
 		}
 		writeJSON(w, 200, map[string]interface{}{
 			"uptimeSeconds": int64(time.Since(startTime).Seconds()),
-			"sessions":      len(sessions.ListSessions()),
 			"instances":     instances,
 			"mlxInstances":  mlxInstances,
 			"budgets":       budgets,
-			"terminals":     terminals.ListSummary(),
 		})
 	})
 

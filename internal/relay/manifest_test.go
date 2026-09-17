@@ -29,23 +29,15 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 	dataDir := t.TempDir()
 	m := relay.BuildManifest(dataDir)
 
-	// Routes the relay dispatcher must know about. Adding a route is a
-	// protocol change — break this test deliberately when adding one.
+	// Routes the relay dispatcher must know about. relayLLM only hosts
+	// models — session/terminal/permission/generated/ws routes are
+	// relay-sessions' territory. Adding a route is a protocol change —
+	// break this test deliberately when adding one.
 	wantRoutes := []string{
-		"/api/sessions",
-		"/api/sessions/",
-		"/api/models",
-		"/api/terminals",
-		"/api/terminals/",
-		"/api/terminal/",
-		"/api/permission",
-		"/api/generated/",
 		"/api/status",
 		"/api/status/detailed",
-		"/status",
 		"/api/llama/",
 		"/api/mlx/",
-		"/ws",
 	}
 	if len(m.Routes) != len(wantRoutes) {
 		t.Fatalf("route count: got %d, want %d (%v)", len(m.Routes), len(wantRoutes), m.Routes)
@@ -90,10 +82,6 @@ func TestManifest_BuildManifest_HasExpectedRoutes(t *testing.T) {
 		"stop-mlx": {
 			ID: "stop-mlx", Label: "Stop", Method: "DELETE",
 			PathTemplate: "/api/mlx/instances/{alias}", ForEach: "mlxInstances",
-		},
-		"stop-terminal": {
-			ID: "stop-terminal", Label: "Kill", Method: "DELETE",
-			PathTemplate: "/api/terminals/{id}", ForEach: "terminals",
 		},
 	}
 	if len(m.Actions) != len(wantActions) {
