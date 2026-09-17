@@ -12,7 +12,6 @@ For *why* a non-obvious architectural choice was made, check the comment at the 
 
 | Priority | Item | Rough size | Notes |
 |----------|------|-----------|-------|
-| Low | `internal/provider/claude.go` permission/hook integration tests | medium | Hook subprocess + permission flow (the *runtime* half — argv/env assembly is already hermetic, see `buildClaudeArgs`'s doc comment). Requires the installable hook binary (`cmd/hook/`); defer until next time the hook path is touched. |
 | Low | `internal/config/config.go` unified-loader fallback chain | small | settings.json → legacy json → env (`LoadConfig` / `parseUnifiedConfig`, table-tested in `internal/config/config_test.go`). Precedence + `~` expansion coverage exists; revisit if the merge logic changes. |
 
 ## Open — production debt
@@ -20,7 +19,6 @@ For *why* a non-obvious architectural choice was made, check the comment at the 
 | Priority | Item | Rough size | Notes |
 |----------|------|-----------|-------|
 | Low | Relay-router `GET /models/sse` not implemented | small | llama.cpp router mode streams load/download progress here. pi's client swallows the failure and falls back to polling `/models`, so the only loss is progress UI during a load. Needs a pub/sub from `ServerManager` state changes. |
-| Medium | Relay-router `/v1/models` omits Ollama | small | The router lists managed aliases + OpenAI endpoints only; `/api/models` is the complete list. Ollama is an HTTP upstream like the rest and would slot in. Claude/pi can't be proxied OpenAI-style. |
 | Low | Compute-buffer term in the memory estimate is a flat headroom % | small | Real cost scales with `ubatch-size` and the graph's widest node. If the 10% default proves wrong at ubatch 4096, measure a few models and fit something better. |
 | Low | `ServerManager.StopAll` on test cleanup may terminate orphan llama-server / mlx-serve | small | Edge case. Detect by PID provenance if it becomes a real annoyance. |
 | Low | mlx-serve vision models: per-model attachment capability | small | `mmproj` detection (`internal/servermanager/server_manager.go` `ListModels`) is llama-specific; mlx configs have no equivalent flag yet. Revisit when a multimodal MLX model is configured. |
@@ -42,7 +40,6 @@ For *why* a non-obvious architectural choice was made, check the comment at the 
 | Eve + relay + relayLLM + mock-LLM end-to-end integration tier | platform | No system-level confidence today. Either nightly on a dev box or stays manual. |
 | Single trace-id from Eve → relay → relayLLM → MCP | platform | Today debugging means tailing 5+ log files. Big observability win. |
 | Pre-commit hook pattern in `../relay`, `../eve`, `../relayScheduler` | each repo | Apply the `.githooks/pre-commit` pattern landed here. Without it, sibling suites drift. |
-| Relay pushes project tokens per launch; terminals and agent sessions move to a separate low-privilege host | relay + relayLLM | Today relayLLM pulls each child's project token with `ResolvePtyEnv` (its `projects` capability), so relayLLM can obtain any project's token. Relay pushing the token per launch removes that capability; running terminals/agent sessions in a separate low-privilege host keeps them out of the process that holds relayLLM's identity. |
 | Relay supervises service restarts | relay | The launch secret is single-use, so a crashed relayLLM cannot restart itself into a working bridge identity — only a fresh relay launch can. Relay must own restart-on-exit. |
 
 ## Closed (recent — for context)

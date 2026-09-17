@@ -10,16 +10,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"relayllm/internal/config"
 	"relayllm/internal/peertoken"
-	"relayllm/internal/types"
 )
 
-// Minimal client for relay's bridge Unix socket. Used to resolve a
-// project's runtime env (token, working dir, host) at spawn time and to
-// register the manifest. Requests carry no token: relay authenticates them by
-// the peer audit token it bound at Hello (launch.go). The wire format mirrors
-// relay/bridge — newline-delimited JSON, one request, one response.
+// Minimal client for relay's bridge Unix socket. Used to register the
+// manifest and to register router.sock as relay's model-broker upstream
+// (C9). Requests carry no token: relay authenticates them by the peer audit
+// token it bound at Hello (launch.go). The wire format mirrors relay/bridge
+// — newline-delimited JSON, one request, one response.
 
 const (
 	relayBridgeSocketName = "relay.sock"
@@ -46,9 +44,7 @@ const (
 
 	// Bridge request/response type values. Must stay in sync with
 	// relay/bridge/types.go.
-	ReqResolvePtyEnv          = "ResolvePtyEnv"
-	ReqResolveProjectTemplate = "ResolveProjectTemplate"
-	ReqRegisterManifest       = "RegisterManifest"
+	ReqRegisterManifest = "RegisterManifest"
 
 	// ReqRegisterModelHost registers this process's router.sock as the model
 	// endpoint's upstream (C9, ../relay/docs/model-endpoint.md). Tokenless,
@@ -56,10 +52,8 @@ const (
 	// identity Hello bound and requires the model_host capability.
 	ReqRegisterModelHost = "RegisterModelHost"
 
-	RespError           = "Error"
-	RespPtyEnv          = "PtyEnv"
-	RespProjectTemplate = "ProjectTemplate"
-	RespOK              = "OK"
+	RespError = "Error"
+	RespOK    = "OK"
 )
 
 // RegisterModelHostRequest mirrors relay/bridge.RegisterModelHostRequest.
@@ -71,44 +65,6 @@ const (
 type RegisterModelHostRequest struct {
 	ServiceID    string `json:"service_id"`
 	RouterSocket string `json:"router_socket"`
-}
-
-// RelayPtyEnvRequest mirrors relay/bridge.PtyEnvRequest. Kept inline to
-// avoid a cross-repo Go module dependency. ProjectID is the authoritative
-// resolution key; relay validates Directory is within the project's path.
-// The call resolves a project-scoped token + working dir; skill generation is
-// owned by relay and is not driven from here.
-type RelayPtyEnvRequest struct {
-	ProjectID string `json:"project_id,omitempty"`
-	Project   string `json:"project,omitempty"`
-	Directory string `json:"directory,omitempty"`
-}
-
-// RelayPtyEnvResponse mirrors relay/bridge.PtyEnvResponse.
-type RelayPtyEnvResponse struct {
-	RelayToken string          `json:"relay_token"`
-	WorkingDir string          `json:"working_dir"`
-	Host       *types.HostSpec `json:"host,omitempty"`
-}
-
-// RelayProjectTemplateRequest mirrors relay/bridge.ShellTemplateRequest. Kept
-// inline to avoid a cross-repo Go module dependency. Resolves a project-scoped
-// shell (terminal) launch template definition by (ProjectID, TemplateID).
-type RelayProjectTemplateRequest struct {
-	ProjectID  string `json:"project_id"`
-	TemplateID string `json:"template_id"`
-}
-
-// RelayProjectTemplateResponse mirrors relay/bridge.ShellTemplateResponse. It
-// carries only the template definition — never a token.
-type RelayProjectTemplateResponse struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Icon        string            `json:"icon,omitempty"`
 }
 
 // BridgeRequest is the on-wire request envelope.
@@ -228,62 +184,6 @@ func helloRoundTrip(sockPath string, req BridgeRequest) (BridgeResponse, peertok
 	defer conn.Close()
 	resp, err := sendAndReceive(conn, req)
 	return resp, tok, err
-}
-
-// ResolvePtyEnv calls relay's bridge ResolvePtyEnv. Returns an error
-// if this process was not launched by relay, relay is not reachable, or the
-// project cannot be resolved.
-func ResolvePtyEnv(req RelayPtyEnvRequest) (RelayPtyEnvResponse, error) {
-	args, err := json.Marshal(req)
-	if err != nil {
-		return RelayPtyEnvResponse{}, fmt.Errorf("marshal request: %w", err)
-	}
-	resp, err := SendBridgeRequest(ReqResolvePtyEnv, args)
-	if err != nil {
-		return RelayPtyEnvResponse{}, err
-	}
-	if resp.Type != RespPtyEnv {
-		return RelayPtyEnvResponse{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
-	}
-	var out RelayPtyEnvResponse
-	if err := json.Unmarshal(resp.Data, &out); err != nil {
-		return RelayPtyEnvResponse{}, fmt.Errorf("parse PtyEnv data: %w", err)
-	}
-	return out, nil
-}
-
-// ResolveProjectTemplate calls relay's bridge ResolveProjectTemplate to
-// fetch a project-scoped shell template definition by (projectID, templateID),
-// mapping the response into a config.TerminalTemplate so the existing launch path is
-// unchanged. Returns an error if this process was not launched by relay, relay
-// is not reachable, or the project/template cannot be resolved — the caller fails closed
-// and never spawns a guessed command. The response carries no token; the
-// project token is injected separately by the existing ResolvePtyEnv path.
-func ResolveProjectTemplate(projectID, templateID string) (config.TerminalTemplate, error) {
-	args, err := json.Marshal(RelayProjectTemplateRequest{ProjectID: projectID, TemplateID: templateID})
-	if err != nil {
-		return config.TerminalTemplate{}, fmt.Errorf("marshal request: %w", err)
-	}
-	resp, err := SendBridgeRequest(ReqResolveProjectTemplate, args)
-	if err != nil {
-		return config.TerminalTemplate{}, err
-	}
-	if resp.Type != RespProjectTemplate {
-		return config.TerminalTemplate{}, fmt.Errorf("unexpected relay response type: %s", resp.Type)
-	}
-	var out RelayProjectTemplateResponse
-	if err := json.Unmarshal(resp.Data, &out); err != nil {
-		return config.TerminalTemplate{}, fmt.Errorf("parse ProjectTemplate data: %w", err)
-	}
-	return config.TerminalTemplate{
-		ID:          out.ID,
-		Name:        out.Name,
-		Command:     out.Command,
-		Args:        out.Args,
-		Env:         out.Env,
-		Description: out.Description,
-		Icon:        out.Icon,
-	}, nil
 }
 
 // RegisterModelHost registers routerSocketPath as the model endpoint's

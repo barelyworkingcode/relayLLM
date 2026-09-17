@@ -2,8 +2,7 @@ package testutil
 
 // FakeBridge — minimal Unix-socket implementation of relay's bridge wire
 // protocol, for tests of anything that dials relay's bridge socket
-// (launch Hello, PTY env resolution, manifest registration, host-project
-// template resolution).
+// (launch Hello, manifest registration, model-host registration).
 
 import (
 	"bufio"
@@ -16,7 +15,6 @@ import (
 	"testing"
 
 	"relayllm/internal/relay"
-	"relayllm/internal/types"
 )
 
 // FakeBridge accepts newline-delimited JSON requests on a Unix socket,
@@ -103,16 +101,6 @@ func (b *FakeBridge) SetHelloResponse(resp relay.BridgeResponse) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.helloResponse = &resp
-}
-
-// SetHostPtyEnv scripts a ResolvePtyEnv response carrying a host, letting a
-// test simulate a project that lives on an SSH host instead of the console.
-func (b *FakeBridge) SetHostPtyEnv(workingDir string, host *types.HostSpec) {
-	data, err := json.Marshal(relay.RelayPtyEnvResponse{WorkingDir: workingDir, Host: host})
-	if err != nil {
-		panic(err) // test-only helper; a marshal failure here is a test bug
-	}
-	b.SetResponse(relay.BridgeResponse{Type: relay.RespPtyEnv, Data: data})
 }
 
 // Requests returns a snapshot of every non-Hello request the bridge received.

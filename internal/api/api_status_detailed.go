@@ -9,11 +9,10 @@ package api
 // carry a much richer shape.
 //
 // buildDetailedStatus takes each subsystem's own snapshot independently and
-// in no particular order (ProxyMetrics.Snapshot, WSHub.SnapshotConnections,
-// ProxyRegistry.Snapshot, ServerManager.ListInstances/ModelCatalog/Budget,
-// TerminalManager.ListSummary, and a direct read of SessionManager's session
-// map under its own lock) — it never holds two subsystems' locks at once,
-// since every call here is a "snapshot()-shaped, returns a copy" call.
+// in no particular order (ProxyMetrics.Snapshot, ProxyRegistry.Snapshot,
+// ServerManager.ListInstances/ModelCatalog/Budget) — it never holds two
+// subsystems' locks at once, since every call here is a "snapshot()-shaped,
+// returns a copy" call.
 
 import (
 	"context"
@@ -24,8 +23,6 @@ import (
 	"relayllm/internal/registry"
 	"relayllm/internal/router"
 	"relayllm/internal/servermanager"
-	"relayllm/internal/session"
-	"relayllm/internal/terminal"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,10 +40,10 @@ var statusAssets embed.FS
 var statusFileServer = http.FileServerFS(statusAssets)
 
 // DetailedStatusDeps are the subsystems GET /api/status/detailed aggregates.
-// Every field except Sessions is nil-safe to omit: a nil Router yields
-// overview.router.enabled == false and an empty proxy-connections/virtual
-// section; a nil Registry yields an empty endpoints array; nil Managers,
-// Virtual, and Terminals behave the same way. Clock nil -> DefaultClock.
+// Every field is nil-safe to omit: a nil Router yields overview.router.enabled
+// == false and an empty proxy-connections/virtual section; a nil Registry
+// yields an empty endpoints array; nil Managers and Virtual behave the same
+// way. Clock nil -> DefaultClock.
 //
 // Router is non-nil, with router.enabled == true, whenever relay launched
 // this process (C9) even with --router-port unset: router.sock (C9) needs a
@@ -55,9 +52,6 @@ var statusFileServer = http.FileServerFS(statusAssets)
 // "TCP is bound", since a socket-only router reports enabled: true with an
 // empty addr/addrs.
 type DetailedStatusDeps struct {
-	Sessions  *session.SessionManager
-	Terminals *terminal.TerminalManager
-	WSHub     *WSHub
 	Managers  []*servermanager.ServerManager // dispatch priority order: llama, then mlx
 	Registry  *registry.ProxyRegistry        // may be nil
 	Virtual   *config.VirtualLLMConfig
@@ -71,9 +65,11 @@ type DetailedStatusDeps struct {
 // assets) onto the main mux. Deliberately NOT the relay-router's TCP
 // listener (see J8 in backend.md's design notes): that listener is
 // unauthenticated by design (a local OpenAI-compatible endpoint), and this
-// page exposes session directories, model config, and endpoint names. The
-// main mux sits behind bearerAuth, so /status reached from a browser goes
-// through relay's front door, which supplies the token.
+// page exposes model config and endpoint names. The main mux sits behind
+// bearerAuth on the Unix socket; a browser reaches /status only through the
+// optional --http-port TCP front (see main_http_listener_test.go), which
+// carries no bearer requirement of its own and is gated purely by which
+// --http-bind addresses are actually bound.
 func RegisterDetailedStatusRoutes(mux *http.ServeMux, deps DetailedStatusDeps) {
 	mux.HandleFunc("GET /api/status/detailed", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -119,17 +115,6 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 
 	proxyInfos, proxyAgg, recentReqs := deps.Router.Metrics().Snapshot()
 
-	wsConns := []WSConnInfo{}
-	if deps.WSHub != nil {
-		wsConns = deps.WSHub.SnapshotConnections()
-	}
-	viewersBySession := make(map[string]int)
-	for _, wc := range wsConns {
-		for _, sid := range wc.Sessions {
-			viewersBySession[sid]++
-		}
-	}
-
 	// Bucket each in-flight proxy connection by what it's actually hitting —
 	// one pass, shared by models.instances/virtual/endpoints' activeRequests
 	// fields below. Keys mirror exactly what routeManaged/routeOpenAI/
@@ -166,17 +151,6 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 		budgets = append(budgets, mgr.Budget())
 	}
 
-	terminals := []terminal.TerminalSummary{}
-	if deps.Terminals != nil {
-		terminals = deps.Terminals.ListSummary()
-	}
-
-	chatRows, sessionsProcessing := detailedSessionRows(deps.Sessions, viewersBySession, now)
-	totalSessions := 0
-	if deps.Sessions != nil {
-		totalSessions = len(deps.Sessions.ListSessions())
-	}
-
 	managedRunning := 0
 	for _, inst := range instances {
 		if !inst.Exited {
@@ -207,14 +181,10 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 	// broker over the socket.
 	routerTCPEnabled := routerAddr != "" || len(routerAddrs) > 0
 
-	connections := make([]map[string]any, 0, len(proxyInfos)+len(wsConns)+len(chatRows))
+	connections := make([]map[string]any, 0, len(proxyInfos))
 	for _, info := range proxyInfos {
 		connections = append(connections, detailedProxyRow(info))
 	}
-	for _, wc := range wsConns {
-		connections = append(connections, detailedWSRow(wc))
-	}
-	connections = append(connections, chatRows...)
 
 	recentOut := make([]map[string]any, 0, len(recentReqs))
 	for _, rr := range recentReqs {
@@ -228,15 +198,11 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 		"generatedAt":   now.UTC().Format(time.RFC3339),
 		"uptimeSeconds": int64(now.Sub(deps.StartTime).Seconds()),
 		"overview": map[string]any{
-			"sessions":             totalSessions,
-			"sessionsProcessing":   sessionsProcessing,
-			"terminals":            len(terminals),
-			"websocketConnections": len(wsConns),
-			"proxyConnections":     proxyAgg.ActiveCount,
-			"proxyStalled":         proxyAgg.StalledCount,
-			"managedInstances":     managedRunning,
-			"endpointsOnline":      endpointsOnline,
-			"endpointsConfigured":  len(epStatuses),
+			"proxyConnections":    proxyAgg.ActiveCount,
+			"proxyStalled":        proxyAgg.StalledCount,
+			"managedInstances":    managedRunning,
+			"endpointsOnline":     endpointsOnline,
+			"endpointsConfigured": len(epStatuses),
 			"router": map[string]any{
 				"enabled": deps.Router != nil,
 				"tcp":     routerTCPEnabled,
@@ -262,8 +228,7 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 			"virtual":   virtualRows,
 			"endpoints": endpointRows,
 		},
-		"budgets":   budgets,
-		"terminals": terminals,
+		"budgets": budgets,
 	}
 }
 
@@ -305,33 +270,6 @@ func detailedProxyRow(info router.ProxyConnInfo) map[string]any {
 	return row
 }
 
-func detailedWSRow(info WSConnInfo) map[string]any {
-	sessions := info.Sessions
-	if sessions == nil {
-		sessions = []string{}
-	}
-	terminals := info.Terminals
-	if terminals == nil {
-		terminals = []string{}
-	}
-	return map[string]any{
-		"kind":                 "ws",
-		"id":                   strconv.FormatUint(info.ID, 10),
-		"state":                info.State,
-		"remoteAddr":           info.RemoteAddr,
-		"startedAt":            info.ConnectedAt,
-		"lastByteAt":           info.LastActivityAt,
-		"ageSeconds":           info.AgeSeconds,
-		"sinceLastByteSeconds": info.IdleSeconds,
-		"bytesIn":              info.BytesIn,
-		"bytesOut":             info.BytesOut,
-		"messagesIn":           info.MessagesIn,
-		"messagesOut":          info.MessagesOut,
-		"sessions":             sessions,
-		"terminals":            terminals,
-	}
-}
-
 func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
 	return map[string]any{
 		"id":         strconv.FormatUint(rr.ID, 10),
@@ -347,89 +285,6 @@ func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
 		"bytesOut":   rr.BytesOut,
 		"finishedAt": rr.FinishedAt.UTC().Format(time.RFC3339),
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Sessions ("chat" rows). Reads SessionManager's live session map directly
-// (same package) rather than through ListSessions(), which returns a
-// display-oriented map missing providerType/stats/processing — the fields
-// this dashboard needs. Locking mirrors ListSessions()'s own convention
-// exactly: SnapshotSessions for the map, then each session's own mu for its
-// mutable fields, never both at once.
-// ---------------------------------------------------------------------------
-
-func detailedSessionRows(sessions *session.SessionManager, viewersBySession map[string]int, now time.Time) (rows []map[string]any, processingCount int) {
-	if sessions == nil {
-		return []map[string]any{}, 0
-	}
-
-	list := sessions.SnapshotSessions()
-
-	rows = make([]map[string]any, 0, len(list))
-	for _, s := range list {
-		provider := s.Provider()
-		processing := s.IsProcessing()
-
-		s.Lock()
-		id := s.ID
-		name := s.Name
-		projectID := s.ProjectID
-		model := s.Model
-		providerType := s.ProviderType
-		directory := s.Directory
-		createdAt := s.CreatedAt
-		messageCount := len(s.Messages)
-		lastMsgAt := session.LastMessageAt(s.Messages)
-		stats := s.Stats
-		s.Unlock()
-
-		state := router.ConnStateIdle
-		if processing {
-			state = router.ConnStateActive
-			processingCount++
-		}
-
-		row := map[string]any{
-			"kind":         "chat",
-			"id":           id,
-			"state":        state,
-			"name":         name,
-			"projectId":    projectID,
-			"model":        model,
-			"providerType": providerType,
-			"directory":    directory,
-			"active":       provider != nil && provider.Alive(),
-			"startedAt":    createdAt,
-			"ageSeconds":   secondsSinceRFC3339(createdAt, now),
-			"messageCount": messageCount,
-			"viewers":      viewersBySession[id],
-			"stats":        stats,
-		}
-		if lastMsgAt != "" {
-			row["lastByteAt"] = lastMsgAt
-			row["sinceLastByteSeconds"] = secondsSinceRFC3339(lastMsgAt, now)
-		}
-		rows = append(rows, row)
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i]["id"].(string) < rows[j]["id"].(string) })
-	return rows, processingCount
-}
-
-// secondsSinceRFC3339 parses an RFC3339 timestamp (the format every
-// timestamp in this codebase is stored in) and returns whole seconds elapsed
-// since it, floored at 0. An unparseable or empty timestamp reads as 0
-// rather than propagating an error into a diagnostic page that must never
-// itself fail to render.
-func secondsSinceRFC3339(s string, now time.Time) int {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return 0
-	}
-	d := now.Sub(t)
-	if d < 0 {
-		return 0
-	}
-	return int(d.Seconds())
 }
 
 // ---------------------------------------------------------------------------

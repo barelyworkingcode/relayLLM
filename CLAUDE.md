@@ -1,8 +1,11 @@
 # relayLLM (Go)
 
-Standalone LLM engine service. Manages providers (Claude CLI, pi.dev CLI, Ollama HTTP, OpenAI-compatible HTTP, llama.cpp + MLX managed processes), sessions, projects, permissions, and terminal sessions (PTY). Runs independently or as a relay-enhanced service.
+Standalone model-hosting engine. Manages llama.cpp + MLX managed processes
+and fronts them, configured OpenAI-compatible endpoints, and virtual models
+behind one OpenAI-compatible router, plus a small read-only status API. Runs
+independently or as a relay-enhanced service.
 
-Under relay, relayLLM registers a [service manifest](../relay/docs/service-manifest.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, or any sibling service — it stays focused on session/provider execution.
+Under relay, relayLLM registers a [service manifest](../relay/docs/service-manifest.md) describing the routes it serves; relay's front-door dispatcher forwards matching traffic. relayLLM does not know about projects, tasks, sessions, or any sibling service — it stays focused on model hosting.
 
 ## For open-ended / lead-developer requests
 
@@ -20,48 +23,29 @@ Propose a plan before executing. For specific tasks ("fix this bug", "add X"), d
 Standalone service binary, so almost everything lives under `internal/`
 (not meant to be imported by another module) with a thin `cmd/relayllm`
 entry point. Package boundaries follow a dependency DAG from leaves
-(`types`, `clock`, `config`, `events`, ...) up through `provider` ->
-`session`/`terminal`/`router` -> `api` -> `app`; `internal/testutil` holds
-the fakes every other package's tests import.
+(`types`, `clock`, `config`, `peertoken`, ...) up through `servermanager`/
+`registry`/`router` -> `api` -> `app`; `internal/testutil` holds the fakes
+every other package's tests import.
 
 ```
-cmd/relayllm/main.go              Entry point: six lines, calls app.Main()
-cmd/hook/                         Compiled PreToolUse hook binary (separate module)
+cmd/relayllm/main.go              Entry point: dispatches `router-key` subcommand, else calls app.Main()
 
 internal/app/app.go               Flag parsing, server wiring, manifest registration, startup
                                    validation (warnAliasShadowing, warnVirtualModelConfig,
                                    warnAnthropicModelMap), graceful shutdown
 internal/app/model_host.go        C9 router.sock/RegisterModelHost wiring, factored out of Main
                                    so it's testable without flag.Parse/os.Exit
-internal/api/                     HTTP routes, WS hub, status dashboard
-  api.go                            Session/terminal/permission/model/generated-image routes
+internal/app/router_key_cmd.go    `relayllm router-key add/list/revoke` — C10's offline CLI for
+                                   {dataDir}/router_keys.json
+internal/api/                     HTTP routes + status dashboard (the surviving surface)
+  api.go                            writeJSON, RecoverMiddleware
   api_status.go                     GET /api/status, GET+DELETE /api/llama/instances[/{alias}],
                                      GET+DELETE /api/mlx/instances[/{alias}]
   api_status_detailed.go            GET /api/status/detailed + embedded GET /status dashboard
-  auth.go                           bearerAuth, GenerateBearerToken
+  auth.go                           BearerAuth, GenerateBearerToken
   tcp_diagnostics.go                TCPDiagnosticsOnly: the read-only allowlist wrapping the
                                      anonymous --http-port front (socket front unaffected)
-  ws.go                             WebSocket server (streaming events to Eve, terminal I/O)
   status/                           Embedded dashboard HTML/CSS/JS (go:embed)
-internal/session/                 Session lifecycle management
-  session.go                        SessionManager: lifecycle, provider wiring, sweep
-  session_store.go                  Session persistence to disk
-  response_collector.go             Headless response accumulation for HTTP clients
-internal/provider/                 All chat providers + shared tool-calling loop
-  chat_base.go                       Base provider: tool-calling loop, MCP + built-in tool dispatch
-  claude.go                          Claude CLI provider (stream-json, persistent process)
-  claude_history.go                  Claude CLI history JSONL read/delete, including over SSH
-  pi.go                              pi.dev CLI provider (--mode rpc, JSONL -> canonical Claude stream-json)
-  pi_models.go                       pi model discovery via `pi --list-models` (cached)
-  ollama.go                          Ollama HTTP provider (NDJSON streaming)
-  openai.go                          OpenAI-compatible HTTP provider (SSE streaming)
-  settings.go                        Per-provider settings schema for Eve UI
-internal/pioverlay/pioverlay.go   Per-project .pi/ overlay (models.json, settings.json, auth.json symlink)
-internal/terminal/                 PTY-backed terminal sessions
-  terminal_template.go               Terminal template types + store in settings.json's pty map
-  terminal_session.go                Terminal session with PTY management (creack/pty)
-  terminal_manager.go                Terminal CRUD + lifecycle management
-  terminal_log.go                    On-disk head/tail log files for PTY replay after eviction
 internal/router/                  Unified OpenAI-compatible router
   router.go                          Lifecycle, core dispatch, StartRelayRouter
   router_models.go                   /v1/models catalog + virtual-row building
@@ -74,19 +58,24 @@ internal/router/                  Unified OpenAI-compatible router
   router_passthrough.go              router.passthrough: /<name>/ byte-for-byte proxy, client credential included
   router_socket.go                   router.sock (C9, launched mode): peer-identity admission + the
                                       socket mux (TCP mux minus /api/ and /<name>/ passthroughs)
+  auth.go / keys.go                  C10 standalone router-key auth (request-time check + on-disk store),
+                                      a separate mechanism from router.sock's kernel-peer-token admission
   status_metrics.go                  Proxy connection state machine feeding the status dashboard
 internal/registry/registry.go     Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
 internal/servermanager/           llama.cpp / mlx-serve managed-process lifecycle
   server_manager.go                  Profile-driven managed-server process manager (launch, health check,
                                       port allocation, per-alias stop, instance listing, memory budget +
-                                      leases + idle reaper). One ServerManager per profile:
-                                      llama-server (LlamaProfile) + mlx-serve (MlxProfile)
+                                      leases + idle reaper, and childBaseEnv, the relay-credential strip
+                                      applied to every spawned child's environment). One ServerManager per
+                                      profile: llama-server (LlamaProfile) + mlx-serve (MlxProfile)
   gguf.go                            GGUF metadata-header reader + KV-cache size math (SWA + per-layer GQA)
   server_memory.go                   Per-model resident-memory estimation (GGUF weights+KV, MLX dir+config.json)
 internal/config/config.go         Unified config loader (settings.json -> OpenAI + llama-server + mlx-serve
-                                   configs) + every provider/router/server schema struct
+                                   configs) + every router/server schema struct. Also retains the on-disk
+                                   PiConfig/TerminalTemplate shapes (config.go, terminal.go) settings.json's
+                                   editable format still carries, even though relayLLM spawns neither.
 internal/relay/                   Bridge socket transport + manifest
-  bridge_client.go                   Transport (SendBridgeRequest, tokenless) + PtyEnv resolution +
+  bridge_client.go                   Transport (SendBridgeRequest, tokenless) +
                                       RegisterModelHost/RegisterModelHostOrExit (router.sock upstream).
   launch.go                          Launch identity: RELAY_LAUNCH_FD secret read + Hello (captures
                                       relay's own peer audit token, RelayIdentity()); Launched()
@@ -94,27 +83,24 @@ internal/relay/                   Bridge socket transport + manifest
 internal/peertoken/                Reads a Unix socket peer's kernel audit token (LOCAL_PEERTOKEN),
                                     a leaf package copied from relay's own — used by launch.go (the
                                     Hello dial) and internal/router's router.sock (accepted connections).
-internal/spawn/spawn.go           Shared relay-managed spawn prep (project-token resolution + ${SUB} expansion)
-internal/permission/permission.go Permission request/response tracking
-internal/sshhost/sshhost.go       Vendored RemoteCommand/RemoteShellCommand launcher construction for SSH hosts
-internal/mcp/mcp.go               MCP client manager
-internal/tools/tools.go           Generic in-process tool registry (emit-capable; ships no tools today)
-internal/events/                  Canonical llm_event protocol + WS message vocabulary
-internal/types/                   Shared data types (Session, Provider, Message, ...) with zero
-                                   package dependencies beyond clock/events
+internal/types/model_info.go      ModelInfo — the one shared data type still used across packages
 internal/clock/clock.go           Clock interface + DefaultClock
 internal/netutil/netutil.go       Bind-list parsing + multi-listener helpers
-internal/testutil/                Shared test fakes (FakeClock, FakeProvider, FakeMCPClient, FakeBridge, TLS helpers)
+internal/testutil/                Shared test fakes (FakeClock, FakeBridge, TLS helpers)
 ```
 
-## Providers
+## Backends
 
-- **Claude**: Persistent process. `claude --print --output-format stream-json --input-format stream-json --verbose --model <model>`. Resumes via `--resume <sessionId>`. Headless sessions add `--dangerously-skip-permissions --permission-mode bypassPermissions` and set `RELAY_LLM_HEADLESS=true` env var (hook auto-approves). **On an SSH host** (`session.Host != nil`, see [`../relay/docs/ssh-hosts.md`](../relay/docs/ssh-hosts.md) for the wire contract and cross-repo split): `Start()` execs `buildHostExec`'s argv — relay's `ssh_argv` + `-T --` + `internal/sshhost/sshhost.go`'s `RemoteCommand` launcher wrapping `host.ClaudePath <args>` — instead of a local subprocess; `--permission-prompt-tool stdio` replaces `--mcp-config` (which is never passed on a host) and the child env carries only `RELAY_LLM_SESSION_ID`. Host permission prompts arrive as Claude's own `control_request`/`control_response` stdio protocol (`processLine`'s `"control_request"` case) instead of the hook, resolved through the same `PermissionManager` a `permission_response` from Eve already uses. `ensureHookConfig`, the `<dir>/CLAUDE.md` read, and `resolveClaudePath` are all skipped for a host session; `pi` is refused outright on a host project.
-- **pi (pi.dev coding agent)**: Persistent process spawned as `pi --mode rpc --provider <upstream> --model <id> --session-dir {dataDir}/pi-sessions [--thinking <level>] [--session <piSessionId>]`. Model identifier convention: `pi/<provider>/<modelId>` (e.g. `pi/anthropic/claude-sonnet-4-20250514`). Resume via `--session <piSessionId>` — pi owns its session JSONL under `{dataDir}/pi-sessions/`. No PreToolUse hook: pi runs in its no-permission-popups default and auto-executes tools; `CapabilitiesForProvider("pi")` therefore omits `SupportsPermissions`. Auth (API keys, OAuth tokens) is inherited from the user's environment / `~/.pi/agent/auth.json`. `PI_OFFLINE=1` + `PI_SKIP_VERSION_CHECK=1` are set at spawn to suppress pi's startup network calls. Pi's RPC event stream (`message_update` with `assistantMessageEvent`, `tool_execution_*`, `agent_end`) is canonicalized into the Claude `content_block_start`/`delta`/`stop` + `result` envelope inside `provider_pi.go:translate`, so Eve renders pi sessions with the existing Claude renderer. Mid-session capabilities: `PUT /api/sessions/:id/model` (sends `set_model` RPC), `PUT /api/sessions/:id/thinking-level` (sends `set_thinking_level`). `StopGeneration` uses pi's in-band `abort` RPC instead of process kill, so the subprocess survives stop/resume cycles. Per-session settings: `thinkingLevel` (off/minimal/low/medium/high/xhigh).
-- **Ollama**: HTTP client with NDJSON streaming. Base URL via `--ollama-url` / `OLLAMA_URL` (default `http://localhost:11434`). Sends full conversation history per request; relies on Ollama's automatic KV cache prefix reuse. Per-session settings: `temperature`, `top_p`, `top_k`, `min_p`, `think` (bool), `num_ctx`. Explicitly sends `think: false` to suppress built-in reasoning on thinking models (e.g. Gemma 4). Supports image attachments via base64.
-- **OpenAI-compatible**: HTTP client with SSE streaming. Configured via `settings.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `prefix/model-id` (e.g. `omlx/Qwen3.5-27B`). Supports tool calling.
-- **llama.cpp**: Managed llama-server processes via `ServerManager` (`llamaProfile`). Configured via `settings.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances across sessions. Communicates via OpenAI-compatible API (reuses `OpenAIChatTransport`). Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias` which is the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel. Per-session settings: same as OpenAI (temperature, top_p, top_k, min_p, etc.) — override server-level defaults set in the config.
-- **MLX (mlx-serve)**: Managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes via `ServerManager` (`mlxProfile`) — native Zig + mlx-c, no Python. Same shape as llama.cpp in every way: `settings.json` `mlx-serve` section (identical schema to `llama-server`), model selection `mlx/{alias}`, on-demand launch + `/health` poll + instance reuse, OpenAI transport. Differences: the `model` config key is an **MLX model directory** (e.g. an `mlx-community/*` HF snapshot), the manager always appends `--serve`, base port defaults to 9400, and binary resolution is `--mlx-serve-path` / `MLX_SERVE_PATH` / config `binaryPath` / `mlx-serve` on PATH. Useful per-model flags: `ctx-size`, `temp`, `max-tokens`, `kv-quant`, `reasoning-budget`, `no-vision`. mlx-serve (Zig + mlx-c, zero Python) was chosen over `mlx_lm.server` (needs a pip/uv-managed environment) and SwiftLM (no Homebrew distribution — builds from source and pins a minimum Xcode a beta-OS machine may not satisfy); see the comment above `mlxProfile` in `internal/servermanager/server_manager.go` for the full comparison.
+- **llama.cpp**: Managed llama-server processes via `ServerManager` (`LlamaProfile`). Configured via `settings.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances. Communicates via OpenAI-compatible API. Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias`, the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel.
+- **MLX (mlx-serve)**: Managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes via `ServerManager` (`MlxProfile`) — native Zig + mlx-c, no Python. Same shape as llama.cpp in every way: `settings.json` `mlx-serve` section (identical schema to `llama-server`), model selection `mlx/{alias}`, on-demand launch + `/health` poll + instance reuse, OpenAI transport. Differences: the `model` config key is an **MLX model directory** (e.g. an `mlx-community/*` HF snapshot), the manager always appends `--serve`, base port defaults to 9400, and binary resolution is `--mlx-serve-path` / `MLX_SERVE_PATH` / config `binaryPath` / `mlx-serve` on PATH. Useful per-model flags: `ctx-size`, `temp`, `max-tokens`, `kv-quant`, `reasoning-budget`, `no-vision`. mlx-serve was chosen over `mlx_lm.server` (needs a pip/uv-managed environment) and SwiftLM (no Homebrew distribution — builds from source and pins a minimum Xcode a beta-OS machine may not satisfy); see the comment above `MlxProfile` in `internal/servermanager/server_manager.go` for the full comparison.
+- **OpenAI-compatible**: HTTP client with SSE streaming, configured via `settings.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `endpoint-name/model-id` (e.g. `omlx/Qwen3.5-27B`). Covers LM Studio, Ollama's `/v1`, oMLX, and any other OpenAI-compatible server.
+
+A spawned llama-server/mlx-serve child's environment always goes through
+`childBaseEnv()` (`internal/servermanager/server_manager.go`) instead of
+`os.Environ()` directly — it is a managed subprocess like any other spawn
+path, not a trusted extension of relayLLM itself, so every relay credential
+name is stripped before the child ever sees the environment. This is the
+only `exec.Command` call site left in the repo.
 
 ## Relay-router (`internal/router/router.go`)
 
@@ -126,7 +112,7 @@ Optional unified OpenAI-compatible router (`--router-port` / `RELAY_ROUTER_PORT`
 
 **llama.cpp router-mode compatibility.** Catalog rows carry llama.cpp's extra fields alongside the OpenAI ones — `status: {value: "loaded"|"loading"|"unloaded", failed?, error?}`, `meta.n_ctx` / `meta.n_ctx_train`, `architecture.input_modalities` (`image` when `mmproj` is configured). Endpoint-backed rows carry all three too — a client that reads `architecture.input_modalities` unconditionally would reject a catalog where only managed rows had it. Their modalities come from the upstream's own `architecture.input_modalities` when it declares one (llama.cpp router mode does); plain OpenAI `/v1/models` has no modality field, so a quiet upstream reads as text-only. Vision is never inferred — offering images to a server that cannot take them fails mid-turn, which is worse than not offering. **`loaded` means usable, not resident**: we launch on demand, so any configured alias serves a request immediately. Reporting residency would make models disappear from a client's picker every time the idle reaper ran, because clients filter their model list to `loaded`. `loading` is reported while a launch is genuinely in flight, and `unloaded` + `failed` when an explicit load failed and nothing is running. Real residency lives in `/api/status` `instances` (leases, memory, idle time). Context: `n_ctx` comes from the model's configured `ctx-size`, `n_ctx_train` from the GGUF header (or MLX `config.json`); clients read `n_ctx ?? n_ctx_train`, so an unpinned model still reports a real window. OpenAI-endpoint models get `n_ctx` from whatever the upstream advertises (`max_model_len`, `max_context_length`, `context_length`, `context_window`, or `meta.n_ctx`). Every row with a known context window also carries it as a top-level `context_length`, alongside — not instead of — `meta`. That's not redundant: a client doing plain OpenAI `/v1/models` discovery (LM Studio-, vLLM-, OpenRouter-style — Oh My Pi's `openai-models-list` branch is a confirmed example) never looks inside `meta` at all; it reads a flat field and, finding nothing, quietly substitutes a hardcoded default (128K) instead of erroring. That's the dangerous case: a model actually pinned to, say, 32K reports as 128K-capable, the client builds a request sized for 128K, and the request fails mid-turn against a server that never claimed to support it. `context_length` collapses `n_ctx`/`n_ctx_train` into the single number a correct client would have picked anyway (pinned wins, trained context is the fallback) — the flat field has no room for two numbers the way `meta` does. It is omitted entirely, never `0` or `null`, whenever neither number is known, exactly mirroring `meta`'s omission — a client chaining `?? default` must fall through cleanly, and a literal `0` would read as a real (if absurd) context window rather than "unknown". Endpoint rows follow the identical rule with their own single number: present when the upstream advertised one, omitted when it stayed quiet. This is load-bearing, not decorative: clients written against llama.cpp router mode validate that *every* row has a string `status.value` and reject the entire catalog otherwise. pi ships a hidden built-in `llama.cpp` extension that does exactly this, so the fields are what let pi enumerate our models live instead of from a hand-maintained `models.json` array. The fields are additive, so plain OpenAI clients ignore them. `status.failed` matters too — a client polling for `loaded` after a load spins until its own timeout without it. Not implemented: `GET /models/sse` (progress events; clients fall back to polling) and `POST /models` (Hugging Face download).
 - Everything else — dispatched by reading the request body's `model` field:
-  - If the model matches a configured managed-server alias, `GetOrLaunch()` brings up the right server and the request is reverse-proxied to it (SSE flushed via `FlushInterval: -1`). Managers are checked in priority order — llama first, then mlx — so llama wins alias collisions (logged at startup; shadowed aliases are also dropped from `/v1/models` and the pi overlay).
+  - If the model matches a configured managed-server alias, `GetOrLaunch()` brings up the right server and the request is reverse-proxied to it (SSE flushed via `FlushInterval: -1`). Managers are checked in priority order — llama first, then mlx — so llama wins alias collisions (logged at startup; shadowed aliases are also dropped from `/v1/models`).
   - Otherwise, if the model matches a configured virtual name (`virtual-llms`), the router attempts its ordered candidates — see **Virtual LLM failover** below.
   - Otherwise the model is parsed as `endpoint.Name/upstreamID`; the registry resolves the endpoint, the body's `model` field is rewritten to bare `upstreamID`, the inbound `Authorization` is replaced with the endpoint's API key, and the request is reverse-proxied to the endpoint's baseURL. Bare managed aliases and `endpoint.Name/id` model ids occupy distinct namespaces, so an endpoint name equal to a managed alias collides with nothing; only an alias that itself contains `/` can intercept an endpoint model id (warned at startup).
   - Unknown / not-currently-online models 400.
@@ -205,78 +191,30 @@ Both knobs match against the request's **ORIGINAL** `reasoning_effort` value, ca
 
 **Behavior change, applies to `--router-port` too, not just router.sock**: `newUpstreamProxy` (the reverse proxy shared by every managed-server/endpoint/virtual-model dispatch AND `/v1/audio/transcriptions` — everything except the `/api/` Anthropic passthrough and a `router.passthrough` `/<name>/` route, which still forward the caller's real credential byte-for-byte on purpose) now strips an inbound `X-Api-Key` header and any `X-Relay-*` header before the request reaches the real backend, and strips any `X-Relay-*` header an upstream response tries to add before `X-Relay-Model-Target` is set on the reply. Previously only `Authorization` was stripped/replaced. Nothing in this repo relied on forwarding `X-Api-Key` to a managed server or OpenAI endpoint (each endpoint's own key lives in `settings.json`'s `openai.endpoints[].apiKey` and is set by `newUpstreamProxy` itself), but a standalone `--router-port` client that previously smuggled its own upstream key through that header will need to move it into config instead.
 
-`/v1/models` rows with `owned_by: "anthropic-map"` carry a `"target"` field naming what the key resolves to. `internal/app`'s `registerWithRelay` always attempts `RegisterModelHost` (`internal/relay/bridge_client.go`; tokenless, JSON `service_id`/`router_socket`, an absolute path) when launched, REGARDLESS of whether `RegisterManifest` succeeded — the two are independent relay capabilities, and gating one on the other would silently strand the model broker on a merely transient manifest hiccup; a `RegisterModelHost` refusal itself still calls `os.Exit(78)` (`relay.RegisterModelHostOrExit`): relayLLM must never believe router.sock is relay's registered upstream when relay actually disagrees. `--router-port` continues to work unchanged alongside router.sock in this unit (P1); a later unit closes it in launched mode.
-
-## Built-in Tools
-
-`BuiltinToolRegistry` (`internal/tools/tools.go`) is the generic mechanism for in-process tools that run alongside MCP tools in the `BaseChatProvider` loop (`internal/provider/chat_base.go`) and need an `emit` progress callback MCP tools can't provide. Dispatch order in `runToolLoop()`: built-ins first (`builtinTools.Has()`), then MCP.
-
-It currently **ships no tools**. Image generation is no longer a built-in — it is the `comfyui` MCP tool reached through relay like any other MCP (see relay ADR-006). relayLLM only *serves* the output directory: `GET /api/generated/:filename` returns images that the relay-comfyui MCP wrote to `{dataDir}/generated/`.
+`/v1/models` rows with `owned_by: "anthropic-map"` carry a `"target"` field naming what the key resolves to. `internal/app`'s `registerWithRelay` always attempts `RegisterModelHost` (`internal/relay/bridge_client.go`; tokenless, JSON `service_id`/`router_socket`, an absolute path) when launched, REGARDLESS of whether `RegisterManifest` succeeded — the two are independent relay capabilities, and gating one on the other would silently strand the model broker on a merely transient manifest hiccup; a `RegisterModelHost` refusal itself still calls `os.Exit(78)` (`relay.RegisterModelHostOrExit`): relayLLM must never believe router.sock is relay's registered upstream when relay actually disagrees. A relay-launched relayLLM refuses to start with `--router-port` set at all (C9, `refuseLaunchedRouterPortOrExit`, exit 78) — router.sock is the only path relay reaches model routing through once it has launched this process. `--router-port` remains available for a standalone run.
 
 ## API
 
-Unix socket at `--socket` (defaults to `{data-dir}/relayllm.sock`). WebSocket at `/ws`.
+The authenticated API is a small Unix-socket HTTP surface (`--socket`, defaults to `{data-dir}/relayllm.sock`), bearer-protected by `BearerAuth` (`auth.go`) against `--token`/`RELAY_LLM_TOKEN`. Treat it as a public API for direct (standalone) callers; through relay, the front-door dispatcher reaches it per the registered manifest.
 
-Optionally also on TCP: `--http-port` / `RELAY_LLM_HTTP_PORT` (empty = disabled, the default) bound to `--http-bind` / `RELAY_LLM_HTTP_BIND` (default `127.0.0.1`; comma-separated to bind more than one interface, e.g. `127.0.0.1,192.168.64.1`), with `--http-tls-cert` / `--http-tls-key` optionally available for transport encryption. It carries no bearer token — anonymous, exactly like `--router-port`, protected only by which `--http-bind` addresses actually got bound — so it does **not** get the socket's full route table: `internal/api.TCPDiagnosticsOnly` (`tcp_diagnostics.go`) wraps it in a read-only allowlist (`GET /status`, `/status/status.css`, `/status/status.js`, `/api/status`, `/api/status/detailed`); every other route, including every mutating route and `/ws`, answers a plain 404 there, identical to an unregistered path. The Unix socket's handler is untouched and keeps the full table behind `bearerAuth`. It exists because the `/status` dashboard is a browser page and nothing else reaches it: relay's front door is a Unix socket only Eve dials, and Eve proxies only the specific `/api/*` + `/ws` routes its own code knows about. Each `--http-bind` address binds best-effort (`listenAll` in `internal/app/app.go`): one that can't be bound (e.g. a gateway IP not locally assignable in this deployment) is logged and skipped rather than taking every other bind down with it; only a total failure — every configured address rejected — is fatal.
-
-### HTTP Endpoints
 ```
-GET            /api/models         — list available models (Claude + Ollama + OpenAI endpoints + llama.cpp + MLX)
-GET/POST       /api/sessions       — list/create sessions
-POST           /api/sessions/:id/message — send message (sync, for HTTP clients)
-POST           /api/sessions/:id/stop  — stop generation (mirrors WS stop_generation)
-POST           /api/sessions/:id/delete — end + delete persisted session data
-DELETE         /api/sessions/:id   — end session
-PUT            /api/sessions/:id/model           — pi only: mid-session model switch
-PUT            /api/sessions/:id/thinking-level  — pi only: mid-session reasoning depth
-GET            /api/status         — runtime status (uptime + sessions + terminals + embedded `instances` + `mlxInstances` + `budgets` arrays). Drives relay's Service Inspector via the manifest; rows in `instances` / `mlxInstances` feed the declared `stop-llama` / `stop-mlx` actions' `{alias}` placeholder.
-GET            /api/llama/instances        — list running llama-server instances
-DELETE         /api/llama/instances/{alias} — stop a specific llama-server instance
-GET            /api/mlx/instances          — list running mlx-serve instances
-DELETE         /api/mlx/instances/{alias}  — stop a specific mlx-serve instance
-GET            /api/terminal/templates     — list terminal templates (read-only)
-GET            /api/terminal/templates/:id — get one template
-GET/POST       /api/terminals              — list/create terminal instances (POST accepts extraArgs to append per-task argv)
-DELETE         /api/terminals/:id          — close terminal
-GET            /api/terminals/:id/log      — stitched head+tail of PTY's raw byte stream (works after session eviction)
-POST           /api/permission     — hook binary posts here, held open until user decides
-GET            /api/generated/:filename — serve generated images (ComfyUI output)
+GET            /api/status              — runtime status (uptime + embedded `instances` + `mlxInstances` + `budgets` arrays). Drives relay's Service Inspector via the manifest; rows in `instances` / `mlxInstances` feed the declared `stop-llama` / `stop-mlx` actions' `{alias}` placeholder.
+GET            /api/status/detailed     — full JSON status payload backing the /status dashboard
+GET            /status                  — the embedded status dashboard (+ /status/status.css, /status/status.js)
+GET            /api/llama/instances[/{alias}]        — list / GET one running llama-server instance
+DELETE         /api/llama/instances/{alias}          — stop a specific llama-server instance
+GET            /api/mlx/instances[/{alias}]          — list / GET one running mlx-serve instance
+DELETE         /api/mlx/instances/{alias}            — stop a specific mlx-serve instance
 ```
 
-Project endpoints (`/api/projects/*`) and scheduler/task endpoints (`/api/tasks/*`) live in relay and relayScheduler respectively. Under relay's front-door dispatcher, Eve reaches them through relay directly — relayLLM never proxies foreign services.
+Optionally also on TCP: `--http-port` / `RELAY_LLM_HTTP_PORT` (empty = disabled, the default) bound to `--http-bind` / `RELAY_LLM_HTTP_BIND` (default `127.0.0.1`; comma-separated to bind more than one interface, e.g. `127.0.0.1,192.168.64.1`), with `--http-tls-cert` / `--http-tls-key` optionally available for transport encryption. It carries no bearer token — anonymous, exactly like `--router-port`, protected only by which `--http-bind` addresses actually got bound — so it does **not** get the socket's full route table: `internal/api.TCPDiagnosticsOnly` (`tcp_diagnostics.go`) wraps it in a read-only allowlist (`GET /status`, `/status/status.css`, `/status/status.js`, `/api/status`, `/api/status/detailed`); every other route answers a plain 404 there, identical to an unregistered path. The Unix socket's handler is untouched and keeps the full table behind `BearerAuth`. It exists because the `/status` dashboard is a browser page and the socket is not reachable from one directly. Each `--http-bind` address binds best-effort (`listenAll` in `internal/app/app.go`): one that can't be bound (e.g. a gateway IP not locally assignable in this deployment) is logged and skipped rather than taking every other bind down with it; only a total failure — every configured address rejected — is fatal.
 
-### WebSocket Protocol
-```
-Client → Server: join_session, send_message, end_session, permission_response
-Server → Client: session_joined, llm_event, stats_update, message_complete, permission_request, error
-
-Terminal messages:
-Client → Server: terminal_create, join_terminal, leave_terminal, terminal_input (base64), terminal_resize, terminal_close, terminal_list, terminal_reconnect, terminal_templates
-Server → Client: terminal_created, terminal_joined (with base64 scrollback), terminal_output (base64), terminal_exit, terminal_closed, terminal_list, terminal_templates
-```
-
-The grouped `WSMsg*` constants in `internal/events/ws_messages.go` are the authoritative message
-set (the lists above are the common subset); `llm_event` payloads follow the
-canonical contract in [`docs/event-protocol.md`](docs/event-protocol.md).
-
-## Terminal Sessions
-
-PTY-backed terminal sessions hosted by relayLLM. Eve proxies terminal I/O via WebSocket (base64-encoded). Terminals survive Eve restarts.
-
-- **Templates**: live in the `pty` section of `settings.json` (relay's config editor manages them; the API is read-only). Three protected built-ins: `claude-code`, `opencode`, `shell`. `IdleTimeout` field (minutes, default 1440 = 24h).
-- **Idle timeout**: When all viewers disconnect, an idle timer starts. If no viewer reconnects before it fires, the terminal is auto-closed. Configurable per template.
-- **Color**: PTY spawned with `TERM=xterm-256color` and `COLORTERM=truecolor` for full 24-bit color.
-- **Scrollback**: 100KB in-memory ring buffer per terminal, replayed on reconnect.
-- **On-disk log**: Each session's raw byte stream is also teed to `{dataDir}/terminal_logs/{id}.head.log` (first 64KB) + `{id}.tail.log` (rolling, capped at ~960KB → 1MB total). Files survive the session being evicted from memory. The ANSI-aware "head + tail" split preserves the stream's initial mode-setting (cursor home, SGR resets) so xterm replay renders correctly even when the middle was truncated. Used by `GET /api/terminals/{id}/log`. A daily sweeper deletes files older than 30 days; bounded by a 500MB total cap as a safety net.
-- **SSH hosts**: a terminal whose project resolves to a host (`TerminalManager.Create` → `resolveTerminalHost`) execs `ssh_argv + ["-tt", "--", <remote>]` under the local pty instead of a local command — see [`../relay/docs/ssh-hosts.md`](../relay/docs/ssh-hosts.md) for the wire contract. `Host` is resolved once at create time (never refreshed mid-life, unlike a chat session's). No relay-managed substitution, project token, or pi overlay applies. `terminal_created`/`terminal_joined`/both terminal-list shapes carry a `{id, name}` host chip.
-- **Per-task `extraArgs`**: `POST /api/terminals` accepts `extraArgs []string` that are appended to the template's argv after `${PROJECT_PATH}` / `${RELAY_TOKEN}` substitution. Same substitution applies to extras. Used by relayScheduler to schedule shell-style tasks against a shared template.
+The relay-router's own OpenAI-compatible surface (`/v1/...`, `/models`, `/health`) is a wholly separate listener — see [Relay-router](#relay-router-internalrouterroutergo) above — reached via `--router-port`/`--router-socket`/`--router-bind`, never via `--socket`/`--http-port`.
 
 ## Data
 
 Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Support/relayLLM/`, on Linux `~/.config/relayLLM/`. Override: `--data-dir` or `RELAY_LLM_DATA`.
-- `sessions/` — per-session JSON files. A daily sweeper deletes files where `headless: true` and mtime is older than 7 days; non-headless (Eve-owned) sessions are never touched.
-- `pi-sessions/` — pi.dev session JSONLs (one per pi session, owned by pi via `--session-dir`). Daily sweeper deletes files whose `piSessionId` is no longer referenced by any `sessions/*.json` (with a 1h minAge cushion to avoid racing live pi processes).
-- `settings.json` — unified provider config **and** the `pty` terminal-template map (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
+- `settings.json` — unified provider config (preferred). Falls back to separate `openai_endpoints.json` + `llama_models.json` if absent, then `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars:
   ```json
   {
     "openai": {
@@ -321,18 +259,6 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
         "model": "mlx-community/Qwen3.5-4B-8bit",
         "max-tokens": 8192, "temp": 0.7
       }]
-    },
-    "pi": {
-      "binaryPath": "~/.npm-global/bin/pi",
-      "extraArgs": ["--no-context-files"],
-      "useRelayToken": true,
-      "env_passthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"],
-      "projectOverlay": {
-        "mode": "always",
-        "defaultProvider": "relay-router",
-        "defaultModel": "qwen3-8b",
-        "defaultThinking": "medium"
-      }
     }
   }
   ```
@@ -342,16 +268,14 @@ Default: `os.UserConfigDir()/relayLLM` — on macOS `~/Library/Application Suppo
 
   **Memory budget** (optional, per managed-server section; all default to off so behavior is unchanged until set — see the comment above `fitsLocked` in `internal/servermanager/server_manager.go` for why this is built here rather than delegated to llama.cpp's own router mode): `maxLoaded` caps concurrent instances, `maxMemoryGB` caps the sum of estimated resident memory, `idleTimeoutMinutes` reclaims instances nobody is using. Either cap evicts the least-recently-used *idle* instance; a leased instance (mid-turn) is never evicted — when everything is busy, admission waits up to `admissionTimeoutSeconds` (default 120) and then errors naming the busy aliases. Model sizes are computed, not declared: weights from the file size, KV cache from the GGUF header (`internal/servermanager/gguf.go`) honoring sliding-window attention and per-layer GQA, plus `memoryHeadroomPercent` (default 10) for compute buffers. Per-model `memoryGB` overrides the estimate; a model whose size can't be determined counts against `maxLoaded` but not `maxMemoryGB`. Current usage is reported in `/api/status` under `budgets`, and per-instance `leases` / `estimatedGB` / `idleSeconds` in `instances`.
 
-  Each llama-server / mlx-serve model key except `alias` (and the budget-only `memoryGB`) maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths (for mlx-serve, `model` is an MLX model *directory*). `--openai-config` flag overrides the `openai` section. The `pi` section is optional: `binaryPath` (supports `~`) takes priority over the well-known fallback chain in `resolvePiPath` (`~/.local/bin/pi`, npm globals, `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`, then `$PATH`); `extraArgs` are appended verbatim to every `pi --mode rpc` spawn (e.g. force-skip context files, add `--extension`). The relay-managed fields mirror the PTY `pidev` template's shape and route through the shared `RelayManagedSpec.Resolve()` helper in `internal/spawn/spawn.go`: `useRelayToken` (or, for terminals, a non-empty `projectID`) injects a project-scoped `RELAY_PROJECT_TOKEN` env var, resolved just-in-time from relay's bridge — a child never holds more than that project token; `env_passthrough` copies the listed env var keys from `os.Environ()` into the spawned pi. Skill *generation* is owned by relay entirely (see relay ADR-004); relayLLM never regenerates SKILL.md. Skills load from the convention `<project>/.claude/skills`: the pi `--mode rpc` provider auto-appends `--skill <project>/.claude/skills` (skipped if `extraArgs` already contains `--skill`), and PTY templates reference `${PROJECT_PATH}/.claude/skills` in their args (e.g. the `pidev` template: `"args": ["--skill", "${PROJECT_PATH}/.claude/skills"]`).
+  Each llama-server / mlx-serve model key except `alias` (and the budget-only `memoryGB`) maps 1:1 to a `--{key}` CLI flag. Value translation: `true` → `--key`, `false` → omit, number → `--key value`, string → `--key value`. Optional `port` per model overrides auto-allocation. `modelDir` (supports `~`) is prepended to relative `model` paths (for mlx-serve, `model` is an MLX model *directory*). `--openai-config` flag overrides the `openai` section.
 
-  **`projectOverlay`** (optional) writes a per-project `<projectDir>/.pi/` directory before each pi spawn (both `--mode rpc` and PTY `pi` templates) and sets `PI_CODING_AGENT_DIR` so pi reads from it. Pi's global `~/.pi/agent/` is never written to. Materialized files: `models.json` containing a single `relay-router` provider pointing at the `--router-port` listener, with its `models` array snapshotted from the router's currently-routable set at spawn time — managed-server aliases (bare, llama + mlx) plus every reachable OpenAI endpoint model (prefixed `endpoint.Name/`). Each row carries `input: ["text"]` or `["text","image"]`: pi's `openai-completions` provider does no discovery, and it gates image attachments on this array (`model-config.js`), so a vision model written as a bare `{"id": ...}` is one pi refuses to send images to ("Current model does not support images"). Managed aliases get `image` from a configured `mmproj`; endpoint models only when the upstream advertised it. Pi's ModelRegistry treats providers with an empty `models` array as override-only, so the enumeration is required; the snapshot uses `ProxyRegistry.Snapshot()` and inherits its 15 s TTL. Set `--router-port` to enable this entry; otherwise relayLLM contributes nothing to pi's models.json and the user's global providers carry through unchanged. Also writes `settings.json` with `defaultProvider`/`defaultModel`/`defaultThinkingLevel` and a `skills` array (project `.claude/skills/` + `extraSkillDirs`); `auth.json` symlinked to `~/.pi/agent/auth.json` so credentials stay centrally managed (OAuth refresh writes through). Modes: `"never"` (default — feature off), `"always"` (rewrite on every spawn), `"skipIfExists"` (write missing files only). User's global `models.json` providers and `settings.json` keys are merged underneath by default (turn off via `excludeUserProviders`/`excludeUserSettings`). Set `authStrategy: "none"` if pi credentials are managed out-of-band. `gitignore: true` opt-in appends the overlay dir to the project's `.gitignore`. Fails closed at spawn if global `auth.json` is missing while symlink strategy is active — run `pi auth login` once globally first.
-- `generated/` — images written by the relay-comfyui MCP tool (served via `/api/generated/`)
+  `settings.json` also still round-trips a `pty` section (`TerminalTemplate`, `internal/config/terminal.go`) and a `pi` section (`PiConfig`, `internal/config/config.go`): both are on-disk/editable shapes relay-sessions' PTY tooling reads and writes through this same config file, but relayLLM itself does not spawn a terminal or a `pi` process from either — there is no `exec.Command` call site in this repo outside `internal/servermanager`.
 
 ## Build
 
 ```bash
 go build .                          # main binary
-go build ./cmd/hook                 # permission hook binary
 ```
 
 ## Testing
@@ -364,9 +288,9 @@ go test -tags=live ./...            # opt-in: requires Ollama / LM Studio / OMLX
 go test -tags=llm ./...             # opt-in: requires Qwen3.6 MoE 35 in settings.json (see below)
 ```
 
-Default tier covers WS protocol, HTTP API, session lifecycle, tool-call loop, pi event translation, and manifest registration — all driven by fakes in `internal/testutil` / `internal/api/testserver_test.go`. No real LLM, no subprocess, no network.
+Default tier covers the HTTP status API, managed-server lifecycle, relay-router dispatch, and manifest registration — all driven by fakes in `internal/testutil` / `internal/api/testserver_test.go`. No real LLM, no subprocess, no network.
 
-The `llm` tier (`internal/api/provider_llama_live_test.go`) drives the real `LlamaServerManager` against an installed model. **Prerequisite**: `Qwen3.6 MoE 35` registered in `~/Library/Application Support/relayLLM/settings.json` under `llama-server.models` with the model file present at the configured `modelDir`. Skips gracefully if absent. Validates SSE chunking, llama-server lifecycle, and mid-stream stop — the surface fakes can't reach.
+The `llm` tier (`internal/servermanager`'s own live tests) drives the real managed-server lifecycle against an installed model. **Prerequisite**: `Qwen3.6 MoE 35` registered in `~/Library/Application Support/relayLLM/settings.json` under `llama-server.models` with the model file present at the configured `modelDir`. Skips gracefully if absent. Validates SSE chunking, llama-server lifecycle, and mid-stream stop — the surface fakes can't reach.
 
 The `live` tier is for legacy integration tests that depend on third-party services. Kept for manual smoke; never run in default CI.
 
@@ -382,21 +306,19 @@ Runs `go build ./...`, `go vet ./...`, and the hermetic test suite under the rac
 
 ### Adding tests
 
-- Need an HTTP/WS surface to drive? Use `NewTestServer(t, nil)` from `internal/api/testserver_test.go`.
-- Need a scripted LLM stream? `srv.SetFakeProvider()` then `fp.ScriptText(...)` / `fp.ScriptResult(...)`.
+- Need an HTTP surface to drive? Use `NewTestServer(t, nil)` from `internal/api/testserver_test.go`.
 - Need deterministic timing? `NewFakeClock(t0)` + `clock.Advance(d)`. Wire via `TestServerOptions{Clock: ...}`.
-- Need fake tool calls? `NewFakeMCPClient(FakeTool{Name, Handler})`.
 - Need relay bridge features in a test? `NewFakeBridge(t)` + `LaunchViaBridge(t, fb, serviceID)` (real pipe, real Hello). `WithBridgeEnv` sets the env without launching, i.e. standalone.
 
 ## Ecosystem
 
-relayLLM is one of several relay-enhanced services. It serves session/provider operations only — projects live in relay, scheduled tasks live in relayScheduler. Eve reaches every backend through relay's front door.
+relayLLM is one of several relay-enhanced services. It hosts models only — sessions, terminals, and the permission hook live in relay-sessions; projects live in relay; scheduled tasks live in relayScheduler.
 
-- `../relay/` -- macOS tray orchestrator. Hosts the front-door dispatcher that routes inbound traffic per each enhanced service's registered manifest.
-- `../eve/` -- Browser-based LLM frontend. Talks to relay's frontend socket; relay dispatches `/api/sessions`, `/api/terminals`, etc. to relayLLM.
-- `../relayScheduler/` -- Task scheduler. Registers its own manifest with relay; relay dispatches `/api/tasks/*` to it directly (relayLLM does not proxy).
+- `../relay/` -- macOS tray orchestrator. Hosts the front-door dispatcher that routes inbound traffic per each enhanced service's registered manifest, and (once relayLLM registers `RegisterModelHost`) the model broker that reaches relayLLM's router through router.sock.
+- `relay-sessions` -- hosts LLM sessions, terminals, and the permission hook; the surface this repo used to serve before narrowing to model-hosting only.
+- `../relayScheduler/` -- Task scheduler. Registers its own manifest with relay.
 - `../relayTelegram/` -- Telegram bot bridge.
-- `../relayComfy/` -- ComfyUI service exposed as the `comfyui` MCP. relayLLM reaches image generation through relay's MCP path, not a direct HTTP call; it only serves the resulting images via `/api/generated/`.
+- `../relayComfy/` -- ComfyUI service exposed as the `comfyui` MCP tool through relay.
 
 ## Releases & consumers
 
@@ -404,24 +326,23 @@ relayLLM is one of several relay-enhanced services. It serves session/provider o
 
 **Consumers** — who depends on relayLLM's behavior (relay is the transport layer, not a consumer):
 
-- **Eve** — browser frontend. Reaches relayLLM through relay's front-door dispatcher; never speaks to the socket directly.
-- **relayScheduler** — schedules tasks against terminal templates via HTTP/WS.
-- **Standalone CLI / scripts** — humans or scripts hitting the unix socket directly with no relay in front. Treat the documented HTTP/WS surface as a public API for this audience.
+- **relay-sessions** — reaches relayLLM's managed models and router through relay's front-door dispatcher and router.sock, the same way any other model client would.
+- **Standalone CLI / scripts** — humans or scripts hitting the unix socket or the relay-router directly with no relay in front. Treat the documented HTTP surface as a public API for this audience.
 
 **"Done" definition** — every change that lands on `main` must:
 
 1. Pass the hermetic test tier. Enforced by `.githooks/pre-commit` (install once with `git config core.hooksPath .githooks`). If the hook is bypassed, run `go test ./...` manually before merging.
-2. Run the `live` and/or `llm` tiers manually when the change touches the relevant surface — providers (`-tags=live` for Ollama / LM Studio / OMLX / relay binary; `-tags=llm` for llama-server with a real GGUF). Note in the commit message which tiers you ran.
+2. Run the `live` and/or `llm` tiers manually when the change touches the relevant surface (`-tags=live` for Ollama / LM Studio / OMLX / relay binary; `-tags=llm` for llama-server with a real GGUF). Note in the commit message which tiers you ran.
 3. Document a non-obvious architectural decision (new test seam, new protocol, new build-tag tier, new run mode) as a comment at the point of the code it constrains — the hidden invariant, the rejected alternative, the measured tradeoff. Skip for routine refactors and library upgrades. There is no separate decisions log to update; a comment that lives next to the code it explains can't drift out of sync with it the way a standalone doc can.
 4. Reflect the new state in [`ROADMAP.md`](ROADMAP.md) — close shipped items into the **Closed** section with a one-line note, update **In flight**, add follow-ups you discovered.
 
-**Breaking changes** — anything that alters the wire (WS protocol message shapes, manifest schema, HTTP route paths or payloads, terminal template fields, session settings keys) ships as a **coordinated PR across repos**. Land relayLLM and the matching changes in `../relay`, `../eve`, `../relayScheduler` together. There is no manifest version negotiation or compat shim; one person owns all the repos, so coordinate at PR time rather than building permanent backwards-compat. If a change genuinely cannot be coordinated atomically, ship the additive side first (new field / new route) and migrate consumers in a follow-up PR before removing the old surface.
+**Breaking changes** — anything that alters the wire (manifest schema, HTTP route paths or payloads, relay-router request/response shapes, settings.json schema) ships as a **coordinated PR across repos**. Land relayLLM and the matching changes in `../relay` (and relay-sessions, for anything that touches shared settings.json shapes like `pty`/`pi`) together. There is no manifest version negotiation or compat shim; one person owns all the repos, so coordinate at PR time rather than building permanent backwards-compat. If a change genuinely cannot be coordinated atomically, ship the additive side first (new field / new route) and migrate consumers in a follow-up PR before removing the old surface.
 
 ## Service Manifest Integration
 
 relayLLM detects its run mode from `RELAY_LAUNCH_FD`:
 
-- **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct HTTP/WS clients. No bridge call is ever made.
+- **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct clients. No bridge call is ever made.
 - **Enhanced** (env set): the first thing `app.Main` does — before anything can spawn a child — is `relay.BootstrapLaunch`: read the 64-hex launch secret from that fd to EOF, close it, unset `RELAY_LAUNCH_FD`, and send `Hello` (`name` = `RELAY_SERVICE_ID`) over `RELAY_BRIDGE_SOCKET`. Relay binds this process's peer audit token as the service identity, and `Hello` also captures *relay's* own peer audit token off that connection (see the router.sock paragraph above) for router.sock's later admission check. Any failure exits non-zero — never a silent fall back to standalone. After that, same listener + same wire language, plus a `RegisterManifest` declaring routes, status endpoint, and actions; relay's dispatcher forwards matching front-door requests over the internal socket using the bearer token relayLLM declared in the manifest. Once that succeeds, `RegisterModelHost` registers `--router-socket` as relay's model-broker upstream — a refusal there is fatal (`os.Exit(78)`), unlike a `RegisterManifest` failure.
 
 `relay.Launched()` (Hello succeeded) is the only "relay bridge available" signal. Every bridge request carries an **empty token**; relay authenticates it by the peer identity. relayLLM holds no relay credential in its environment: `RELAY_SERVICE_TOKEN`, `RELAY_MCP_TOKEN` and `RELAY_FRONTEND_TOKEN` are never read, and are scrubbed from its own env and every child's. Contract: `../spec-launch-identity.md`.
@@ -432,12 +353,8 @@ See `../relay/docs/service-manifest.md` for the full protocol contract.
 
 ## Local Auth
 
-`auth.go::HookScopedBearerAuth` validates every request against `--token` / `RELAY_LLM_TOKEN`, but only on the Unix socket (`--socket`). Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The one carrier accepted is `Authorization: Bearer <token>` — every caller of the socket is a machine client (relay's dispatcher, the permission hook, a direct socket client), never a browser, so there's no cookie or query-param fallback to bootstrap.
+`auth.go::BearerAuth` validates every request against `--token` / `RELAY_LLM_TOKEN`, but only on the Unix socket (`--socket`). Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The one carrier accepted is `Authorization: Bearer <token>` — every caller of the socket is a machine client (relay's dispatcher, or a direct socket client), never a browser, so there's no cookie or query-param fallback to bootstrap.
 
-The permission hook never holds this internal bearer — it would let any same-user process read it out of the hook's own environment (`KERN_PROCARGS2`) and drive every relayLLM route, not just permission decisions. Instead, `permission.PermissionManager.MintHookToken` generates a random 32-byte per-session credential when `ClaudeProvider` is constructed (`NewClaudeProvider`, `internal/provider/claude.go`); only its SHA-256 hash is kept, bound to the session id. `buildClaudeEnv` puts the plaintext in the hook child's env under the same `RELAY_LLM_HOOK_TOKEN` name as before, and the hook binary is unchanged — it still just forwards whatever that variable holds as its bearer. `HookScopedBearerAuth` accepts this credential in place of the internal bearer on exactly one route, `POST /api/permission`; every other route, and the `/ws` upgrade, reject it exactly like a wrong bearer (401). `RegisterPermissionRoutes`'s handler additionally checks the token's bound session id against the request body's `sessionId` (403 on mismatch), since a validated token only proves "bound to some session" — the route-level check can't see which one the caller claims. `ClaudeProvider.Kill()` revokes the token (`PermissionManager.RevokeHookToken`) whenever the session ends, is deleted, or its provider is replaced on resume, and the whole table lives only in memory, so a relayLLM restart revokes every outstanding token for free.
+`--http-port`'s TCP front (see the API section above) is **not** wrapped in `BearerAuth` at all — it's anonymous, gated only by `--http-bind`, the same posture `--router-port` has always had. An `Authorization` header sent to it is simply never inspected. Because it carries no credential, it is additionally restricted to a read-only diagnostics allowlist (`TCPDiagnosticsOnly`, `internal/api/tcp_diagnostics.go`) rather than serving the socket's full route table.
 
-`--http-port`'s TCP front (see "Optionally also on TCP" above) is **not** wrapped in `bearerAuth` at all — it's anonymous, gated only by `--http-bind`, the same posture `--router-port` has always had. An `Authorization` header sent to it is simply never inspected. Because it carries no credential, it is additionally restricted to a read-only diagnostics allowlist (`TCPDiagnosticsOnly`, `internal/api/tcp_diagnostics.go`) rather than serving the socket's full route table — see "Optionally also on TCP" above for the exact allowlist.
-
-### Relay-side token rotation
-
-The `RELAY_PROJECT_TOKEN` env var carried into chat-provider MCP spawns, pi sessions, and project-scoped terminals is a *relay project token*, not relayLLM's local bearer. **relayLLM never stores it and never receives it from eve** — it resolves the token just-in-time from relay's bridge by `projectId` at every spawn (`resolveProjectToken` → `ResolvePtyEnv`), injects it, and discards it. This makes rotation transparent (the next spawn picks up the new token via `RotateProjectToken`) and means a relayLLM restart can't lose it (there's nothing stored to lose — the old `Session.McpToken` field is gone). If a project token can't be resolved, or relay did not launch this process, the child gets no token (fail closed). relayLLM has no service token to substitute: its own bridge calls are authenticated by launch identity. See `../relay/docs/decisions/007-project-token-brokering.md` and `../relay/docs/tokens.md`.
+A spawned llama-server/mlx-serve child never inherits any relay credential either: `childBaseEnv()` (`internal/servermanager/server_manager.go`) strips every relay credential name from `os.Environ()` before it becomes a child's environment — the belt-and-suspenders counterpart to `BearerAuth` guarding the socket itself.

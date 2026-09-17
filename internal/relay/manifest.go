@@ -92,20 +92,10 @@ type RegisterManifestRequest struct {
 func BuildManifest(dataDir string) Manifest {
 	return Manifest{
 		Routes: []string{
-			"/api/sessions",
-			"/api/sessions/",
-			"/api/models",
-			"/api/terminals",
-			"/api/terminals/",
-			"/api/terminal/",
-			"/api/permission",
-			"/api/generated/",
 			"/api/status",
 			"/api/status/detailed",
-			"/status",
 			"/api/llama/",
 			"/api/mlx/",
-			"/ws",
 		},
 		Status: &StatusDecl{
 			Path: "/api/status",
@@ -124,13 +114,6 @@ func BuildManifest(dataDir string) Manifest {
 				Method:       "DELETE",
 				PathTemplate: "/api/mlx/instances/{alias}",
 				ForEach:      "mlxInstances",
-			},
-			{
-				ID:           "stop-terminal",
-				Label:        "Kill",
-				Method:       "DELETE",
-				PathTemplate: "/api/terminals/{id}",
-				ForEach:      "terminals",
 			},
 		},
 		Config: &ConfigDecl{

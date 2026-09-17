@@ -335,3 +335,43 @@ func TestModelHostWiring_LaunchedWithoutRouterPort_OpensSocketAndRegisters(t *te
 		t.Fatalf("router.sock /health status = %d, want 200", status)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// refuseLaunchedRouterPortOrExit (C9): --router-port is allowed for a
+// standalone process but exits 78 once relay launched the process, since
+// relay reaches model routing only through router.sock.
+// ---------------------------------------------------------------------------
+
+func TestRefuseLaunchedRouterPort_LaunchedWithPortExits78(t *testing.T) {
+	launchedTestSetup(t)
+
+	var gotCode int
+	called := false
+	refuseLaunchedRouterPortOrExit("8180", func(code int) {
+		called = true
+		gotCode = code
+	})
+	if !called {
+		t.Fatal("exitFn was never called for a launched process with --router-port set")
+	}
+	if gotCode != 78 {
+		t.Errorf("exit code = %d, want 78", gotCode)
+	}
+}
+
+func TestRefuseLaunchedRouterPort_LaunchedWithoutPortNeverExits(t *testing.T) {
+	launchedTestSetup(t)
+
+	refuseLaunchedRouterPortOrExit("", func(code int) {
+		t.Fatalf("exitFn called with code %d for a launched process with --router-port unset", code)
+	})
+}
+
+func TestRefuseLaunchedRouterPort_StandaloneWithPortNeverExits(t *testing.T) {
+	if relay.Launched() {
+		t.Fatal("setup: expected NOT launched in this test")
+	}
+	refuseLaunchedRouterPortOrExit("8180", func(code int) {
+		t.Fatalf("exitFn called with code %d for a standalone process; --router-port is its normal serving path", code)
+	})
+}
