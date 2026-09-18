@@ -94,12 +94,14 @@ front-door manifest registration succeeded (the two are separate relay
 capabilities); relay refusing the model-host registration (the service
 record lacks the `model_host` capability) is fatal — relayLLM exits 78
 rather than run believing it is relay's model broker upstream when relay
-disagrees. The socket serves the same dispatch as `--router-port` minus the
-two route families that would forward a caller's own upstream credential off
-this box: the `/api/` Claude Code OAuth passthrough and any configured
-`router.passthrough` `/<name>/` route both 404 here, and `/v1/messages` only
-serves `router.anthropic.modelMap` targets (anything else 404s rather than
-reaching the real Anthropic API). See `internal/router/router_socket.go` and
+disagrees. The socket serves the same dispatch as `--router-port`, including
+`/api/` (the Claude Code bootstrap passthrough), every configured
+`router.passthrough` `/<name>/` route and unmapped `/v1/messages`: relay's
+model endpoint forwards a provider's own request here with the client's own
+credential still on it and never adds one of its own. The one narrowing is
+that a `/v1/messages` model outside `router.anthropic.modelMap` reaches the
+real Anthropic API only when the request carries `Authorization` or
+`x-api-key`; otherwise it 404s. See `internal/router/router_socket.go` and
 [`../relay/docs/model-endpoint.md`](../relay/docs/model-endpoint.md).
 
 **Behavior change**: every managed-server, endpoint, and virtual-model

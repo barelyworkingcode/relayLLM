@@ -57,11 +57,12 @@ func (p *RelayRouter) setPassthrough(cfg map[string]config.PassthroughConfig) {
 			slog.Error("relay router: router.passthrough entry disabled", "name", name, "error", err)
 			continue
 		}
-		// Recorded here, not derived from cfg directly, so SocketHandler
-		// (router_socket.go) refuses exactly the set of names that actually
-		// mounted on the TCP mux — an invalid entry never got a route there
-		// either, so it needs no explicit refusal on router.sock (it falls
-		// to handleProxy on both muxes identically).
+		// Recorded here, not derived from cfg directly, so the router-key
+		// middleware (auth.go) covers exactly the set of names that actually
+		// mounted — an invalid entry never got a route, so it falls to
+		// handleProxy like any other path. router.sock serves p.mux itself
+		// (router_socket.go), so it gains this route with no registration of
+		// its own.
 		p.passthroughNames = append(p.passthroughNames, name)
 		p.mux.HandleFunc("/"+name+"/", func(w http.ResponseWriter, r *http.Request) {
 			// The body is never read on this path, so the connection is
