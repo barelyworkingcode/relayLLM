@@ -334,70 +334,93 @@ func TestRouterSocket_ListenSocketRefusesRegularFileAtPath(t *testing.T) {
 // socket adds nothing)
 // ---------------------------------------------------------------------------
 
-func TestRouterSocket_APIPassthrough404s(t *testing.T) {
+// recordingUpstream is a fake provider: it records the last request's path
+// and the two credential headers exactly as they arrived, and counts hits.
+type recordingUpstream struct {
+	srv  *httptest.Server
+	hits int32
+	last atomic.Pointer[recordedRequest]
+}
+
+type recordedRequest struct {
+	method, path, authorization, apiKey, relayKey string
+}
+
+func newRecordingUpstream(t *testing.T) *recordingUpstream {
+	t.Helper()
+	u := &recordingUpstream{}
+	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&u.hits, 1)
+		u.last.Store(&recordedRequest{
+			method: r.Method, path: r.URL.Path,
+			authorization: r.Header.Get("Authorization"), apiKey: r.Header.Get("X-Api-Key"),
+			relayKey: r.Header.Get("X-Relay-Key"),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+func (u *recordingUpstream) hitCount() int { return int(atomic.LoadInt32(&u.hits)) }
+
+// The passthrough routes serve on router.sock. Relay's model endpoint sends a
+// provider's own request here with the client's credential still on it, and
+// this router forwards it untouched (plans/client-model-routing.md).
+func TestRouterSocket_APIPassthroughServed(t *testing.T) {
+	up := newRecordingUpstream(t)
 	r := NewRelayRouter(":0", nil, nil, nil)
-	r.setAnthropic(&config.AnthropicRouterConfig{})
+	r.setAnthropic(&config.AnthropicRouterConfig{Upstream: up.srv.URL})
 	srv := httptest.NewServer(r.SocketHandler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/api/claude_cli/bootstrap")
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/claude_cli/bootstrap", nil)
+	req.Header.Set("Authorization", "Bearer client-own-oauth-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (forwarded to the Anthropic upstream)", resp.StatusCode)
+	}
+	got := up.last.Load()
+	if got == nil || got.path != "/api/claude_cli/bootstrap" || got.authorization != "Bearer client-own-oauth-token" {
+		t.Fatalf("upstream saw %+v, want the client's Authorization forwarded byte-for-byte", got)
 	}
 }
 
-func TestRouterSocket_ConfiguredPassthrough404s(t *testing.T) {
+func TestRouterSocket_ConfiguredPassthroughServed(t *testing.T) {
+	up := newRecordingUpstream(t)
 	r := NewRelayRouter(":0", nil, nil, nil)
 	r.setPassthrough(map[string]config.PassthroughConfig{
-		"chatgpt": {Upstream: "https://chatgpt.com/backend-api"},
+		"chatgpt": {Upstream: up.srv.URL},
 	})
+	srv := httptest.NewServer(r.SocketHandler())
+	defer srv.Close()
 
-	// Sanity: the TCP mux DOES serve it (setPassthrough registered it there),
-	// so the socket's 404 below is really the socket-specific refusal, not an
-	// artifact of a broken test upstream.
-	tcpSrv := httptest.NewServer(r.mux)
-	defer tcpSrv.Close()
-	tcpResp := postBytes(t, tcpSrv.URL+"/chatgpt/codex/responses", []byte(`{}`))
-	if tcpResp.StatusCode == http.StatusNotFound {
-		t.Fatalf("setup: TCP mux should have a live passthrough route to compare against")
-	}
-
-	sockSrv := httptest.NewServer(r.SocketHandler())
-	defer sockSrv.Close()
-	resp, err := http.Get(sockSrv.URL + "/chatgpt/codex/responses")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/chatgpt/codex/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer client-chatgpt-token")
+	req.Header.Set("X-Api-Key", "client-api-key")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("post: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 on router.sock", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (forwarded to the configured upstream)", resp.StatusCode)
+	}
+	got := up.last.Load()
+	if got == nil || got.path != "/codex/responses" {
+		t.Fatalf("upstream saw %+v, want path /codex/responses (prefix stripped)", got)
+	}
+	if got.authorization != "Bearer client-chatgpt-token" || got.apiKey != "client-api-key" {
+		t.Fatalf("upstream saw authorization=%q x-api-key=%q, want both forwarded untouched", got.authorization, got.apiKey)
 	}
 }
 
-// newFakeAnthropicUpstream returns an httptest server shaped like
-// api.anthropic.com, plus a hit counter. Tests point router.anthropic.Upstream
-// at it (instead of leaving the real "https://api.anthropic.com" default) so
-// a bug that fell through to the real passthrough would be caught locally —
-// asserting on the counter — rather than either silently passing (network
-// unreachable in a sandboxed run) or, worse, actually reaching the internet
-// from a hermetic test.
-func newFakeAnthropicUpstream(t *testing.T) (srv *httptest.Server, hits *int32) {
-	t.Helper()
-	hits = new(int32)
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(hits, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
-	}))
-	t.Cleanup(srv.Close)
-	return srv, hits
-}
-
-func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
+func TestRouterSocket_MessagesUnmappedNeedsAClientCredential(t *testing.T) {
 	// newFakeOpenAIUpstream only serves /v1/models; the mapped-model case
 	// below needs a real /v1/chat/completions response too.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,17 +437,19 @@ func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
 	defer upstream.Close()
 	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1", APIKey: "k"}}}
 	registry := regpkg.NewProxyRegistry(cfg)
-	anthropicUpstream, hits := newFakeAnthropicUpstream(t)
+	anthropicUp := newRecordingUpstream(t)
 
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
-		Upstream: anthropicUpstream.URL,
+		Upstream: anthropicUp.srv.URL,
 		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
 	})
 	srv := httptest.NewServer(r.SocketHandler())
 	defer srv.Close()
 
-	// Not in modelMap: 404, never the real Anthropic passthrough.
+	// Not in modelMap and no client credential: 404, never the real
+	// Anthropic passthrough. This is a request relay served as a local model
+	// (it strips both credential headers) that reached this mux anyway.
 	resp := postBytes(t, srv.URL+"/v1/messages", []byte(`{"model":"claude-3-5-sonnet-not-mapped","messages":[]}`))
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -432,7 +457,6 @@ func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
 		t.Fatalf("status = %d, want 404; body=%s", resp.StatusCode, body)
 	}
 	var errBody struct {
-		Type  string `json:"type"`
 		Error struct {
 			Type string `json:"type"`
 		} `json:"error"`
@@ -440,8 +464,25 @@ func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
 	if err := json.Unmarshal(body, &errBody); err != nil || errBody.Error.Type != "not_found_error" {
 		t.Errorf("error body = %s, want an Anthropic not_found_error", body)
 	}
-	if got := atomic.LoadInt32(hits); got != 0 {
-		t.Errorf("fake Anthropic upstream hit %d time(s) for a non-mapped model; router.sock must never reach the real passthrough", got)
+	if got := anthropicUp.hitCount(); got != 0 {
+		t.Errorf("fake Anthropic upstream hit %d time(s) for a credential-less unmapped model", got)
+	}
+
+	// Not in modelMap, with the client's own credential: forwarded, and the
+	// credential arrives byte-for-byte.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-client-token")
+	resp3, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("unmapped model with a client credential: status = %d, want 200", resp3.StatusCode)
+	}
+	if got := anthropicUp.last.Load(); anthropicUp.hitCount() != 1 || got.authorization != "Bearer sk-ant-oat01-client-token" {
+		t.Errorf("upstream saw hits=%d last=%+v, want one hit carrying the client's Authorization", anthropicUp.hitCount(), got)
 	}
 
 	// Mapped: succeeds via the redirect path — and still never touches the
@@ -452,8 +493,8 @@ func TestRouterSocket_MessagesServesOnlyModelMapKeys(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("mapped model: status = %d, want 200; body=%s", resp2.StatusCode, body2)
 	}
-	if got := atomic.LoadInt32(hits); got != 0 {
-		t.Errorf("fake Anthropic upstream hit %d time(s) for a MAPPED model; it must be served by the mapped target only", got)
+	if got := anthropicUp.hitCount(); got != 1 {
+		t.Errorf("fake Anthropic upstream hit %d time(s) in total; a MAPPED model must be served by the mapped target only", got)
 	}
 }
 
@@ -480,8 +521,10 @@ func TestRouterSocket_CountTokensNeverGenerates(t *testing.T) {
 
 	cfg := &config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{{Name: "ep", BaseURL: upstream.URL + "/v1", APIKey: "k"}}}
 	registry := regpkg.NewProxyRegistry(cfg)
+	anthropicUp := newRecordingUpstream(t)
 	r := NewRelayRouter(":0", nil, registry, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
+		Upstream: anthropicUp.srv.URL,
 		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
 	})
 	srv := httptest.NewServer(r.SocketHandler())
@@ -506,8 +549,8 @@ func TestRouterSocket_CountTokensNeverGenerates(t *testing.T) {
 		t.Errorf("count_tokens made %d upstream /v1/chat/completions call(s); it must only estimate, never generate", got)
 	}
 
-	// Unmapped model: 404, same shape as /v1/messages, still zero upstream
-	// calls.
+	// Unmapped model with no client credential: 404, same rule as
+	// /v1/messages, still zero upstream calls of either kind.
 	resp2 := postBytes(t, srv.URL+"/v1/messages/count_tokens", []byte(`{"model":"not-mapped","messages":[]}`))
 	body2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
@@ -516,6 +559,22 @@ func TestRouterSocket_CountTokensNeverGenerates(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&chatCalls); got != 0 {
 		t.Errorf("count_tokens made %d upstream call(s) for an unmapped model", got)
+	}
+	if got := anthropicUp.hitCount(); got != 0 {
+		t.Errorf("Anthropic upstream hit %d time(s) for a credential-less unmapped count_tokens", got)
+	}
+
+	// Unmapped model with the client's credential: the real token counter.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages/count_tokens", strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "sk-ant-api03-client-key")
+	resp3, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp3.Body.Close()
+	if got := anthropicUp.last.Load(); resp3.StatusCode != http.StatusOK || anthropicUp.hitCount() != 1 || got.path != "/v1/messages/count_tokens" || got.apiKey != "sk-ant-api03-client-key" {
+		t.Errorf("unmapped count_tokens with a credential: status=%d hits=%d last=%+v, want one forwarded call carrying the client's x-api-key", resp3.StatusCode, anthropicUp.hitCount(), got)
 	}
 }
 
