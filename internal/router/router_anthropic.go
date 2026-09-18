@@ -106,13 +106,13 @@ func (p *RelayRouter) handleAnthropicMessages(w http.ResponseWriter, r *http.Req
 }
 
 // handleAnthropicMessagesSocket is router.sock's /v1/messages handler (C9):
-// identical to handleAnthropicMessages except that a model absent from
-// router.anthropic.modelMap 404s instead of falling through to
-// anthropicPassthroughBody. The real Anthropic passthrough forwards whatever
-// credential the CALLER presents straight to api.anthropic.com — on
-// router.sock the caller is relay's model broker acting on a project or
-// service grant, never a holder of its own Anthropic credential, so
-// passthrough has nothing to forward and must never be reached from here.
+// handleAnthropicMessages, except that a model outside
+// router.anthropic.modelMap is forwarded to the real Anthropic API only when
+// the request carries a client credential. Relay's model endpoint sends an
+// Anthropic-model request here with the client's own credential untouched,
+// and strips it from a request it served as a local model; a request with
+// neither header is therefore one relay meant for a local backend, and
+// forwarding it would send its prompt to api.anthropic.com for nothing.
 func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *http.Request) {
 	if p.anthropic == nil {
 		writeAnthropicError(w, http.StatusNotFound, "not_found_error", "anthropic compatibility is not configured on this router")
@@ -124,12 +124,15 @@ func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *ht
 	}
 
 	model := anthropicRequestModel(body)
-	target, ok := p.anthropic.modelMap[model]
-	if !ok || target == "" {
-		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock", model))
+	if target, ok := p.anthropic.modelMap[model]; ok && target != "" {
+		p.handleAnthropicRedirect(w, r, body, model, target)
 		return
 	}
-	p.handleAnthropicRedirect(w, r, body, model, target)
+	if !hasClientCredential(r) {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock without a client credential", model))
+		return
+	}
+	p.anthropicPassthroughBody(w, r, body)
 }
 
 // handleAnthropicCountTokensSocket is router.sock's own
@@ -140,9 +143,8 @@ func (p *RelayRouter) handleAnthropicMessagesSocket(w http.ResponseWriter, r *ht
 // handleAnthropicRedirect the way /v1/messages does would silently turn a
 // token-count probe into one full upstream /v1/chat/completions call,
 // billing and latency a caller asking "how many tokens is this" never
-// expects. A model outside the map 404s, matching handleAnthropicMessagesSocket
-// — the real Anthropic token counter is exactly as off-limits here as the
-// real Anthropic passthrough is.
+// expects. A model outside the map is the real Anthropic token counter,
+// under the same client-credential rule as handleAnthropicMessagesSocket.
 func (p *RelayRouter) handleAnthropicCountTokensSocket(w http.ResponseWriter, r *http.Request) {
 	if p.anthropic == nil {
 		writeAnthropicError(w, http.StatusNotFound, "not_found_error", "anthropic compatibility is not configured on this router")
@@ -154,11 +156,15 @@ func (p *RelayRouter) handleAnthropicCountTokensSocket(w http.ResponseWriter, r 
 	}
 
 	model := anthropicRequestModel(body)
-	if target, ok := p.anthropic.modelMap[model]; !ok || target == "" {
-		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock", model))
+	if target, ok := p.anthropic.modelMap[model]; ok && target != "" {
+		writeRouterJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateAnthropicInputTokens(body)})
 		return
 	}
-	writeRouterJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateAnthropicInputTokens(body)})
+	if !hasClientCredential(r) {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is not routable on router.sock without a client credential", model))
+		return
+	}
+	p.anthropicPassthroughBody(w, r, body)
 }
 
 // handleAnthropicCountTokens answers /v1/messages/count_tokens. For a

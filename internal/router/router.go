@@ -92,9 +92,9 @@ type RelayRouter struct {
 	mux *http.ServeMux
 
 	// passthroughNames is every router.passthrough entry setPassthrough
-	// actually mounted on mux (valid name, not reserved) — SocketHandler
-	// reads this to refuse the same paths outright on router.sock rather
-	// than letting them fall through to handleProxy's model dispatch (C9).
+	// actually mounted on mux (valid name, not reserved) — the C10 router-key
+	// middleware (auth.go) reads this to know which /<name>/ paths take the
+	// key header.
 	passthroughNames []string
 
 	// socketSrv/socketLn/socketPath are router.sock's listener, server and
