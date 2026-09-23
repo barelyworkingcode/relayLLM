@@ -16,7 +16,7 @@ When the user gives an open-ended ask (e.g. "what's next", "act as lead develope
 
 The *why* behind non-obvious architecture lives as comments at the point of the code, not in a separate decisions log — grep the relevant file first.
 
-Propose a plan before executing. For specific tasks ("fix this bug", "add X"), do the task — don't read ROADMAP first.
+File the proposed work as an issue and stop for review (global standard flow). For specific tasks ("fix this bug", "add X"), don't read ROADMAP first.
 
 ## Architecture
 
@@ -303,7 +303,7 @@ Install once per clone:
 git config core.hooksPath .githooks
 ```
 
-Runs `go build ./...`, `go vet ./...`, and the hermetic test suite under the race detector (`go test -race ./...`) on every commit that touches Go files. ~3s total warm (~+1s for `-race`; a one-time ~+4s when the instrumented build cache is cold). Skip in emergencies with `git commit --no-verify`. The `live` and `llm` build tags are not invoked by the hook — those stay opt-in.
+Runs `go build ./...`, `go vet ./...`, and the hermetic test suite under the race detector (`go test -race ./...`) on every commit that touches Go files. ~3s total warm (~+1s for `-race`; a one-time ~+4s when the instrumented build cache is cold). `--no-verify` is for the operator in an emergency, never the agent. The `live` and `llm` build tags are not invoked by the hook — those stay opt-in.
 
 ### Adding tests
 
@@ -346,7 +346,7 @@ relayLLM detects its run mode from `RELAY_LAUNCH_FD`:
 - **Standalone** (env unset): binds its own listener (`--socket`, default `{data-dir}/relayllm.sock`), auto-generates a bearer token if `--token`/`RELAY_LLM_TOKEN` is unset, serves direct clients. No bridge call is ever made.
 - **Enhanced** (env set): the first thing `app.Main` does — before anything can spawn a child — is `relay.BootstrapLaunch`: read the 64-hex launch secret from that fd to EOF, close it, unset `RELAY_LAUNCH_FD`, and send `Hello` (`name` = `RELAY_SERVICE_ID`) over `RELAY_BRIDGE_SOCKET`. Relay binds this process's peer audit token as the service identity, and `Hello` also captures *relay's* own peer audit token off that connection (see the router.sock paragraph above) for router.sock's later admission check. Any failure exits non-zero — never a silent fall back to standalone. After that, same listener + same wire language, plus a `RegisterManifest` declaring routes, status endpoint, and actions; relay's dispatcher forwards matching front-door requests over the internal socket using the bearer token relayLLM declared in the manifest. Once that succeeds, `RegisterModelHost` registers `--router-socket` as relay's model-broker upstream — a refusal there is fatal (`os.Exit(78)`), unlike a `RegisterManifest` failure.
 
-`relay.Launched()` (Hello succeeded) is the only "relay bridge available" signal. Every bridge request carries an **empty token**; relay authenticates it by the peer identity. relayLLM holds no relay credential in its environment: `RELAY_SERVICE_TOKEN`, `RELAY_MCP_TOKEN` and `RELAY_FRONTEND_TOKEN` are never read, and are scrubbed from its own env and every child's. Contract: `../spec-launch-identity.md`.
+`relay.Launched()` (Hello succeeded) is the only "relay bridge available" signal. Every bridge request carries an **empty token**; relay authenticates it by the peer identity. relayLLM holds no relay credential in its environment: `RELAY_SERVICE_TOKEN`, `RELAY_MCP_TOKEN` and `RELAY_FRONTEND_TOKEN` are never read, and are scrubbed from its own env and every child's. Contract: `../relay/docs/launch-identity.md`.
 
 The mode switch is a deployment fact, not a code fork — one config loader, two sources. Both `internal/relay/manifest.go` (what relayLLM exposes) and `internal/relay/bridge_client.go` (how it talks to relay) are small and self-contained.
 
@@ -354,7 +354,7 @@ See `../relay/docs/service-manifest.md` for the full protocol contract.
 
 ## Local Auth
 
-`auth.go::BearerAuth` validates every request against `--token` / `RELAY_LLM_TOKEN`, but only on the Unix socket (`--socket`). Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The one carrier accepted is `Authorization: Bearer <token>` — every caller of the socket is a machine client (relay's dispatcher, or a direct socket client), never a browser, so there's no cookie or query-param fallback to bootstrap.
+`internal/api/auth.go::BearerAuth` validates every request against `--token` / `RELAY_LLM_TOKEN`, but only on the Unix socket (`--socket`). Empty token + standalone mode → auto-generated 64-char hex (not logged for security; set the env var to pin). Token comparison is constant-time via `crypto/subtle.ConstantTimeCompare`. The one carrier accepted is `Authorization: Bearer <token>` — every caller of the socket is a machine client (relay's dispatcher, or a direct socket client), never a browser, so there's no cookie or query-param fallback to bootstrap.
 
 `--http-port`'s TCP front (see the API section above) is **not** wrapped in `BearerAuth` at all — it's anonymous, gated only by `--http-bind`, the same posture `--router-port` has always had. An `Authorization` header sent to it is simply never inspected. Because it carries no credential, it is additionally restricted to a read-only diagnostics allowlist (`TCPDiagnosticsOnly`, `internal/api/tcp_diagnostics.go`) rather than serving the socket's full route table.
 
