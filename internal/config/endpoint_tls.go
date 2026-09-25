@@ -172,11 +172,11 @@ func newEndpointTransport(ep OpenAIEndpoint, base *http.Transport) (*http.Transp
 }
 
 // prepareEndpointTransports validates ep's TLS configuration and, on
-// success, builds and caches both of its transports (see OpenAIEndpoint's
-// transport/virtualTransport fields) so no outbound call site constructs a
-// transport per request. Called once per endpoint by normalizeOpenAI, at
-// config load — a bad endpoint fails relayLLM startup rather than the first
-// chat request against it.
+// success, builds and caches all of its transports (see OpenAIEndpoint's
+// transport/virtualTransport/probeTransport fields) so no outbound call site
+// constructs a transport per request. Called once per endpoint by
+// normalizeOpenAI, at config load — a bad endpoint fails relayLLM startup
+// rather than the first chat request against it.
 func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err := validateEndpointTransport(*ep, allowPlaintext); err != nil {
 		return err
@@ -189,7 +189,12 @@ func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err != nil {
 		return err
 	}
+	pt, err := newEndpointTransport(*ep, ProbeDialTransport.(*http.Transport))
+	if err != nil {
+		return err
+	}
 	ep.transport = t
 	ep.virtualTransport = vt
+	ep.probeTransport = pt
 	return nil
 }

@@ -27,14 +27,16 @@ type OpenAIEndpoint struct {
 	CAFile    string   `json:"caFile,omitempty"`    // PEM bundle; when set it is the ONLY trust anchor (system roots not consulted)
 	PinSHA256 []string `json:"pinSHA256,omitempty"` // SHA-256 hex fingerprints of the DER leaf certificate; colons optional, case-insensitive
 
-	// transport and virtualTransport are built once at config load by
-	// prepareEndpointTransports and cached here. Unexported so JSON
+	// transport, virtualTransport, and probeTransport are built once at config
+	// load by prepareEndpointTransports and cached here. Unexported so JSON
 	// (un)marshalling never touches them. Nil for an endpoint that never went
 	// through config load (hand-built in tests, or the zero value used by
-	// NewManagedChatTransport) — Transport()/VirtualTransport() fall back to
-	// the stdlib defaults in that case, so those call sites keep working.
+	// NewManagedChatTransport) — Transport()/VirtualTransport()/ProbeTransport()
+	// fall back to the stdlib/package defaults in that case, so those call
+	// sites keep working.
 	transport        *http.Transport
 	virtualTransport *http.Transport
+	probeTransport   *http.Transport
 }
 
 // Transport returns this endpoint's cached, TLS-pinned transport (or an
@@ -57,6 +59,17 @@ func (ep OpenAIEndpoint) VirtualTransport() http.RoundTripper {
 		return ep.virtualTransport
 	}
 	return VirtualDialTransport
+}
+
+// ProbeTransport is Transport's counterpart for the model-list probe path
+// (see ProbeDialTransport): same TLS pinning, but built from a transport with
+// short dial/handshake timeouts so an endpoint that black-holes connections
+// doesn't eat the probe's full budget before it even starts talking.
+func (ep OpenAIEndpoint) ProbeTransport() http.RoundTripper {
+	if ep.probeTransport != nil {
+		return ep.probeTransport
+	}
+	return ProbeDialTransport
 }
 
 // OpenAIConfig is the top-level config file structure.
