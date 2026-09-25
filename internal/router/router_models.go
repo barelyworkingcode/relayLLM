@@ -33,12 +33,16 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	// (managed, virtual, endpoint — it used to be managed, endpoint, virtual)
 	// is what keeps this listing honest about which one that is.
 	seen := make(map[string]bool)
+	// available holds the ids of rows usable right now; a modelMap key is
+	// listed only when its target is one of them.
+	available := make(map[string]bool)
 	for _, m := range p.managers {
 		for _, entry := range m.ModelCatalog() {
 			if seen[entry.Alias] {
 				continue
 			}
 			seen[entry.Alias] = true
+			available[entry.Alias] = true
 
 			status := map[string]any{"value": entry.Status}
 			if entry.Failed {
@@ -120,7 +124,11 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 			// all offline right now. It reports unloaded+failed instead, so a
 			// client polling for readiness stops rather than spinning forever
 			// on a name that will never resolve.
-			data = append(data, p.virtualCatalogRow(virtual, epStatuses))
+			row, usable := p.virtualCatalogRow(virtual, epStatuses)
+			if usable {
+				available[virtual.Name] = true
+			}
+			data = append(data, row)
 		}
 	}
 
@@ -134,6 +142,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[id] = true
+			available[id] = true
 			row := map[string]any{
 				"id":       id,
 				"object":   "model",
@@ -168,8 +177,13 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	// also dispatchable via the plain OpenAI path (handleProxy resolves the
 	// map before any other check), so they belong in the catalog too — a
 	// client would otherwise see a 400 "unknown model" for an id the router
-	// actually serves. Sorted for deterministic output; iterating a map
-	// directly here would make this handler's response order flap.
+	// actually serves. A key is listed only while its target is a row
+	// usable right now: a picker that offers a key whose endpoint is offline
+	// sets up a call that fails. An omitted key still dispatches if called.
+	// Keys never enter available themselves, so a key mapped to another key
+	// stays unlisted, matching dispatch, which resolves the map only once.
+	// Sorted for deterministic output; iterating a map directly here would
+	// make this handler's response order flap.
 	if p.anthropic != nil && len(p.anthropic.modelMap) > 0 {
 		keys := make([]string, 0, len(p.anthropic.modelMap))
 		for key := range p.anthropic.modelMap {
@@ -177,7 +191,7 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if seen[key] {
+			if seen[key] || !available[p.anthropic.modelMap[key]] {
 				continue
 			}
 			seen[key] = true
@@ -213,7 +227,13 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 // handleModelLoad starts loading a managed model and returns immediately —
 // see servermanager.ServerManager.StartLoad for why this must not block.
 
-func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []registry.EndpointStatus) map[string]any {
+// virtualCatalogRow builds the /v1/models row for one configured virtual
+// model. A virtual name is stable config, so — unlike an endpoint model,
+// which just disappears when its probe goes offline — the row always
+// appears; status reflects whether the router currently believes a request
+// for it will succeed. usable reports the same thing to the caller, so a
+// modelMap key targeting this virtual is listed only when the row is loaded.
+func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []registry.EndpointStatus) (row map[string]any, usable bool) {
 	candidates, freshCount := CandidatesForVirtual(virtual, statuses, p.managers)
 
 	modalities := []string{"text"}
@@ -239,7 +259,7 @@ func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []r
 		}
 	}
 
-	row := map[string]any{
+	row = map[string]any{
 		"id":           virtual.Name,
 		"object":       "model",
 		"created":      0,
@@ -256,7 +276,7 @@ func (p *RelayRouter) virtualCatalogRow(virtual *config.VirtualLLM, statuses []r
 	if hasContextLength {
 		row["context_length"] = contextLength
 	}
-	return row
+	return row, freshCount > 0
 }
 
 // virtualRowMetadata inherits architecture/meta/context_length from a virtual
