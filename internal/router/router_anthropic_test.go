@@ -456,10 +456,16 @@ func TestAnthropic_ModelMapDispatchableViaOpenAIPath(t *testing.T) {
 }
 
 func TestAnthropic_ModelsCatalog_IncludesSortedMappedRows(t *testing.T) {
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
+		Models: []config.ServerModelConfig{{Alias: "local-model", Args: map[string]any{"model": "/fake"}}},
+	}, "")
+	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{
+		Name: "vCode", Targets: []config.VirtualLLMTarget{{Alias: "local-model"}},
+	}}}
 	r := newAnthropicRouter(t, anthropicUpstreamCfg(t, "https://unused.invalid", map[string]string{
 		"claude-haiku-4-5": "local-model",
 		"relay/coder":      "vCode",
-	}), nil, nil, nil)
+	}), []*servermanager.ServerManager{mgr}, nil, virtual)
 	srv := httptest.NewServer(r.server.Handler)
 	defer srv.Close()
 
