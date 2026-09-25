@@ -109,9 +109,9 @@ func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 	return nil
 }
 
-// newEndpointTransport clones base (the caller's http.DefaultTransport or
-// virtualDialTransport, so dial-timeout behavior on the virtual-model retry
-// path survives) and, for an https endpoint, installs the pinned
+// newEndpointTransport clones base (the caller's http.DefaultTransport,
+// VirtualDialTransport or ProbeDialTransport, so each base's dial and handshake
+// timeouts survive) and, for an https endpoint, installs the pinned
 // TLSClientConfig: RootCAs from caFile when set (nil RootCAs falls back to
 // the platform's system pool, same as an unset TLSClientConfig), and a
 // VerifyConnection callback when pins are configured. ep is assumed already

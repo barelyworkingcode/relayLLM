@@ -31,8 +31,8 @@ import (
 // endpoint-TLS test plan: a matching pin forwards successfully, and a
 // mismatched pin on the same endpoint entry surfaces as a 502.
 //
-// The registry's /v1/models catalog probe and the actual chat-completions
-// forward share the same endpoint transport (both go through ep.Transport()),
+// The registry's /v1/models catalog probe (ep.ProbeTransport()) and the actual
+// chat-completions forward (ep.Transport()) are pinned from the same endpoint entry,
 // so the first request below both proves the pinned proxy path works AND
 // warms regpkg.ProxyRegistry's 15s freshness cache to Online. The second request
 // then re-pins the SAME cfg.Endpoints[0] entry to a fingerprint the server

@@ -89,6 +89,7 @@ func silentTLSAddr(t *testing.T) string {
 }
 
 func TestFetchOpenAIModels_ConnectNeverCompletes_FailsFast(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		baseURL func(t *testing.T) string
