@@ -24,9 +24,15 @@ var VirtualDialTransport http.RoundTripper = func() *http.Transport {
 // handshake, no ResponseHeaderTimeout. A chained relayLLM router answers
 // /models only after its own probe; it stays bounded by the caller's 10s
 // modelsFetchTimeout instead.
+//
+// Keep-alives are deliberately off. The dial and TLS bounds apply only when a
+// probe dials; a pooled connection to a host that vanished without FIN/RST
+// would instead wait out the full 10s. A probe runs at most once per endpoint
+// per 15s, so the fresh dial is cheap.
 var ProbeDialTransport http.RoundTripper = func() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = (&net.Dialer{Timeout: 1 * time.Second}).DialContext
 	t.TLSHandshakeTimeout = 1 * time.Second
+	t.DisableKeepAlives = true
 	return t
 }()
