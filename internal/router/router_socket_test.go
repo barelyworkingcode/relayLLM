@@ -583,7 +583,10 @@ func TestRouterSocket_CountTokensNeverGenerates(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRouterCatalog_AnthropicMapRow_HasTargetField(t *testing.T) {
-	r := NewRelayRouter(":0", nil, nil, nil)
+	ep := config.OpenAIEndpoint{Name: "ep", BaseURL: "http://127.0.0.1:1/v1"}
+	reg := regpkg.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	reg.SetStatusForTest(ep, true, regpkg.UpstreamModel{ID: "local-model"})
+	r := NewRelayRouter(":0", nil, reg, nil)
 	r.setAnthropic(&config.AnthropicRouterConfig{
 		ModelMap: map[string]string{"claude-mapped": "ep/local-model"},
 	})
