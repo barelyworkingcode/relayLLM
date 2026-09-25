@@ -109,9 +109,9 @@ func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 	return nil
 }
 
-// newEndpointTransport clones base (the caller's http.DefaultTransport or
-// virtualDialTransport, so dial-timeout behavior on the virtual-model retry
-// path survives) and, for an https endpoint, installs the pinned
+// newEndpointTransport clones base (the caller's http.DefaultTransport,
+// VirtualDialTransport or ProbeDialTransport, so each base's dial and handshake
+// timeouts survive) and, for an https endpoint, installs the pinned
 // TLSClientConfig: RootCAs from caFile when set (nil RootCAs falls back to
 // the platform's system pool, same as an unset TLSClientConfig), and a
 // VerifyConnection callback when pins are configured. ep is assumed already
@@ -172,11 +172,11 @@ func newEndpointTransport(ep OpenAIEndpoint, base *http.Transport) (*http.Transp
 }
 
 // prepareEndpointTransports validates ep's TLS configuration and, on
-// success, builds and caches both of its transports (see OpenAIEndpoint's
-// transport/virtualTransport fields) so no outbound call site constructs a
-// transport per request. Called once per endpoint by normalizeOpenAI, at
-// config load — a bad endpoint fails relayLLM startup rather than the first
-// chat request against it.
+// success, builds and caches all of its transports (see OpenAIEndpoint's
+// transport/virtualTransport/probeTransport fields) so no outbound call site
+// constructs a transport per request. Called once per endpoint by
+// normalizeOpenAI, at config load — a bad endpoint fails relayLLM startup
+// rather than the first chat request against it.
 func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err := validateEndpointTransport(*ep, allowPlaintext); err != nil {
 		return err
@@ -189,7 +189,12 @@ func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	if err != nil {
 		return err
 	}
+	pt, err := newEndpointTransport(*ep, ProbeDialTransport.(*http.Transport))
+	if err != nil {
+		return err
+	}
 	ep.transport = t
 	ep.virtualTransport = vt
+	ep.probeTransport = pt
 	return nil
 }

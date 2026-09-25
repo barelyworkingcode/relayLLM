@@ -19,3 +19,14 @@ var VirtualDialTransport http.RoundTripper = func() *http.Transport {
 	t.DialContext = (&net.Dialer{Timeout: 3 * time.Second}).DialContext
 	return t
 }()
+
+// ProbeDialTransport: the model-list probe's transport. 1s dial + 1s TLS
+// handshake, no ResponseHeaderTimeout. A chained relayLLM router answers
+// /models only after its own probe; it stays bounded by the caller's 10s
+// modelsFetchTimeout instead.
+var ProbeDialTransport http.RoundTripper = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: 1 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = 1 * time.Second
+	return t
+}()
