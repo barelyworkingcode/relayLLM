@@ -253,12 +253,6 @@ func applyAffinity(candidates []ResolvedVirtualTarget, pinned string) []Resolved
 	return reordered
 }
 
-// virtualCatalogRow builds the /v1/models row for one configured virtual
-// model. A virtual name is stable config, so — unlike an endpoint model,
-// which just disappears when its probe goes offline — the row always
-// appears; status reflects whether the router currently believes a request
-// for it will succeed.
-
 // routeVirtual attempts each candidate in declared attempt order, moving to
 // the next only when the previous attempt failed before any response byte
 // reached the client — a dial/connection error, or a managed-server Acquire
