@@ -3,6 +3,7 @@
 # Anthropic pass-through checks.
 #
 # Usage: scratch-router.sh <worktree> [stop]
+# Prints ROUTER_URL, ROUTER_KEY_FILE (0600, inside the temp dir), PID_FILE, LOG.
 # Env:   SETTINGS_FILE  (required for start) settings.json to copy in
 #        ROUTER_PORT    (default 18180)
 #        STATE_FILE     (default ${TMPDIR:-/tmp}/relayllm-scratch-router.state)
@@ -53,6 +54,12 @@ printf 'TMP=%s\nPID_FILE=%s\n' "$tmp" "$pidfile" > "$STATE_FILE"
 mkdir -p "$tmp/data"
 cp "$SETTINGS_FILE" "$tmp/data/settings.json"
 
+# A standalone router answers 401 everywhere until a router key exists.
+keyfile="$tmp/router.key"
+( umask 077; "$tmp/relayllm" router-key add --label scratch --data-dir "$tmp/data" 2>/dev/null > "$keyfile" )
+chmod 600 "$keyfile"
+[ -s "$keyfile" ] || { echo "router-key add produced no key" >&2; exit 1; }
+
 unset RELAY_LAUNCH_FD
 nohup "$tmp/relayllm" \
   --data-dir "$tmp/data" \
@@ -64,8 +71,9 @@ echo $! > "$pidfile"
 
 url="http://127.0.0.1:${ROUTER_PORT}"
 for _ in $(seq 1 100); do
-  if curl -fsS -o /dev/null "$url/health" 2>/dev/null; then
+  if curl -fsS -o /dev/null -H "Authorization: Bearer $(cat "$keyfile")" "$url/health" 2>/dev/null; then
     echo "ROUTER_URL=$url"
+    echo "ROUTER_KEY_FILE=$keyfile"
     echo "PID_FILE=$pidfile"
     echo "LOG=$tmp/relayllm.log"
     exit 0

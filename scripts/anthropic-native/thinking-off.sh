@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Criterion 5: does an engine honour native thinking-off through the router?
 #
+# Needs ROUTER_KEY or ROUTER_KEY_FILE (sent as X-Relay-Router-Key, never printed).
 # Usage: ROUTER_URL=http://127.0.0.1:18180 MODEL_KEYS="key1 key2" thinking-off.sh
 # Output per key:
 #   key=<k> disabled_thinking_blocks=N disabled_reasoning_text=N enabled_thinking_blocks=N PASS|FAIL
 set -euo pipefail
 : "${ROUTER_URL:?ROUTER_URL is required}"
 : "${MODEL_KEYS:?MODEL_KEYS is required (space-separated)}"
+
+if [ -z "${ROUTER_KEY:-}" ]; then
+  : "${ROUTER_KEY_FILE:?ROUTER_KEY or ROUTER_KEY_FILE is required}"
+  ROUTER_KEY="$(cat "$ROUTER_KEY_FILE")"
+fi
+export ROUTER_KEY
 
 analyse='
 import json, re, sys
@@ -21,7 +28,7 @@ print(think, text)
 call() { # key thinking-json
   python3 - "$1" "$2" <<'PY' | curl -sS --max-time 300 "${ROUTER_URL}/v1/messages" \
       -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
-      -H 'x-api-key: dummy' --data-binary @- | python3 -c "$analyse"
+      -H 'x-api-key: dummy' -H @<(printf 'X-Relay-Router-Key: %s\n' "$ROUTER_KEY") --data-binary @- | python3 -c "$analyse"
 import json, sys
 print(json.dumps({
   "model": sys.argv[1],

@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # Criterion 7: does turn 2 reuse the prompt cache built by turn 1?
 #
+# Needs ROUTER_KEY or ROUTER_KEY_FILE (sent as X-Relay-Router-Key, never printed).
 # Usage: ROUTER_URL=... MODEL_KEY=... [OMLX_LOG_CMD='cmd printing engine log tail'] cache-reuse.sh
 # PASS when turn2_cache_read / turn1_total_prompt >= 0.90.
 set -euo pipefail
 : "${ROUTER_URL:?ROUTER_URL is required}"
 : "${MODEL_KEY:?MODEL_KEY is required}"
 
+if [ -z "${ROUTER_KEY:-}" ]; then
+  : "${ROUTER_KEY_FILE:?ROUTER_KEY or ROUTER_KEY_FILE is required}"
+  ROUTER_KEY="$(cat "$ROUTER_KEY_FILE")"
+fi
+export ROUTER_KEY
+
 work="$(mktemp -d)"
 trap 'if [ -n "$(ls -A "$work" 2>/dev/null)" ]; then rm -rf "$work"; fi' EXIT
 
 python3 - "$MODEL_KEY" "$ROUTER_URL" "$work" <<'PY'
-import json, sys, urllib.request
+import json, os, sys, urllib.request
 model, url, work = sys.argv[1:4]
 
 # Deterministic filler, roughly 7k tokens.
@@ -21,7 +28,8 @@ system = [{"type": "text", "text": "You are a concise assistant. Reference mater
 
 def post(body):
     req = urllib.request.Request(url + "/v1/messages", data=json.dumps(body).encode(),
-        headers={"content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": "dummy"})
+        headers={"content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": "dummy",
+                 "x-relay-router-key": os.environ["ROUTER_KEY"]})
     with urllib.request.urlopen(req, timeout=600) as r:
         return json.load(r)
 
