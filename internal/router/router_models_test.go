@@ -3,8 +3,11 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"relayllm/internal/config"
 	regpkg "relayllm/internal/registry"
 	"relayllm/internal/servermanager"
@@ -521,5 +524,94 @@ func TestRouterCatalog_VirtualModel_ContextLengthTopLevel(t *testing.T) {
 	}
 	if row.ContextLength == nil || *row.ContextLength != 32768 {
 		t.Errorf("virtual context_length = %v, want 32768 inherited from the first candidate", row.ContextLength)
+	}
+}
+
+// systemRouter builds the router the way production does: a managed alias
+// "plain" backed by upstream (nil: no instance), a virtual "vPlain" and a
+// modelMap key "acme/coder", both targeting "plain".
+func systemRouter(t *testing.T, upstream *httptest.Server, systemModels []string) *RelayRouter {
+	t.Helper()
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{Models: []config.ServerModelConfig{
+		{Alias: "plain", Args: map[string]any{"model": "/fake", "ctx-size": 32768.0}},
+	}}, "")
+	if upstream != nil {
+		mgr.InjectReadyInstanceForTest("plain", upstream.Listener.Addr().(*net.TCPAddr).Port, 0)
+	}
+	virtual := &config.VirtualLLMConfig{Models: []config.VirtualLLM{{Name: "vPlain", Targets: []config.VirtualLLMTarget{{Alias: "plain"}}}}}
+	return BuildRelayRouter([]*servermanager.ServerManager{mgr}, nil, virtual, &config.RouterConfig{
+		Anthropic:    anthropicUpstreamCfg(t, "https://unused.invalid", map[string]string{"acme/coder": "plain"}),
+		SystemModels: systemModels,
+	}, "", "")
+}
+
+func rawCatalog(t *testing.T, router *RelayRouter, path string) []map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	router.server.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); rec.Code != http.StatusOK || err != nil {
+		t.Fatalf("GET %s = %d (%v): %s", path, rec.Code, err, rec.Body.String())
+	}
+	return payload.Data
+}
+
+// A listed id gains "system": true and nothing else changes: the same rows,
+// in the same order, with the same fields. Unlisted rows carry no system key,
+// including a modelMap key whose target is listed (matching is exact). An
+// id matching no row adds nothing.
+func TestRouterCatalog_SystemModelsMarkListedRowsOnly(t *testing.T) {
+	listed := map[string]bool{"plain": true, "vPlain": true}
+	for _, path := range []string{"/v1/models", "/models"} {
+		t.Run(path, func(t *testing.T) {
+			want := rawCatalog(t, systemRouter(t, nil, nil), path)
+			seen := map[string]bool{}
+			for _, row := range want {
+				if _, ok := row["system"]; ok {
+					t.Fatalf("row %v has a system key with systemModels unset", row["id"])
+				}
+				id, _ := row["id"].(string)
+				seen[id] = true
+				if listed[id] {
+					row["system"] = true
+				}
+			}
+			if !seen["plain"] || !seen["vPlain"] || !seen["acme/coder"] {
+				t.Fatalf("fixture rows = %v, want plain, vPlain and acme/coder", want)
+			}
+			got := rawCatalog(t, systemRouter(t, nil, []string{"plain", "vPlain", "ghost"}), path)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("catalog =\n%v\nwant\n%v", got, want)
+			}
+		})
+	}
+}
+
+// Marking is catalog-only: a chat completion naming a system alias reaches
+// the managed server and returns its answer, as it does unlisted.
+func TestRouterProxy_SystemAliasDispatchesUnchanged(t *testing.T) {
+	for _, systemModels := range [][]string{nil, {"plain"}} {
+		var hits int
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/chat/completions" {
+				hits++
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"resp-1","choices":[]}`))
+		}))
+		srv := httptest.NewServer(systemRouter(t, upstream, systemModels).server.Handler)
+		resp := postBytes(t, srv.URL+"/v1/chat/completions", []byte(`{"model":"plain","messages":[]}`))
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK || string(body) != `{"id":"resp-1","choices":[]}` || hits != 1 {
+			t.Errorf("systemModels=%q: status %d body %s upstream hits %d, want 200, the upstream body, 1 hit",
+				systemModels, resp.StatusCode, body, hits)
+		}
+		if got := resp.Header.Get("X-Relay-Model-Target"); got != "plain" {
+			t.Errorf("systemModels=%q: X-Relay-Model-Target = %q, want plain", systemModels, got)
+		}
+		srv.Close()
+		upstream.Close()
 	}
 }
