@@ -20,6 +20,10 @@ type OpenAIEndpoint struct {
 	Group   string `json:"group"`            // display group in model picker; defaults to Name
 	Strict  bool   `json:"strict,omitempty"` // gate non-standard request fields
 
+	// API lists the wire APIs this endpoint serves ("openai", "anthropic").
+	// Empty means openai only. See api_dialect.go.
+	API []string `json:"api,omitempty"`
+
 	// CAFile and PinSHA256 pin the TLS trust anchor for this endpoint's https
 	// hop. Both are validated and turned into a cached transport at config
 	// load — see relay_router_endpoint_tls.go. Neither has any effect on an http baseURL;

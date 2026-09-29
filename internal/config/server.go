@@ -49,7 +49,8 @@ type ServerConfig struct {
 	BinaryPath string              `json:"binaryPath,omitempty"`
 	ModelDir   string              `json:"modelDir,omitempty"` // prepended to relative model paths
 	BasePort   int                 `json:"basePort,omitempty"`
-	Models     []ServerModelConfig `json:"-"` // custom unmarshal
+	API        []string            `json:"api,omitempty"` // wire APIs the section serves; applies to every model. See api_dialect.go.
+	Models     []ServerModelConfig `json:"-"`             // custom unmarshal
 	RawModels  []map[string]any    `json:"models"`
 
 	// Resource budget. All optional; zero means "no limit" for the caps and

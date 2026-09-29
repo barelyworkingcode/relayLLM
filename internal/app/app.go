@@ -170,6 +170,7 @@ func Main() {
 	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)
 	warnAnthropicModelMap(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
+	logAnthropicDialects(cfg.Router.Anthropic, managers, cfg.OpenAI.Endpoints, cfg.Virtual)
 
 	routerAddrs := netutil.ListenAddrs(routerBinds, *routerPort)
 	// Built exactly once — see BuildRelayRouter's doc comment for why:
@@ -517,6 +518,83 @@ func warnAnthropicModelMap(anthropic *config.AnthropicRouterConfig, managers []*
 				"key", key, "target", target)
 		}
 	}
+}
+
+// logAnthropicDialects reports which Anthropic dialect each modelMap key will
+// use, so a missing or misspelled `api` declaration shows at startup instead of
+// as silent translation. native = the target's upstream declares anthropic
+// (a virtual is native only when EVERY target does: a native-to-translated
+// failover would rewrite replayed history mid-conversation).
+func logAnthropicDialects(anthropic *config.AnthropicRouterConfig, managers []*servermanager.ServerManager, endpoints []config.OpenAIEndpoint, virtual *config.VirtualLLMConfig) {
+	if anthropic == nil {
+		declared := false
+		for _, mgr := range managers {
+			declared = declared || mgr.SpeaksAnthropic()
+		}
+		for _, ep := range endpoints {
+			declared = declared || ep.SpeaksAnthropic()
+		}
+		if declared {
+			slog.Warn("router: an endpoint or managed section declares api \"anthropic\" but router.anthropic is not configured; /v1/messages stays disabled")
+		}
+		return
+	}
+
+	endpointNamed := func(name string) *config.OpenAIEndpoint {
+		for i := range endpoints {
+			if endpoints[i].Name == name {
+				return &endpoints[i]
+			}
+		}
+		return nil
+	}
+	managerFor := func(alias string) *servermanager.ServerManager {
+		for _, mgr := range managers {
+			if mgr.HasAlias(alias) {
+				return mgr
+			}
+		}
+		return nil
+	}
+
+	for key, target := range anthropic.ModelMap {
+		native := false
+		if mgr := managerFor(target); mgr != nil {
+			native = mgr.SpeaksAnthropic()
+		} else if v := virtual.Find(target); v != nil {
+			native, mixed := len(v.Targets) > 0, false
+			for _, t := range v.Targets {
+				speaks := false
+				if t.Alias != "" {
+					speaks = managerFor(t.Alias).SpeaksAnthropic()
+				} else if ep := endpointNamed(t.Endpoint); ep != nil {
+					speaks = ep.SpeaksAnthropic()
+				}
+				native = native && speaks
+				mixed = mixed || speaks
+			}
+			mixed = mixed && !native
+			if mixed {
+				slog.Warn("router: anthropic.modelMap target is a virtual model whose targets mix anthropic and openai-only upstreams; it will translate",
+					"key", key, "target", target)
+			}
+			logDialect(key, target, native)
+			continue
+		} else if prefix, _, ok := strings.Cut(target, "/"); ok {
+			if ep := endpointNamed(prefix); ep != nil {
+				native = ep.SpeaksAnthropic()
+			}
+		}
+		logDialect(key, target, native)
+	}
+}
+
+func logDialect(key, target string, native bool) {
+	dialect := "translated"
+	if native {
+		dialect = "native"
+	}
+	slog.Info("router: anthropic.modelMap dialect", "key", key, "target", target, "dialect", dialect)
 }
 
 func envOrDefault(key, fallback string) string {
