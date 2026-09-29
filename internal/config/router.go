@@ -16,6 +16,13 @@ type RouterConfig struct {
 	// api.openai.com). See relay_router_passthrough.go. Absent or empty mounts
 	// nothing.
 	Passthrough map[string]PassthroughConfig `json:"passthrough,omitempty"`
+
+	// SystemModels lists exact /v1/models ids (a bare managed alias, a
+	// virtual name, "<endpoint>/<upstream id>", or a modelMap key) that are
+	// for machine clients only. Each listed row is marked "system": true so a
+	// chat picker can hide it; dispatch is unchanged. An empty entry fails
+	// config load.
+	SystemModels []string `json:"systemModels,omitempty"`
 }
 
 // ForwardsClientCredentials reports whether any route forwards the client's
