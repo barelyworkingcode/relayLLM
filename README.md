@@ -187,6 +187,15 @@ reference including the `ANTHROPIC_CUSTOM_MODEL_OPTION` client-side setting
 needed to make a redirected model selectable in Claude Code's own `/model`
 picker.
 
+A target whose engine speaks the Anthropic Messages API itself (oMLX, Splash)
+can skip the translation: declare `"api": ["openai", "anthropic"]` on its
+`openai.endpoints` entry, or at section level on `llama-server` / `mlx-serve` /
+`splash-serve`. Requests to it then pass through byte-for-byte except the
+`model` field, so thinking blocks, prompt caching and tool blocks arrive
+intact, and token usage shows up in `/api/status/detailed`. Absent means
+translation; an unknown value fails config load. A virtual model goes native
+only if all its targets declare it.
+
 ## API
 
 The authenticated API is a small Unix-socket HTTP surface, bearer-protected
