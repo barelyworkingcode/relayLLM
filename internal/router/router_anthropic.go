@@ -42,8 +42,8 @@ type anthropicRouterState struct {
 }
 
 // setAnthropic installs the router's Anthropic-compat state (settings.json's
-// router.anthropic). Subject to the same pre-serve ordering constraint as
-// setReasoningEffortMap: StartRelayRouter calls this before spawning any of
+// router.anthropic). MUST be called before the router starts serving (the
+// pre-serve ordering setPassthrough and setTLS share): StartRelayRouter calls this before spawning any of
 // Serve's per-listener goroutines. nil cfg leaves p.anthropic nil (routes 404); an
 // invalid upstream URL disables the feature with a startup log rather than
 // failing the whole process, matching this codebase's "additive feature,
@@ -296,8 +296,7 @@ func (p *RelayRouter) newAnthropicPassthroughProxy() *httputil.ReverseProxy {
 // handleAnthropicRedirect translates the Anthropic request to OpenAI, then
 // re-enters the router's existing dispatch (p.handleProxy) exactly as if an
 // OpenAI client had asked for target directly — getting managed-server
-// leases, virtual-model failover/affinity, and the reasoning_effort rewrite
-// knobs for free. tw wraps the real ResponseWriter and never forwards the
+// leases and virtual-model failover/affinity for free. tw wraps the real ResponseWriter and never forwards the
 // client's Anthropic credential: innerReq is built fresh with only a
 // Content-Type header, never copied from r.
 func (p *RelayRouter) handleAnthropicRedirect(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, target string) {
