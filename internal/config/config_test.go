@@ -69,39 +69,6 @@ func TestParseUnifiedConfig_VirtualLLMs(t *testing.T) {
 	}
 }
 
-func TestParseUnifiedConfig_RouterSection(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{
-		"router": {"reasoningEffortMap": {"minimal": "none"}}
-	}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Router == nil {
-		t.Fatal("cfg.Router is nil")
-	}
-	if got := cfg.Router.ReasoningEffortMap["minimal"]; got != "none" {
-		t.Errorf("reasoningEffortMap[minimal] = %q, want %q", got, "none")
-	}
-}
-
-// Sibling of TestParseUnifiedConfig_RouterSection above, for the
-// chat_template_kwargs merge table — see RouterConfig.ReasoningEffortTemplateKwargs.
-func TestParseUnifiedConfig_RouterSection_ReasoningEffortTemplateKwargs(t *testing.T) {
-	cfg, err := parseUnifiedConfig([]byte(`{
-		"router": {"reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}}}
-	}`), "test.json")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Router == nil {
-		t.Fatal("cfg.Router is nil")
-	}
-	got, ok := cfg.Router.ReasoningEffortTemplateKwargs["minimal"]["enable_thinking"]
-	if boolVal, isBool := got.(bool); !ok || !isBool || boolVal {
-		t.Errorf("reasoningEffortTemplateKwargs[minimal][enable_thinking] = %v (present=%v), want false", got, ok)
-	}
-}
-
 // Absent "router" section → empty, non-nil config, exactly like Virtual/Llama
 // above: callers dereference cfg.Router without a nil check.
 func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
@@ -112,10 +79,30 @@ func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
 	if cfg.Router == nil {
 		t.Fatal("cfg.Router should be non-nil even when absent")
 	}
-	if len(cfg.Router.ReasoningEffortMap) != 0 {
-		t.Errorf("reasoningEffortMap = %v, want empty", cfg.Router.ReasoningEffortMap)
+}
+
+// A settings.json written before the reasoning-effort rewrites were removed
+// still loads, and the router keys that remain are read as before.
+func TestParseUnifiedConfig_RemovedReasoningKeysStillLoad(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{
+		"openai": {"endpoints": [{"name": "ep", "baseURL": "http://127.0.0.1:1234/v1"}]},
+		"router": {
+			"reasoningEffortMap": {"minimal": "none"},
+			"reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}},
+			"anthropic": {"modelMap": {"acme/coder": "ep/code"}},
+			"passthrough": {"acme": {"upstream": "https://api.example.com"}}
+		}
+	}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if len(cfg.Router.ReasoningEffortTemplateKwargs) != 0 {
-		t.Errorf("reasoningEffortTemplateKwargs = %v, want empty", cfg.Router.ReasoningEffortTemplateKwargs)
+	if len(cfg.OpenAI.Endpoints) != 1 || cfg.OpenAI.Endpoints[0].Name != "ep" {
+		t.Errorf("openai endpoints = %+v, want one named ep", cfg.OpenAI.Endpoints)
+	}
+	if cfg.Router.Anthropic == nil || cfg.Router.Anthropic.ModelMap["acme/coder"] != "ep/code" {
+		t.Errorf("router.anthropic = %+v, want modelMap acme/coder -> ep/code", cfg.Router.Anthropic)
+	}
+	if got := cfg.Router.Passthrough["acme"].Upstream; got != "https://api.example.com" {
+		t.Errorf("router.passthrough[acme].upstream = %q, want https://api.example.com", got)
 	}
 }

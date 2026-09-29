@@ -156,23 +156,7 @@ pin expires after an hour of disuse, or falls back to the remaining
 candidates immediately if its target has since been removed from config.
 Details in [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
 
-Configure `router.reasoningEffortMap` in `settings.json` to rewrite a
-`reasoning_effort` value before it reaches a backend, e.g. `{"minimal":
-"none"}` for a llama.cpp server that 500s on `"minimal"` but treats `"none"`
-as off. Absent or empty (the default) disables rewriting entirely. Mapping a
-value to `""` removes the field instead of sending it empty. Applies to
-every proxied path — managed alias, endpoint, and virtual model alike.
-
-That value swap only fixes backends that interpret `reasoning_effort`
-server-side (llama.cpp). oMLX instead forwards it verbatim into the model's
-chat template, so turning reasoning off there needs a different field:
-`router.reasoningEffortTemplateKwargs`, e.g. `{"minimal": {"enable_thinking":
-false}}`, merges that object into the body's top-level
-`chat_template_kwargs` when the request's original `reasoning_effort` value
-matches a configured key, without clobbering any key the client's own body
-already sets. Configure both knobs together for a value that reliably turns
-reasoning off across both backend families. Also absent/empty by default.
-Details in [CLAUDE.md](CLAUDE.md#relay-router-internalrouterroutergo).
+Turning reasoning off is per-client config, not router config: relayLLM forwards `reasoning_effort` and `chat_template_kwargs` as sent (e.g. Oh My Pi `models.yml` `compat.reasoningEffortMap` / `compat.thinkingFormat: qwen-chat-template`, pi `models.json` `thinkingLevelMap` / `compat.thinkingFormat`).
 
 Configure `router.anthropic` to let Claude Code (the `claude` CLI) point at
 the router via `ANTHROPIC_BASE_URL` — real Claude models proxy through to

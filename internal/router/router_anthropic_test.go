@@ -3,7 +3,7 @@ package router
 // Coverage for the router-level Anthropic-compat wiring (relay_router_anthropic.go):
 // passthrough byte-fidelity, redirect dispatch + credential isolation, error
 // mapping, config gating, and /v1/models catalog rows. Style matches
-// relay_router_reasoning_effort_test.go: httptest fakes standing in for
+// router_test.go: httptest fakes standing in for
 // backends, NewRelayRouter + a pre-serve setter, the router's real handler
 // wrapped in a second httptest.NewServer, postBytes to drive it.
 
@@ -174,9 +174,8 @@ func TestAnthropic_Passthrough_APIPrefixReachesUpstream(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // anthropicRedirectFixture wires a router whose "local-model" modelMap
-// target is a managed alias backed by upstream — same trick
-// newManagedAliasRouter uses in the reasoning-effort tests, reused here so
-// the redirect path exercises a real managed-server Acquire/dispatch, not a
+// target is a managed alias backed by upstream (InjectReadyInstanceForTest
+// pointed at a real port), so the redirect path exercises a real managed-server Acquire/dispatch, not a
 // mock of it.
 func anthropicRedirectFixture(t *testing.T, alias string, upstream *httptest.Server, modelMap map[string]string) *RelayRouter {
 	t.Helper()

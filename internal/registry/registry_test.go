@@ -7,7 +7,7 @@ package registry
 // "unknown model" even though the endpoint was up. See CLAUDE.md's
 // Relay-router section for the full story.
 //
-// Style matches relay_router_test.go / relay_router_reasoning_effort_test.go:
+// Style matches relay_router_test.go:
 // httptest fakes standing in for upstreams, no sleeping on real time.
 
 import (

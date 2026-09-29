@@ -47,7 +47,7 @@ var passthroughReservedNames = map[string]bool{"v1": true, "api": true, "models"
 var passthroughNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // setPassthrough mounts one /<name>/ route per valid entry. It has the same
-// pre-serve constraint as setReasoningEffortMap: StartRelayRouter calls it
+// pre-serve constraint as setAnthropic: StartRelayRouter calls it
 // before Serve. An invalid entry is logged and skipped rather than failing
 // startup, the same fail-safe convention setAnthropic follows.
 func (p *RelayRouter) setPassthrough(cfg map[string]config.PassthroughConfig) {

@@ -52,39 +52,19 @@ type RelayRouter struct {
 	// router in a test needs no wiring.
 	metrics *ProxyMetrics
 
-	// reasoningEffortMap rewrites a top-level "reasoning_effort" string field
-	// on every proxied body before it reaches a backend — see config.RouterConfig
-	// and rewriteProxyBody. nil/empty (the zero value, and what every
-	// constructor leaves it at) means no rewriting at all; wired in from
-	// settings.json via StartRelayRouter's trailing *config.RouterConfig parameter
-	// (see setReasoningEffortMap), applied before the serving goroutine is
-	// spawned rather than a NewRelayRouter constructor parameter, to keep
-	// this opt-in feature from touching NewRelayRouter's much larger set of
-	// call sites. reasoningEffortTemplateKwargs, below, is its sibling knob.
-	reasoningEffortMap map[string]string
-
-	// reasoningEffortTemplateKwargs merges an object into the proxied body's
-	// top-level "chat_template_kwargs" field — see config.RouterConfig for the
-	// oMLX/llama.cpp measurements this exists to satisfy, and
-	// rewriteProxyBody / applyReasoningEffortTemplateKwargs for the merge
-	// semantics. Same nil/empty-means-off shape, wired in the same way
-	// (setReasoningEffortTemplateKwargs, called before serving starts), as
-	// reasoningEffortMap above.
-	reasoningEffortTemplateKwargs map[string]map[string]any
-
 	// tlsCert/tlsKey, when both set, make Serve serve every listener over
 	// TLS instead of plain http — this is the router's own listener(s)
 	// (the relayLLM-to-upstream hop is Part A, above; this is a client
-	// dialing INTO the router). Wired in the same before-the-serving-goroutine
-	// way as the reasoningEffort* fields above, via setTLS.
+	// dialing INTO the router). Wired before the serving goroutines are
+	// spawned, via setTLS.
 	tlsCert string
 	tlsKey  string
 
 	// anthropic holds the Anthropic Messages API compatibility state
 	// (settings.json's router.anthropic) — see relay_router_anthropic.go.
 	// nil means the feature is off: /v1/messages and friends 404. Wired in
-	// the same pre-serve-setter way as the reasoningEffort* fields above, via
-	// setAnthropic.
+	// a pre-serve setter (setAnthropic), before the serving goroutines are
+	// spawned.
 	anthropic *anthropicRouterState
 
 	// mux is kept so setPassthrough can mount its configured /<name>/ routes
@@ -106,27 +86,6 @@ type RelayRouter struct {
 	socketPath string
 }
 
-// setReasoningEffortMap installs the router-level reasoning_effort rewrite
-// table (settings.json's router.reasoningEffortMap). nil or empty disables
-// rewriting, which is also this field's zero value, so a router this is
-// never called on behaves exactly as it did before the feature existed.
-//
-// MUST be called before the router starts serving — StartRelayRouter is the
-// only production call site, and it calls this before spawning any of
-// Serve's per-listener goroutines. Go's memory model guarantees a
-// goroutine's creation happens-before its execution, so every
-// request-handling goroutine transitively spawned from one of those is
-// guaranteed to observe the write; a call made after they're already
-// running (the previous shape: main called the exported
-// SetReasoningEffortMap after StartRelayRouter had already returned) races
-// the first accepted connection under -race. Kept unexported, rather than
-// removed, so tests that drive a router's handler directly without ever
-// calling Listen/Serve (no goroutine, so no race) can still configure it
-// post-construction.
-func (p *RelayRouter) setReasoningEffortMap(m map[string]string) {
-	p.reasoningEffortMap = m
-}
-
 // RecordAffinityForTest seeds a conversation pin directly, bypassing a real
 // proxied request. Test-only seam for callers outside this package that need
 // to assert on affinity-pinned dashboard rows without driving a full request
@@ -135,22 +94,10 @@ func (p *RelayRouter) RecordAffinityForTest(virtual, conversation, target string
 	p.affinity.record(virtual, conversation, target)
 }
 
-// setReasoningEffortTemplateKwargs installs the router-level
-// chat_template_kwargs merge table (settings.json's
-// router.reasoningEffortTemplateKwargs). nil or empty disables it — also
-// this field's zero value — so a router this is never called on behaves
-// exactly as it did before the feature existed. Subject to the same
-// pre-serve constraint as setReasoningEffortMap above (see its comment):
-// StartRelayRouter calls this before spawning any of Serve's per-listener
-// goroutines.
-func (p *RelayRouter) setReasoningEffortTemplateKwargs(m map[string]map[string]any) {
-	p.reasoningEffortTemplateKwargs = m
-}
-
 // setTLS installs the router listener's TLS cert/key pair (settings.json has
 // no section for this — it comes from --router-tls-cert/--router-tls-key,
 // validated as a matched pair in main). Subject to the same pre-serve
-// ordering constraint as setReasoningEffortMap above: StartRelayRouter calls
+// ordering constraint as setAnthropic: StartRelayRouter calls
 // this before spawning any of Serve's per-listener goroutines.
 func (p *RelayRouter) setTLS(cert, key string) {
 	p.tlsCert = cert
@@ -185,7 +132,7 @@ func NewRelayRouter(addr string, managers []*servermanager.ServerManager, regist
 	// Anthropic Messages API compatibility (relay_router_anthropic.go).
 	// Handlers 404 at request time when p.anthropic is nil (feature off) —
 	// registered unconditionally here since setAnthropic runs after
-	// construction, same ordering as the reasoningEffort* setters.
+	// construction, same pre-serve ordering as the other setters.
 	mux.HandleFunc("POST /v1/messages", p.handleAnthropicMessages)
 	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleAnthropicCountTokens)
 	mux.HandleFunc("/api/", p.handleAnthropicPassthrough)
@@ -452,7 +399,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// ordering means such a key would silently shadow it.
 	if p.anthropic != nil {
 		if target, ok := p.anthropic.modelMap[envelope.Model]; ok && target != "" {
-			if rewritten, err := rewriteProxyBody(body, target, nil, nil); err == nil {
+			if rewritten, err := rewriteProxyBody(body, target); err == nil {
 				body = rewritten
 				envelope.Model = target
 			}
@@ -551,17 +498,8 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// already in w.Header() rather than clearing it first.
 	setModelTargetHeader(w, alias)
 
-	// No model swap needed here — the client already sent the bare alias the
-	// managed server expects — but the reasoning_effort rewrite still applies
-	// (see config.RouterConfig): a client hitting a managed alias has exactly the
-	// same backend-vocabulary problem as one hitting an endpoint.
-	rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
-	if err != nil {
-		slog.Warn("relay router: body rewrite failed", "alias", alias, "error", err)
-		writeRouterError(w, http.StatusBadRequest, "failed to rewrite request body")
-		return
-	}
-
+	// No model swap: the client already sent the bare alias the managed
+	// server expects, so the body is forwarded exactly as received.
 	target, err := url.Parse(endpoint.BaseURL)
 	if err != nil {
 		// endpoint.BaseURL is normally built internally (e.g.
@@ -574,7 +512,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		writeRouterError(w, http.StatusBadGateway, fmt.Sprintf("invalid managed server endpoint: %v", err))
 		return
 	}
-	newUpstreamProxy(target, rewritten, endpoint.APIKey, mgr.Profile().Kind, alias, nil).ServeHTTP(w, r)
+	newUpstreamProxy(target, body, endpoint.APIKey, mgr.Profile().Kind, alias, nil).ServeHTTP(w, r)
 }
 
 // routeOpenAI rewrites the body's `model` to the bare upstream id (so OMLX
@@ -582,7 +520,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep config.OpenAIEndpoint, upstreamID string, body []byte, conn *ProxyConn) {
 	conn.setTarget("endpoint", ep.Name+"/"+upstreamID)
 	setModelTargetHeader(w, ep.Name+"/"+upstreamID)
-	rewritten, err := rewriteProxyBody(body, upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
+	rewritten, err := rewriteProxyBody(body, upstreamID)
 	if err != nil {
 		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
 		http.Error(w, `{"error":"failed to rewrite model field"}`, http.StatusBadRequest)
@@ -765,15 +703,14 @@ func upstreamPath(basePath, inbound string) string {
 // failure and Serve simply runs on whichever listeners exist.
 //
 // router (may be nil) carries config.RouterConfig-level behavior — the
-// reasoning_effort rewrite map and its sibling chat_template_kwargs merge
-// table — and both are applied via their setters before any of Serve's
-// per-listener goroutines are spawned, not after StartRelayRouter returns.
-// That ordering is load-bearing, not stylistic: Go's memory model guarantees
-// a goroutine's creation happens-before its execution, so setting the fields
-// first means every connection-handling goroutine transitively spawned from
-// Serve is guaranteed to observe them without synchronization. Setting them
-// after a listener is already serving would let an accepted request read
-// the field concurrently with the write — a real, race-detector-visible
+// anthropic and passthrough settings — applied via their setters before any
+// of Serve's per-listener goroutines are spawned, not after StartRelayRouter
+// returns. That ordering is load-bearing, not stylistic: Go's memory model
+// guarantees a goroutine's creation happens-before its execution, so setting
+// the fields first means every connection-handling goroutine transitively
+// spawned from Serve is guaranteed to observe them without synchronization.
+// Setting them after a listener is already serving would let an accepted
+// request read the field concurrently with the write — a real, race-detector-visible
 // data race under live traffic. StartRelayRouter is the one production call
 // site for this, chosen over adding the parameters to NewRelayRouter
 // because it has far fewer call sites to touch.
@@ -782,7 +719,7 @@ func upstreamPath(basePath, inbound string) string {
 // mean plain http); main validates they're either both set or both empty
 // before calling in, so this never has to fail startup on a mismatched pair
 // itself. Applied via setTLS under the same pre-serve ordering rule as the
-// reasoningEffort* fields. One cert/key pair covers every bound address —
+// other setters. One cert/key pair covers every bound address —
 // there's no per-bind TLS config — so the cert must be valid for all of
 // them if more than one is configured.
 func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) (*RelayRouter, error) {
@@ -799,7 +736,7 @@ func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, r
 
 // BuildRelayRouter constructs and fully configures a RelayRouter — managers,
 // registry, virtual config, and every setting router.sock's TCP sibling
-// applies (reasoningEffortMap, anthropic, passthrough, TLS) — without
+// applies (anthropic, passthrough, TLS) — without
 // binding or serving any listener.
 //
 // Split out of StartRelayRouter so a caller that needs the router object
@@ -819,8 +756,6 @@ func StartRelayRouter(addrs []string, managers []*servermanager.ServerManager, r
 func BuildRelayRouter(managers []*servermanager.ServerManager, registry *registry.ProxyRegistry, virtual *config.VirtualLLMConfig, router *config.RouterConfig, tlsCert, tlsKey string) *RelayRouter {
 	p := NewRelayRouter("", managers, registry, virtual)
 	if router != nil {
-		p.setReasoningEffortMap(router.ReasoningEffortMap)
-		p.setReasoningEffortTemplateKwargs(router.ReasoningEffortTemplateKwargs)
 		p.setAnthropic(router.Anthropic)
 		p.setPassthrough(router.Passthrough)
 	}

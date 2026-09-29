@@ -384,11 +384,6 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target ResolvedVi
 		if err != nil {
 			return nil, nil, err
 		}
-		rewritten, err := rewriteProxyBody(body, "", p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
-		if err != nil {
-			rel()
-			return nil, nil, fmt.Errorf("rewrite request body: %w", err)
-		}
 		targetURL, err := url.Parse(endpoint.BaseURL)
 		if err != nil {
 			rel()
@@ -397,12 +392,12 @@ func (p *RelayRouter) buildVirtualAttempt(ctx context.Context, target ResolvedVi
 			// the loop moves on to the next target.
 			return nil, nil, fmt.Errorf("invalid managed server endpoint: %w", err)
 		}
-		proxy := newUpstreamProxy(targetURL, rewritten, endpoint.APIKey, target.manager.Profile().Kind, target.alias, onError)
+		proxy := newUpstreamProxy(targetURL, body, endpoint.APIKey, target.manager.Profile().Kind, target.alias, onError)
 		proxy.Transport = config.VirtualDialTransport
 		return proxy, rel, nil
 	}
 
-	rewritten, err := rewriteProxyBody(body, target.upstreamID, p.reasoningEffortMap, p.reasoningEffortTemplateKwargs)
+	rewritten, err := rewriteProxyBody(body, target.upstreamID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("rewrite request body: %w", err)
 	}

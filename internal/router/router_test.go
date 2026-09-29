@@ -24,6 +24,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"relayllm/internal/config"
 	regpkg "relayllm/internal/registry"
 	"relayllm/internal/servermanager"
@@ -40,7 +43,7 @@ import (
 
 func TestRouter_RewriteModelField_SwapsTopLevelModel(t *testing.T) {
 	body := []byte(`{"model":"omlx/Qwen3.5-27B","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := rewriteProxyBody(body, "Qwen3.5-27B", nil, nil)
+	out, err := rewriteProxyBody(body, "Qwen3.5-27B")
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -64,7 +67,7 @@ func TestRouter_RewriteModelField_SwapsTopLevelModel(t *testing.T) {
 }
 
 func TestRouter_RewriteModelField_InvalidJSON(t *testing.T) {
-	_, err := rewriteProxyBody([]byte(`{not json`), "x", nil, nil)
+	_, err := rewriteProxyBody([]byte(`{not json`), "x")
 	if err == nil {
 		t.Error("expected error on malformed body, got nil")
 	}
@@ -1642,34 +1645,6 @@ func TestRouterAffinity_VirtualAliasTarget_BadEndpointURL_FallsBackToNextCandida
 	}
 }
 
-// StartRelayRouter's trailing *config.RouterConfig parameter must be fully applied
-// before it returns, not via a separate post-construction setter call —
-// applying it after the listener is already serving would race the first
-// accepted connection under real traffic (unsynchronized read/write on
-// reasoningEffortMap, the kind of thing -race flags). Reading the field
-// directly here (rather than over HTTP) proves the ordering structurally:
-// the write happens inside StartRelayRouter itself, before Serve's
-// "go func(){...}()" statements start serving.
-func TestStartRelayRouter_ReasoningEffortMapAppliedBeforeReturning(t *testing.T) {
-	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, &config.ServerConfig{
-		Models: []config.ServerModelConfig{{Alias: "a"}},
-	}, "")
-	router, err := StartRelayRouter([]string{":0"}, []*servermanager.ServerManager{mgr}, nil, nil, &config.RouterConfig{
-		ReasoningEffortMap: map[string]string{"minimal": "none"},
-	}, "", "")
-	if err != nil {
-		t.Fatalf("StartRelayRouter: %v", err)
-	}
-	if router == nil {
-		t.Fatal("expected a non-nil router")
-	}
-	t.Cleanup(func() { router.Close() })
-
-	if got := router.reasoningEffortMap["minimal"]; got != "none" {
-		t.Errorf("reasoningEffortMap[minimal] = %q, want %q to be applied by the time StartRelayRouter returned", got, "none")
-	}
-}
-
 // A router.anthropic-only configuration — no managed servers, no OpenAI
 // endpoints — must still start: passthrough to api.anthropic.com is a real
 // destination needing neither. Regression test for the config that used to
@@ -1715,10 +1690,6 @@ func TestStartRelayRouter_NilRouterConfigIsValid(t *testing.T) {
 		t.Fatal("expected a non-nil router")
 	}
 	t.Cleanup(func() { router.Close() })
-
-	if router.reasoningEffortMap != nil {
-		t.Errorf("reasoningEffortMap = %v, want nil (zero value) when config.RouterConfig is nil", router.reasoningEffortMap)
-	}
 }
 
 // StartRelayRouter given several addresses must bind and serve every one of
@@ -1920,4 +1891,100 @@ func newFakeOpenAIUpstream(t *testing.T, modelIDs []string) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// bodyRecordingUpstream returns a fake backend that stashes every request
+// body it receives (into *seen) and answers 200 with a minimal OpenAI-shaped
+// body — enough for the router's reverse proxy to consider the exchange a
+// success on every dispatch branch (managed, endpoint, virtual).
+func bodyRecordingUpstream(t *testing.T, seen *[]byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "upstream-model"}}})
+			return
+		}
+		*seen, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp","choices":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// reasoning_effort and chat_template_kwargs pass through untouched on both
+// the endpoint and managed-alias routes, even when settings.json still names
+// the removed router.reasoningEffortMap / reasoningEffortTemplateKwargs keys.
+func TestRouter_ReasoningFieldsForwardedUnchanged(t *testing.T) {
+	var seen []byte
+	upstream := bodyRecordingUpstream(t, &seen)
+
+	settings, err := json.Marshal(map[string]any{
+		"openai": map[string]any{"endpoints": []map[string]any{
+			{"name": "ep", "baseURL": upstream.URL + "/v1"},
+		}},
+		"llama-server": map[string]any{"models": []map[string]any{
+			{"alias": "local-a", "model": "/fake"},
+		}},
+		"router": map[string]any{
+			"reasoningEffortMap":            map[string]any{"minimal": "none"},
+			"reasoningEffortTemplateKwargs": map[string]any{"minimal": map[string]any{"enable_thinking": true, "y": 2}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadConfig(dir, "")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, loaded.Llama, "")
+	mgr.InjectReadyInstanceForTest("local-a", upstream.Listener.Addr().(*net.TCPAddr).Port, 0)
+	r, err := StartRelayRouter([]string{"127.0.0.1:0"}, []*servermanager.ServerManager{mgr},
+		regpkg.NewProxyRegistry(loaded.OpenAI), loaded.Virtual, loaded.Router, "", "")
+	if err != nil || r == nil {
+		t.Fatalf("StartRelayRouter = (%v, %v), want a running router", r, err)
+	}
+	t.Cleanup(func() { r.Close() })
+	waitForRouterUp(t, r.Addr())
+
+	const rest = `,"reasoning_effort":"minimal","chat_template_kwargs":{"enable_thinking":false,"x":1},"messages":[{"role":"user","content":"hi"}]}`
+	cases := []struct {
+		name, model, wantModel string
+		byteIdentical          bool
+	}{
+		{"endpoint", "ep/upstream-id", "upstream-id", false},
+		{"managed alias", "local-a", "local-a", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = nil
+			sent := []byte(`{"model":"` + tc.model + `"` + rest)
+			resp := postBytes(t, "http://"+r.Addr()+"/v1/chat/completions", sent)
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d body=%s", resp.StatusCode, body)
+			}
+			if tc.byteIdentical && !bytes.Equal(seen, sent) {
+				t.Errorf("upstream body = %s, want byte-identical %s", seen, sent)
+			}
+			var got, want map[string]any
+			if err := json.Unmarshal(seen, &got); err != nil {
+				t.Fatalf("decode upstream body %q: %v", seen, err)
+			}
+			if err := json.Unmarshal(sent, &want); err != nil {
+				t.Fatal(err)
+			}
+			want["model"] = tc.wantModel
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("upstream body = %v, want %v", got, want)
+			}
+		})
+	}
 }
