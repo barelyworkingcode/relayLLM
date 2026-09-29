@@ -44,7 +44,7 @@ func Main() {
 	internalToken := flag.String("token", envOrDefault("RELAY_LLM_TOKEN", ""), "Bearer token required on every request. Empty → auto-generated random hex (printed at startup).")
 	llamaServerPath := flag.String("llama-server-path", envOrDefault("LLAMA_SERVER_PATH", ""), "Path to llama-server binary (default: llama-server on PATH)")
 	mlxServePath := flag.String("mlx-serve-path", envOrDefault("MLX_SERVE_PATH", ""), "Path to mlx-serve binary (default: mlx-serve on PATH)")
-	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve) + OpenAI endpoints (empty to disable)")
+	routerPort := flag.String("router-port", envOrDefault("RELAY_ROUTER_PORT", ""), "Port for the unified OpenAI-compatible relay-router fronting managed servers (llama-server, mlx-serve, splash) + OpenAI endpoints (empty to disable)")
 	routerBind := flag.String("router-bind", envOrDefault("RELAY_ROUTER_BIND", "127.0.0.1"), "Comma-separated bind addresses for the relay-router TCP listener, one per interface (e.g. 127.0.0.1,192.168.64.1). Include 0.0.0.0 to accept connections from other hosts.")
 	routerTLSCert := flag.String("router-tls-cert", envOrDefault("RELAY_LLM_ROUTER_TLS_CERT", ""), "TLS certificate file for the relay-router listener. Requires --router-tls-key; empty (with key also empty) serves plain http.")
 	routerTLSKey := flag.String("router-tls-key", envOrDefault("RELAY_LLM_ROUTER_TLS_KEY", ""), "TLS private key file for the relay-router listener. Requires --router-tls-cert.")
@@ -142,19 +142,30 @@ func Main() {
 		slog.Info("mlx models configured", "count", len(cfg.Mlx.Models), "binary", mlxManager.BinaryPath())
 	}
 
+	// No --splash-path flag: the binary is config binaryPath, else "splash" on PATH.
+	var splashManager *servermanager.ServerManager
+	if len(cfg.Splash.Models) > 0 {
+		splashManager = servermanager.NewServerManager(servermanager.SplashProfile, cfg.Splash, "")
+		splashManager.StartIdleReaper()
+		slog.Info("splash models configured", "count", len(cfg.Splash.Models), "binary", splashManager.BinaryPath())
+	}
+
 	var proxyRegistry *registry.ProxyRegistry
 	if len(cfg.OpenAI.Endpoints) > 0 {
 		proxyRegistry = registry.NewProxyRegistry(cfg.OpenAI)
 	}
 
 	// Slice order is the router's dispatch priority: llama wins alias
-	// collisions with mlx.
+	// collisions with mlx, and mlx with splash.
 	var managers []*servermanager.ServerManager
 	if llamaManager != nil {
 		managers = append(managers, llamaManager)
 	}
 	if mlxManager != nil {
 		managers = append(managers, mlxManager)
+	}
+	if splashManager != nil {
+		managers = append(managers, splashManager)
 	}
 	warnAliasShadowing(managers, cfg.OpenAI.Endpoints)
 	warnVirtualModelConfig(cfg.Virtual, managers, cfg.OpenAI.Endpoints)

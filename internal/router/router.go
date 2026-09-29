@@ -379,7 +379,7 @@ func (p *RelayRouter) managedModelFromBody(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeRouterError(w, http.StatusBadRequest,
-		fmt.Sprintf("model %q is not a managed server; only llama-server and mlx-serve models can be loaded or unloaded", body.Model))
+		fmt.Sprintf("model %q is not a managed server; only llama-server, mlx-serve and splash models can be loaded or unloaded", body.Model))
 	return nil, "", false
 }
 

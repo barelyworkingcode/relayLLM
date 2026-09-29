@@ -31,6 +31,7 @@ type LoadedConfig struct {
 	Router  *RouterConfig
 	Llama   *ServerConfig
 	Mlx     *ServerConfig
+	Splash  *ServerConfig
 	Pi      *PiConfig
 	PTY     map[string]TerminalTemplate
 
@@ -173,6 +174,7 @@ func LoadConfig(dataDir string, openaiConfigOverride string) (*LoadedConfig, err
 		Router:  &RouterConfig{},
 		Llama:   llamaCfg,
 		Mlx:     &ServerConfig{},
+		Splash:  &ServerConfig{},
 		Pi:      &PiConfig{},
 	}, nil
 }
@@ -189,6 +191,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		Router                  *RouterConfig               `json:"router"`
 		LlamaServer             *json.RawMessage            `json:"llama-server"`
 		MlxServer               *json.RawMessage            `json:"mlx-serve"`
+		SplashServe             *json.RawMessage            `json:"splash-serve"`
 		Pi                      *PiConfig                   `json:"pi"`
 		PTY                     map[string]TerminalTemplate `json:"pty"`
 		AllowPlaintextEndpoints bool                        `json:"allowPlaintextEndpoints,omitempty"`
@@ -218,6 +221,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		if err := json.Unmarshal(*raw.LlamaServer, llamaCfg); err != nil {
 			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
 		}
+		if err := MarkIdleTimeoutPresence(llamaCfg, *raw.LlamaServer); err != nil {
+			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
+		}
 		if err := ParseServerRawModels(llamaCfg, source); err != nil {
 			return nil, err
 		}
@@ -228,7 +234,32 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		if err := json.Unmarshal(*raw.MlxServer, mlxCfg); err != nil {
 			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
 		}
+		if err := MarkIdleTimeoutPresence(mlxCfg, *raw.MlxServer); err != nil {
+			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
+		}
 		if err := ParseServerRawModels(mlxCfg, source); err != nil {
+			return nil, err
+		}
+	}
+
+	// splash-serve has the same schema as the other managed sections. Its
+	// idleTimeoutMinutes presence matters (absent = profile default 60,
+	// explicit 0 = never reclaim), hence MarkIdleTimeoutPresence on all three.
+	splashCfg := &ServerConfig{}
+	if raw.SplashServe != nil {
+		if err := json.Unmarshal(*raw.SplashServe, splashCfg); err != nil {
+			return nil, fmt.Errorf("parse %s splash-serve: %w", source, err)
+		}
+		if err := MarkIdleTimeoutPresence(splashCfg, *raw.SplashServe); err != nil {
+			return nil, fmt.Errorf("parse %s splash-serve: %w", source, err)
+		}
+		// A Splash model is a Hugging Face repo id, not a path: joining
+		// modelDir onto it would corrupt the id, so drop it (and say so).
+		if splashCfg.ModelDir != "" {
+			slog.Warn("splash-serve: modelDir is ignored (models are repo ids, not paths)", "source", source, "modelDir", splashCfg.ModelDir)
+			splashCfg.ModelDir = ""
+		}
+		if err := ParseServerRawModels(splashCfg, source); err != nil {
 			return nil, err
 		}
 	}
@@ -245,6 +276,7 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		Router:                  routerCfg,
 		Llama:                   llamaCfg,
 		Mlx:                     mlxCfg,
+		Splash:                  splashCfg,
 		Pi:                      piCfg,
 		PTY:                     raw.PTY,
 		AllowPlaintextEndpoints: raw.AllowPlaintextEndpoints,

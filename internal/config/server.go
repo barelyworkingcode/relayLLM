@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,11 +12,27 @@ import (
 // binary. Kind doubles as the model routing prefix ("{kind}/{alias}"), the
 // types.ModelInfo.Provider string, and the log/error prefix.
 type ServerProfile struct {
-	Kind            string   // "llama" | "mlx"
+	Kind            string   // "llama" | "mlx" | "splash"
 	DefaultBinary   string   // PATH fallback when config/flag give no path
 	Group           string   // Eve UI model group label
 	FixedArgs       []string // injected after --port/--host, before per-model flags (e.g. --serve)
 	DefaultBasePort int
+
+	// LeadingArgs come first in argv, before --port/--host. For a binary whose
+	// server mode is a subcommand ("splash serve ..."), which argparse only
+	// accepts ahead of the flags; FixedArgs would land after them.
+	LeadingArgs []string
+	// AliasFlag, when set, makes the manager append "--<AliasFlag> <alias>" so
+	// the backend answers to the routing alias the router forwards.
+	AliasFlag string
+	// DefaultIdleTimeoutMinutes applies when the section does not set
+	// idleTimeoutMinutes at all (see ServerConfig.IdleTimeoutSet). 0 keeps the
+	// no-reclaim default.
+	DefaultIdleTimeoutMinutes int
+	// KillProcessGroup launches the child in its own process group and signals
+	// the whole group on stop, for a launcher that spawns the real server as a
+	// child in the same group.
+	KillProcessGroup bool
 }
 
 // ServerModelConfig describes one managed-server model. Alias is the routing
@@ -47,6 +64,11 @@ type ServerConfig struct {
 	MaxMemoryGB        float64 `json:"maxMemoryGB,omitempty"`
 	IdleTimeoutMinutes int     `json:"idleTimeoutMinutes,omitempty"`
 
+	// IdleTimeoutSet is true when idleTimeoutMinutes was present and non-null in
+	// the JSON, so an explicit 0 ("never reclaim") can be told apart from an
+	// absent key that should take the profile default.
+	IdleTimeoutSet bool `json:"-"`
+
 	// MemoryHeadroomPercent pads each model's estimate to cover compute
 	// buffers and allocator slack, which are not modelled directly.
 	// Defaults to defaultMemoryHeadroomPercent.
@@ -56,6 +78,17 @@ type ServerConfig struct {
 	// instance to go idle when the budget is full. Defaults to
 	// defaultAdmissionTimeout.
 	AdmissionTimeoutSeconds int `json:"admissionTimeoutSeconds,omitempty"`
+}
+
+// MarkIdleTimeoutPresence sets cfg.IdleTimeoutSet from the section's raw JSON.
+func MarkIdleTimeoutPresence(cfg *ServerConfig, raw []byte) error {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("parse idleTimeoutMinutes presence: %w", err)
+	}
+	v, ok := probe["idleTimeoutMinutes"]
+	cfg.IdleTimeoutSet = ok && string(v) != "null"
+	return nil
 }
 
 // FindByAlias returns the config for the given alias, or nil.
