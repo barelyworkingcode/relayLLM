@@ -7,6 +7,12 @@ package router
 // optional config-driven redirect of specific model ids to a local
 // managed/virtual/endpoint model. See relay_router_anthropic_translate.go's
 // header for what's explicitly out of scope.
+//
+// A redirect target that declares `api: ["anthropic"]` skips the translation:
+// handleAnthropicRedirect first offers the request to serveAnthropicNative
+// (router_anthropic_native.go), which forwards it to the backend's own
+// /messages route with only "model" rewritten. Undeclared targets translate as
+// described above.
 
 import (
 	"bytes"
@@ -158,6 +164,9 @@ func (p *RelayRouter) handleAnthropicCountTokensSocket(w http.ResponseWriter, r 
 
 	model := anthropicRequestModel(body)
 	if target, ok := p.anthropic.modelMap[model]; ok && target != "" {
+		if p.serveAnthropicCountTokensNative(w, r, body, target) {
+			return
+		}
 		writeRouterJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateAnthropicInputTokens(body)})
 		return
 	}
@@ -185,7 +194,9 @@ func (p *RelayRouter) handleAnthropicCountTokens(w http.ResponseWriter, r *http.
 
 	model := anthropicRequestModel(body)
 	if target, ok := p.anthropic.modelMap[model]; ok && target != "" {
-		_ = target
+		if p.serveAnthropicCountTokensNative(w, r, body, target) {
+			return
+		}
 		writeRouterJSON(w, http.StatusOK, map[string]any{"input_tokens": estimateAnthropicInputTokens(body)})
 		return
 	}
@@ -301,6 +312,9 @@ func (p *RelayRouter) newAnthropicPassthroughProxy() *httputil.ReverseProxy {
 // ResponseWriter and never forwards the client's Anthropic credential:
 // innerReq is built fresh with only a Content-Type header, never copied from r.
 func (p *RelayRouter) handleAnthropicRedirect(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, target string) {
+	if p.serveAnthropicNative(w, r, body, requestedModel, target) {
+		return
+	}
 	supportsImages := p.targetSupportsImages(r.Context(), target)
 	openaiBody, wantStream, aerr := anthropicToOpenAIRequest(body, target, anthropicTranslateOpts{SupportsImages: supportsImages})
 	if aerr != nil {

@@ -194,6 +194,17 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 	instanceRows := make([]detailedInstanceRow, len(instances))
 	copy(instanceRows, instances)
 
+	throughput := map[string]any{
+		"bytesInPerSec":  proxyAgg.BytesInPerSec,
+		"bytesOutPerSec": proxyAgg.BytesOutPerSec,
+		"totalBytesIn":   proxyAgg.TotalBytesIn,
+		"totalBytesOut":  proxyAgg.TotalBytesOut,
+		"totalRequests":  proxyAgg.TotalRequests,
+		"windowSeconds":  proxyAgg.WindowSeconds,
+	}
+	if proxyAgg.TotalUsage != nil {
+		throughput["totalUsage"] = tokenUsageJSON(*proxyAgg.TotalUsage)
+	}
 	return map[string]any{
 		"generatedAt":   now.UTC().Format(time.RFC3339),
 		"uptimeSeconds": int64(now.Sub(deps.StartTime).Seconds()),
@@ -211,14 +222,7 @@ func buildDetailedStatus(ctx context.Context, deps DetailedStatusDeps) map[strin
 				"tls":     routerTLS,
 				"socket":  routerSocket,
 			},
-			"throughput": map[string]any{
-				"bytesInPerSec":  proxyAgg.BytesInPerSec,
-				"bytesOutPerSec": proxyAgg.BytesOutPerSec,
-				"totalBytesIn":   proxyAgg.TotalBytesIn,
-				"totalBytesOut":  proxyAgg.TotalBytesOut,
-				"totalRequests":  proxyAgg.TotalRequests,
-				"windowSeconds":  proxyAgg.WindowSeconds,
-			},
+			"throughput": throughput,
 		},
 		"connections":    connections,
 		"recentRequests": recentOut,
@@ -263,6 +267,9 @@ func detailedProxyRow(info router.ProxyConnInfo) map[string]any {
 		"viaAnthropic":   info.ViaAnthropic,
 		"status":         info.Status,
 	}
+	if info.Usage != nil {
+		row["usage"] = tokenUsageJSON(*info.Usage)
+	}
 	if !info.LastByteAt.IsZero() {
 		row["lastByteAt"] = info.LastByteAt.UTC().Format(time.RFC3339)
 		row["sinceLastByteSeconds"] = info.SinceLastByteSeconds
@@ -270,8 +277,19 @@ func detailedProxyRow(info router.ProxyConnInfo) map[string]any {
 	return row
 }
 
-func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
+// tokenUsageJSON is the additive `usage` / `totalUsage` shape; the key is
+// omitted by callers until the native Anthropic path has reported usage.
+func tokenUsageJSON(u router.TokenUsage) map[string]any {
 	return map[string]any{
+		"inputTokens":              u.InputTokens,
+		"outputTokens":             u.OutputTokens,
+		"cacheReadInputTokens":     u.CacheReadInputTokens,
+		"cacheCreationInputTokens": u.CacheCreationInputTokens,
+	}
+}
+
+func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
+	row := map[string]any{
 		"id":         strconv.FormatUint(rr.ID, 10),
 		"model":      rr.Model,
 		"targetKind": rr.TargetKind,
@@ -285,6 +303,10 @@ func detailedRecentRequestRow(rr router.RecentRequestInfo) map[string]any {
 		"bytesOut":   rr.BytesOut,
 		"finishedAt": rr.FinishedAt.UTC().Format(time.RFC3339),
 	}
+	if rr.Usage != nil {
+		row["usage"] = tokenUsageJSON(*rr.Usage)
+	}
+	return row
 }
 
 // ---------------------------------------------------------------------------
