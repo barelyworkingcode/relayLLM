@@ -24,6 +24,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"relayllm/internal/config"
 	regpkg "relayllm/internal/registry"
 	"relayllm/internal/servermanager"
@@ -1907,4 +1910,81 @@ func bodyRecordingUpstream(t *testing.T, seen *[]byte) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// reasoning_effort and chat_template_kwargs pass through untouched on both
+// the endpoint and managed-alias routes, even when settings.json still names
+// the removed router.reasoningEffortMap / reasoningEffortTemplateKwargs keys.
+func TestRouter_ReasoningFieldsForwardedUnchanged(t *testing.T) {
+	var seen []byte
+	upstream := bodyRecordingUpstream(t, &seen)
+
+	settings, err := json.Marshal(map[string]any{
+		"openai": map[string]any{"endpoints": []map[string]any{
+			{"name": "ep", "baseURL": upstream.URL + "/v1"},
+		}},
+		"llama-server": map[string]any{"models": []map[string]any{
+			{"alias": "local-a", "model": "/fake"},
+		}},
+		"router": map[string]any{
+			"reasoningEffortMap":            map[string]any{"minimal": "none"},
+			"reasoningEffortTemplateKwargs": map[string]any{"minimal": map[string]any{"enable_thinking": true, "y": 2}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadConfig(dir, "")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	mgr := servermanager.NewServerManager(servermanager.LlamaProfile, loaded.Llama, "")
+	mgr.InjectReadyInstanceForTest("local-a", upstream.Listener.Addr().(*net.TCPAddr).Port, 0)
+	r, err := StartRelayRouter([]string{"127.0.0.1:0"}, []*servermanager.ServerManager{mgr},
+		regpkg.NewProxyRegistry(loaded.OpenAI), loaded.Virtual, loaded.Router, "", "")
+	if err != nil || r == nil {
+		t.Fatalf("StartRelayRouter = (%v, %v), want a running router", r, err)
+	}
+	t.Cleanup(func() { r.Close() })
+	waitForRouterUp(t, r.Addr())
+
+	const rest = `,"reasoning_effort":"minimal","chat_template_kwargs":{"enable_thinking":false,"x":1},"messages":[{"role":"user","content":"hi"}]}`
+	cases := []struct {
+		name, model, wantModel string
+		byteIdentical          bool
+	}{
+		{"endpoint", "ep/upstream-id", "upstream-id", false},
+		{"managed alias", "local-a", "local-a", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = nil
+			sent := []byte(`{"model":"` + tc.model + `"` + rest)
+			resp := postBytes(t, "http://"+r.Addr()+"/v1/chat/completions", sent)
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d body=%s", resp.StatusCode, body)
+			}
+			if tc.byteIdentical && !bytes.Equal(seen, sent) {
+				t.Errorf("upstream body = %s, want byte-identical %s", seen, sent)
+			}
+			var got, want map[string]any
+			if err := json.Unmarshal(seen, &got); err != nil {
+				t.Fatalf("decode upstream body %q: %v", seen, err)
+			}
+			if err := json.Unmarshal(sent, &want); err != nil {
+				t.Fatal(err)
+			}
+			want["model"] = tc.wantModel
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("upstream body = %v, want %v", got, want)
+			}
+		})
+	}
 }

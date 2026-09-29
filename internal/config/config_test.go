@@ -80,3 +80,29 @@ func TestParseUnifiedConfig_RouterSection_AbsentIsEmptyNonNil(t *testing.T) {
 		t.Fatal("cfg.Router should be non-nil even when absent")
 	}
 }
+
+// A settings.json written before the reasoning-effort rewrites were removed
+// still loads, and the router keys that remain are read as before.
+func TestParseUnifiedConfig_RemovedReasoningKeysStillLoad(t *testing.T) {
+	cfg, err := parseUnifiedConfig([]byte(`{
+		"openai": {"endpoints": [{"name": "ep", "baseURL": "http://127.0.0.1:1234/v1"}]},
+		"router": {
+			"reasoningEffortMap": {"minimal": "none"},
+			"reasoningEffortTemplateKwargs": {"minimal": {"enable_thinking": false}},
+			"anthropic": {"modelMap": {"acme/coder": "ep/code"}},
+			"passthrough": {"acme": {"upstream": "https://api.example.com"}}
+		}
+	}`), "test.json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.OpenAI.Endpoints) != 1 || cfg.OpenAI.Endpoints[0].Name != "ep" {
+		t.Errorf("openai endpoints = %+v, want one named ep", cfg.OpenAI.Endpoints)
+	}
+	if cfg.Router.Anthropic == nil || cfg.Router.Anthropic.ModelMap["acme/coder"] != "ep/code" {
+		t.Errorf("router.anthropic = %+v, want modelMap acme/coder -> ep/code", cfg.Router.Anthropic)
+	}
+	if got := cfg.Router.Passthrough["acme"].Upstream; got != "https://api.example.com" {
+		t.Errorf("router.passthrough[acme].upstream = %q, want https://api.example.com", got)
+	}
+}
