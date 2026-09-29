@@ -47,6 +47,14 @@ func estimateModelMemory(profile config.ServerProfile, cfg config.ServerModelCon
 		return int64(gb * bytesPerGB)
 	}
 
+	// Splash models are repo ids in its own store, not paths this process can
+	// size; only an explicit memoryGB budgets them.
+	if profile.Kind == splashKind {
+		slog.Warn("memory estimate: splash model has no memoryGB; it counts against maxLoaded only",
+			"kind", profile.Kind, "alias", cfg.Alias)
+		return 0
+	}
+
 	modelPath, _ := cfg.Args["model"].(string)
 	if modelPath == "" {
 		slog.Warn("memory estimate: model entry has no \"model\" path",
@@ -233,6 +241,9 @@ func estimateMLXMemory(modelDir string, cfg config.ServerModelConfig) (weights, 
 // Returns 0 when the metadata cannot be read; callers omit the field rather
 // than substituting a guess.
 func modelTrainedContext(profile config.ServerProfile, cfg config.ServerModelConfig) int64 {
+	if profile.Kind == splashKind {
+		return 0
+	}
 	modelPath, _ := cfg.Args["model"].(string)
 	if modelPath == "" {
 		return 0

@@ -129,7 +129,7 @@ func BuildManifest(dataDir string) Manifest {
 
 // settingsSchema describes the on-disk shape of settings.json so relay can
 // render a nested editor. Mirrors the sections parseUnifiedConfig (config.go)
-// reads: openai, llama-server, mlx-serve, pi, and the pty terminal-template
+// reads: openai, llama-server, mlx-serve, splash-serve, pi, and the pty terminal-template
 // map. Help text replaces the JSONC comments the file used to carry (they
 // don't survive a form save).
 func settingsSchema() []FieldDecl {
@@ -218,6 +218,26 @@ func settingsSchema() []FieldDecl {
 						{ID: "memoryGB", Label: "Memory override (GB)", Type: "number", Help: "Skip the computed estimate for this model and use this figure. Not an mlx-serve flag."},
 						{ID: "flags", Label: "mlx-serve flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
 							Help: `Each key becomes --key. model = path to the MLX model DIRECTORY. true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. ctx-size, temp, kv-quant, max-tokens).`},
+					},
+				}},
+			},
+		},
+		{
+			ID: "splash-serve", Label: "Splash server (splash)", Type: "object",
+			Fields: []FieldDecl{
+				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "splash", Help: "Blank uses splash on PATH."},
+				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "9500", Help: "First port; each model instance increments from here. Blank uses the 9500 default."},
+				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
+				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total memory across loaded models. Splash models count only their per-model memoryGB override; a model without one counts against Max loaded but not this budget. Blank = unlimited."},
+				{ID: "idleTimeoutMinutes", Label: "Idle timeout (minutes)", Type: "number", Placeholder: "60", Help: "Stop a model after this long with nothing using it. Blank uses the 60 default; 0 = never reclaim."},
+				{ID: "memoryHeadroomPercent", Label: "Memory headroom (%)", Type: "number", Placeholder: "10", Help: "Padding added to every estimate."},
+				{ID: "admissionTimeoutSeconds", Label: "Admission timeout (s)", Type: "number", Placeholder: "120", Help: "How long a request waits for a busy model to finish when the budget is full, before failing."},
+				{ID: "models", Label: "Models", Type: "array", Item: &FieldDecl{
+					Type: "object", Label: "model", Fields: []FieldDecl{
+						{ID: "alias", Label: "Alias", Type: "text", Required: true, Help: "Routing name (bare alias)."},
+						{ID: "memoryGB", Label: "Memory override (GB)", Type: "number", Help: "Resident memory to count for this model. Splash models are sized only by this figure. Not a splash flag."},
+						{ID: "flags", Label: "splash flags", Type: "keyValue", Rest: true, KeyLabel: "flag",
+							Help: `Each key becomes --key. model = Hugging Face repo id OWNER/REPO or OWNER/REPO:VARIANT; download it first with "splash serve --model <id>". true/false toggles a boolean flag; numbers and strings pass through as --key value (e.g. max-context).`},
 					},
 				}},
 			},

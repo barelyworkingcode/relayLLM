@@ -2,7 +2,7 @@
 
 The model-hosting engine of the [relay](https://github.com/barelyworkingcode/relay)
 ecosystem. A Go service that launches and manages local model servers
-(llama.cpp, MLX) and fronts them — plus configured OpenAI-compatible
+(llama.cpp, MLX, Splash) and fronts them — plus configured OpenAI-compatible
 endpoints and virtual models — behind one OpenAI-compatible router. It
 exposes a small HTTP status/diagnostics API over a Unix socket. It runs
 standalone or as a relay-enhanced service.
@@ -70,10 +70,11 @@ inline schema in `internal/config/config.go`.
 
 - **llama.cpp** — managed `llama-server` processes (`settings.json` `llama-server`); model ids `llama/{alias}`. Launched on demand, reused across sessions.
 - **MLX** — managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes (`settings.json` `mlx-serve`, same schema as llama-server); model ids `mlx/{alias}`.
+- **Splash** — managed `splash serve` processes (`settings.json` `splash-serve`, same schema as llama-server; `model` is a Hugging Face repo id `OWNER/REPO[:VARIANT]`); routed by bare alias like the others. Download weights first with `splash serve --model <id>`; an undownloaded model reports a `model not downloaded` error in the catalog. Idle timeout defaults to 60 minutes (`idleTimeoutMinutes: 0` = never reclaim). Base port 9500, binary `splash` on PATH or `binaryPath`.
 - **OpenAI-compatible** — HTTP/SSE for LM Studio, Ollama `/v1`, oMLX, etc. Configured under `settings.json` `openai`; model ids are `{endpoint}/{model}`.
 
 Each model entry's keys map 1:1 to the server's CLI flags, so any current or
-future flag works without code changes. Managed servers (llama + MLX) launch
+future flag works without code changes. Managed servers (llama, MLX, Splash) launch
 on first use, poll `/health` until ready, and are shared across callers.
 
 ### Relay-router (optional)

@@ -74,6 +74,9 @@ var LlamaProfile = config.ServerProfile{Kind: "llama", DefaultBinary: "llama-ser
 // a second ~500-line manager.
 var MlxProfile = config.ServerProfile{Kind: "mlx", DefaultBinary: "mlx-serve", Group: "MLX", FixedArgs: []string{"--serve"}, DefaultBasePort: 9400}
 
+// defaultStopGrace is the SIGTERM-to-SIGKILL window in StopInstance.
+const defaultStopGrace = 3 * time.Second
+
 // serverInstance tracks a running managed-server process.
 type serverInstance struct {
 	config    config.ServerModelConfig
@@ -154,6 +157,12 @@ type ServerManager struct {
 
 	reaperStop chan struct{}
 	reaperOnce sync.Once
+
+	// stopGrace is how long StopInstance waits between SIGTERM and SIGKILL.
+	stopGrace time.Duration
+
+	// splashModelsRoot overrides the default Splash model store; splash only.
+	splashModelsRoot string
 }
 
 // defaultAdmissionTimeout bounds the wait for a busy instance to go idle
@@ -203,6 +212,12 @@ func NewServerManager(profile config.ServerProfile, cfg *config.ServerConfig, bi
 		maxMemoryBytes:   int64(cfg.MaxMemoryGB * bytesPerGB),
 		idleTimeout:      time.Duration(cfg.IdleTimeoutMinutes) * time.Minute,
 		admissionTimeout: time.Duration(cfg.AdmissionTimeoutSeconds) * time.Second,
+		stopGrace:        defaultStopGrace,
+	}
+	// An absent key takes the profile default; an explicit 0 stays "never
+	// reclaim".
+	if !cfg.IdleTimeoutSet && cfg.IdleTimeoutMinutes == 0 {
+		m.idleTimeout = time.Duration(profile.DefaultIdleTimeoutMinutes) * time.Minute
 	}
 	if m.admissionTimeout <= 0 {
 		m.admissionTimeout = defaultAdmissionTimeout
@@ -548,6 +563,14 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 		return nil, fmt.Errorf("%s: binary %q not found: %w", m.profile.Kind, m.binaryPath, err)
 	}
 
+	// Before port allocation: splash's launcher would otherwise start
+	// downloading a missing model and only fail at the health timeout.
+	if m.profile.Kind == splashKind {
+		if err := splashPreflight(m.splashRoot(), *cfg); err != nil {
+			return nil, err
+		}
+	}
+
 	port := m.portFromArgs(cfg.Args)
 	if port == 0 {
 		var err error
@@ -569,6 +592,9 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	}
 
 	args := buildServerArgs(m.profile, cfg.Args, port)
+	if m.profile.AliasFlag != "" {
+		args = append(args, "--"+m.profile.AliasFlag, alias)
+	}
 	slog.Info(fmt.Sprintf("%s: launching server", m.profile.Kind), "alias", alias,
 		"binary", binPath, "port", port, "estimated", formatGB(memory), "args", args)
 
@@ -579,6 +605,9 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	// (internal bearer, project tokens) just because nothing here ever
 	// set cmd.Env before.
 	cmd.Env = childBaseEnv()
+	if m.profile.KillProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	logProcessOutput(cmd, m.profile.Kind, alias)
 
 	if err := cmd.Start(); err != nil {
@@ -614,7 +643,7 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 // models proceed in parallel.
 func (m *ServerManager) awaitReady(alias string, inst *serverInstance) error {
 	if err := waitForHealth(inst.port, 120*time.Second); err != nil {
-		inst.cmd.Process.Kill()
+		killInstance(m.profile, inst)
 		m.removeInstance(alias, inst)
 		close(inst.ready) // unblock any waiters
 		return fmt.Errorf("%s: server for %q failed health check: %w", m.profile.Kind, alias, err)
@@ -907,9 +936,17 @@ func (m *ServerManager) StopInstance(alias string) error {
 	}
 
 	slog.Info(fmt.Sprintf("%s: stopping server", m.profile.Kind), "alias", alias, "port", inst.port)
+	if m.profile.KillProcessGroup {
+		// Signal the whole group, then SIGKILL it: the launcher's native
+		// child winds down slower than our grace.
+		_ = syscall.Kill(-inst.cmd.Process.Pid, syscall.SIGTERM)
+		time.Sleep(m.stopGrace)
+		_ = syscall.Kill(-inst.cmd.Process.Pid, syscall.SIGKILL)
+		return nil
+	}
 	_ = inst.cmd.Process.Signal(syscall.SIGTERM)
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(m.stopGrace)
 
 	if !inst.exited.Load() {
 		_ = inst.cmd.Process.Kill()
@@ -993,10 +1030,10 @@ func buildServerArgs(profile config.ServerProfile, args map[string]any, port int
 	if h, ok := args["host"].(string); ok {
 		host = h
 	}
-	result := []string{
+	result := append(append([]string(nil), profile.LeadingArgs...),
 		"--port", strconv.Itoa(port),
 		"--host", host,
-	}
+	)
 
 	// Inject profile-specific fixed args (e.g. --serve for mlx-serve).
 	result = append(result, profile.FixedArgs...)
@@ -1013,6 +1050,11 @@ func buildServerArgs(profile config.ServerProfile, args map[string]any, port int
 		// override, not a server flag — passing it through would hand
 		// llama-server an unknown --memoryGB and abort the launch.
 		if key == "port" || key == "host" || key == "memoryGB" {
+			continue
+		}
+		// launchLocked appends the alias-derived value; a user-set one would
+		// duplicate the flag.
+		if profile.AliasFlag != "" && key == profile.AliasFlag {
 			continue
 		}
 		val := args[key]
@@ -1068,6 +1110,9 @@ type ManagedModelInfo struct {
 // covers the whole configured set — a catalog listing needs the models you
 // could load, not just the ones already running.
 func (m *ServerManager) ModelCatalog() []ManagedModelInfo {
+	// Splash preflight stats the filesystem, so it runs before taking the lock.
+	preflight := m.splashPreflightAll()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1106,8 +1151,15 @@ func (m *ServerManager) ModelCatalog() []ManagedModelInfo {
 			entry.Status = ModelStatusUnloaded
 			entry.Failed = true
 			entry.Error = msg
+		} else if perr, bad := preflight[cfg.Alias]; bad && !running {
+			// Not launchable as configured (e.g. weights not downloaded).
+			entry.Status = ModelStatusUnloaded
+			entry.Failed = true
+			entry.Error = perr.Error()
 		}
-		if ctx, ok := numericArg(cfg.Args, "ctx-size"); ok && ctx > 0 {
+		if m.profile.Kind == splashKind {
+			entry.ContextSize = splashMaxContext(cfg.Args)
+		} else if ctx, ok := numericArg(cfg.Args, "ctx-size"); ok && ctx > 0 {
 			entry.ContextSize = int64(ctx)
 		}
 		entry.TrainedContext = m.trainedContext[cfg.Alias]

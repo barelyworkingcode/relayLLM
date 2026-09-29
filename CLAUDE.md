@@ -1,6 +1,6 @@
 # relayLLM (Go)
 
-Standalone model-hosting engine. Manages llama.cpp + MLX managed processes
+Standalone model-hosting engine. Manages llama.cpp + MLX + Splash managed processes
 and fronts them, configured OpenAI-compatible endpoints, and virtual models
 behind one OpenAI-compatible router, plus a small read-only status API. Runs
 independently or as a relay-enhanced service.
@@ -63,15 +63,15 @@ internal/router/                  Unified OpenAI-compatible router
                                       a separate mechanism from router.sock's kernel-peer-token admission
   status_metrics.go                  Proxy connection state machine feeding the status dashboard
 internal/registry/registry.go     Reachability + model-list cache for configured OpenAI endpoints (15s TTL)
-internal/servermanager/           llama.cpp / mlx-serve managed-process lifecycle
+internal/servermanager/           llama.cpp / mlx-serve / splash managed-process lifecycle
   server_manager.go                  Profile-driven managed-server process manager (launch, health check,
                                       port allocation, per-alias stop, instance listing, memory budget +
                                       leases + idle reaper, and childBaseEnv, the relay-credential strip
                                       applied to every spawned child's environment). One ServerManager per
-                                      profile: llama-server (LlamaProfile) + mlx-serve (MlxProfile)
+                                      profile: llama-server (LlamaProfile) + mlx-serve (MlxProfile) + splash (SplashProfile)
   gguf.go                            GGUF metadata-header reader + KV-cache size math (SWA + per-layer GQA)
   server_memory.go                   Per-model resident-memory estimation (GGUF weights+KV, MLX dir+config.json)
-internal/config/config.go         Unified config loader (settings.json -> OpenAI + llama-server + mlx-serve
+internal/config/config.go         Unified config loader (settings.json -> OpenAI + llama-server + mlx-serve + splash-serve
                                    configs) + every router/server schema struct. Also retains the on-disk
                                    PiConfig/TerminalTemplate shapes (config.go, terminal.go) settings.json's
                                    editable format still carries, even though relayLLM spawns neither.
@@ -94,6 +94,7 @@ internal/testutil/                Shared test fakes (FakeClock, FakeBridge, TLS 
 
 - **llama.cpp**: Managed llama-server processes via `ServerManager` (`LlamaProfile`). Configured via `settings.json` `llama-server` section (or legacy `llama_models.json`). Model selection: `llama/{alias}` (e.g. `llama/qwen3-8b`). Launches llama-server on demand with configured GGUF model and flags, reuses running instances. Communicates via OpenAI-compatible API. Binary path: `--llama-server-path` / `LLAMA_SERVER_PATH` / config `binaryPath` / `llama-server` on PATH. Config keys in each model entry map 1:1 to llama-server CLI flags (except `alias`, the routing name). Per-model locking: launches of different models proceed concurrently; concurrent requests for the same model wait on a shared `ready` channel.
 - **MLX (mlx-serve)**: Managed [mlx-serve](https://github.com/ddalcu/mlx-serve) processes via `ServerManager` (`MlxProfile`) — native Zig + mlx-c, no Python. Same shape as llama.cpp in every way: `settings.json` `mlx-serve` section (identical schema to `llama-server`), model selection `mlx/{alias}`, on-demand launch + `/health` poll + instance reuse, OpenAI transport. Differences: the `model` config key is an **MLX model directory** (e.g. an `mlx-community/*` HF snapshot), the manager always appends `--serve`, base port defaults to 9400, and binary resolution is `--mlx-serve-path` / `MLX_SERVE_PATH` / config `binaryPath` / `mlx-serve` on PATH. Useful per-model flags: `ctx-size`, `temp`, `max-tokens`, `kv-quant`, `reasoning-budget`, `no-vision`. mlx-serve was chosen over `mlx_lm.server` (needs a pip/uv-managed environment) and SwiftLM (no Homebrew distribution — builds from source and pins a minimum Xcode a beta-OS machine may not satisfy); see the comment above `MlxProfile` in `internal/servermanager/server_manager.go` for the full comparison.
+- **Splash**: Managed `splash serve` processes via `ServerManager` (`SplashProfile`), `settings.json` `splash-serve` section (identical schema). Routing is the bare alias (dispatch priority llama, mlx, splash); `ModelInfo.Value` is `splash/{alias}`. The `model` key is a Hugging Face repo id `OWNER/REPO[:VARIANT]`; the manager prepends `serve` and always appends `--served-model-name <alias>` because Splash 404s unless the request's model is the repo id or that name. Base port 9500, binary `splash` on PATH or config `binaryPath` (no CLI flag). **Idle timeout defaults to 60 minutes; an explicit `idleTimeoutMinutes: 0` means never reclaim** (presence is tracked by `MarkIdleTimeoutPresence`; llama/mlx keep 0 = off). **Download-first**: `splash serve` would auto-download a missing model, so launch preflights the models directory and fails with `splash: model not downloaded: ...` (surfaced as the catalog `error`) instead of a health timeout; no automatic download. **Process-group stop**: the launcher execs a server that spawns `serve-native` in the same group, so stop sends SIGTERM to the group, waits the stop grace, then SIGKILLs it (llama/mlx stay leader-only). Sized only by `memoryGB` (no filesystem estimate); no `/api/splash/instances` route or manifest stop action.
 - **OpenAI-compatible**: HTTP client with SSE streaming, configured via `settings.json` `openai` section (or legacy `openai_endpoints.json` / `OPENAI_BASE_URL`/`OPENAI_API_KEY`). Model selection: `endpoint-name/model-id` (e.g. `omlx/Qwen3.5-27B`). Covers LM Studio, Ollama's `/v1`, oMLX, and any other OpenAI-compatible server.
 
 A spawned llama-server/mlx-serve child's environment always goes through
@@ -101,7 +102,7 @@ A spawned llama-server/mlx-serve child's environment always goes through
 `os.Environ()` directly — it is a managed subprocess like any other spawn
 path, not a trusted extension of relayLLM itself, so every relay credential
 name is stripped before the child ever sees the environment. This is the
-only `exec.Command` call site left in the repo.
+only `exec.Command` call site left in the repo (test fakes aside).
 
 ## Relay-router (`internal/router/router.go`)
 
