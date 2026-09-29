@@ -217,6 +217,13 @@ func (p *RelayRouter) handleModels(w http.ResponseWriter, r *http.Request) {
 	if data == nil {
 		data = []map[string]any{}
 	}
+	// Marked last, by exact id, so every row type is covered and no row
+	// gains a key unless listed.
+	for _, row := range data {
+		if id, _ := row["id"].(string); p.systemModels[id] {
+			row["system"] = true
+		}
+	}
 
 	writeRouterJSON(w, http.StatusOK, map[string]any{
 		"object": "list",

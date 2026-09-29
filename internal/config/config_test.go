@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
 
 // ---------------------------------------------------------------------------
 // parseUnifiedConfig — mlx-serve section parsing
@@ -104,5 +108,34 @@ func TestParseUnifiedConfig_RemovedReasoningKeysStillLoad(t *testing.T) {
 	}
 	if got := cfg.Router.Passthrough["acme"].Upstream; got != "https://api.example.com" {
 		t.Errorf("router.passthrough[acme].upstream = %q, want https://api.example.com", got)
+	}
+}
+
+func TestLoadConfig_RouterSystemModels(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+	}{
+		{"absent", `{}`, nil},
+		{"empty list", `{"router":{"systemModels":[]}}`, nil},
+		{"listed", `{"router":{"systemModels":["acme-draft","ep/draft"]}}`, []string{"acme-draft", "ep/draft"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadFrom(t, map[string]string{"settings.json": tc.body})
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if !slices.Equal(cfg.Router.SystemModels, tc.want) {
+				t.Errorf("SystemModels = %q, want %q", cfg.Router.SystemModels, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RouterSystemModelsEmptyEntryFailsNamingIndex(t *testing.T) {
+	_, err := loadFrom(t, map[string]string{"settings.json": `{"router":{"systemModels":["acme-draft",""]}}`})
+	if err == nil || !strings.Contains(err.Error(), "router.systemModels[1]") {
+		t.Fatalf("err = %v, want a load failure naming router.systemModels[1]", err)
 	}
 }

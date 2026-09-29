@@ -36,7 +36,9 @@ type RelayRouter struct {
 	registry *registry.ProxyRegistry
 	virtual  *config.VirtualLLMConfig
 	affinity *virtualAffinityStore
-	server   *http.Server
+	// systemModels is the set of catalog ids handleModels marks "system".
+	systemModels map[string]bool
+	server       *http.Server
 
 	// listeners holds every bound listener from Listen, one per configured
 	// bind address. Serve fans the shared server out across all of them;
@@ -758,9 +760,18 @@ func BuildRelayRouter(managers []*servermanager.ServerManager, registry *registr
 	if router != nil {
 		p.setAnthropic(router.Anthropic)
 		p.setPassthrough(router.Passthrough)
+		p.setSystemModels(router.SystemModels)
 	}
 	p.setTLS(tlsCert, tlsKey)
 	return p
+}
+
+// setSystemModels installs router.systemModels; call before serving.
+func (p *RelayRouter) setSystemModels(ids []string) {
+	p.systemModels = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		p.systemModels[id] = true
+	}
 }
 
 // MaybeServeTCP binds and serves p on addrs, if there is anything worth

@@ -214,6 +214,11 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	routerCfg := &RouterConfig{}
 	if raw.Router != nil {
 		routerCfg = raw.Router
+		for i, id := range routerCfg.SystemModels {
+			if id == "" {
+				return nil, fmt.Errorf("parse %s: router.systemModels[%d]: empty model id", source, i)
+			}
+		}
 	}
 
 	llamaCfg := &ServerConfig{}
