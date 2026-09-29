@@ -221,6 +221,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 		if err := json.Unmarshal(*raw.LlamaServer, llamaCfg); err != nil {
 			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
 		}
+		if err := ValidateAPIs("llama-server", llamaCfg.API); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", source, err)
+		}
 		if err := MarkIdleTimeoutPresence(llamaCfg, *raw.LlamaServer); err != nil {
 			return nil, fmt.Errorf("parse %s llama-server: %w", source, err)
 		}
@@ -233,6 +236,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	if raw.MlxServer != nil {
 		if err := json.Unmarshal(*raw.MlxServer, mlxCfg); err != nil {
 			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
+		}
+		if err := ValidateAPIs("mlx-serve", mlxCfg.API); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", source, err)
 		}
 		if err := MarkIdleTimeoutPresence(mlxCfg, *raw.MlxServer); err != nil {
 			return nil, fmt.Errorf("parse %s mlx-serve: %w", source, err)
@@ -249,6 +255,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	if raw.SplashServe != nil {
 		if err := json.Unmarshal(*raw.SplashServe, splashCfg); err != nil {
 			return nil, fmt.Errorf("parse %s splash-serve: %w", source, err)
+		}
+		if err := ValidateAPIs("splash-serve", splashCfg.API); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", source, err)
 		}
 		if err := MarkIdleTimeoutPresence(splashCfg, *raw.SplashServe); err != nil {
 			return nil, fmt.Errorf("parse %s splash-serve: %w", source, err)
@@ -320,6 +329,9 @@ func loadLlamaConfigFile(path string) (*ServerConfig, error) {
 		}
 		return nil, err
 	}
+	if err := ValidateAPIs("llama_models.json", cfg.API); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	if err := ParseServerRawModels(&cfg, path); err != nil {
 		return nil, err
 	}
@@ -382,6 +394,9 @@ func normalizeOpenAI(cfg *OpenAIConfig, allowPlaintext bool) error {
 		cfg.Endpoints[i].BaseURL = strings.TrimRight(cfg.Endpoints[i].BaseURL, "/")
 		if cfg.Endpoints[i].Group == "" {
 			cfg.Endpoints[i].Group = cfg.Endpoints[i].Name
+		}
+		if err := ValidateAPIs(fmt.Sprintf("openai.endpoints[%q]", cfg.Endpoints[i].Name), cfg.Endpoints[i].API); err != nil {
+			return err
 		}
 		if err := PrepareEndpointTransports(&cfg.Endpoints[i], allowPlaintext); err != nil {
 			return err

@@ -256,6 +256,12 @@ func (m *ServerManager) Config() *config.ServerConfig {
 	return m.config
 }
 
+// SpeaksAnthropic reports whether this manager's section declares the
+// anthropic API (section-level, so it holds for every alias).
+func (m *ServerManager) SpeaksAnthropic() bool {
+	return m != nil && m.config.SpeaksAnthropic()
+}
+
 // BinaryPath returns the resolved path (or PATH-relative name) of the
 // managed-server binary this manager launches.
 func (m *ServerManager) BinaryPath() string {

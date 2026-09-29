@@ -28,6 +28,48 @@ import (
 // OpenAI-shaped request it re-enters handleProxy with.
 type proxyViaAnthropicKey struct{}
 
+// TokenUsage is the token accounting an Anthropic-native response reported,
+// read by the usage tap (anthropic_usage_tap.go). Cache fields are what the
+// backend said about its prompt cache; zero means "none reported", not
+// "cache missed".
+type TokenUsage struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+}
+
+// usageCounters is TokenUsage with atomic fields, for a writer on the proxy
+// copy goroutine and a reader on a status poll. seen distinguishes "no usage
+// ever reported" (omitted from the API) from a genuine zero.
+type usageCounters struct {
+	seen          atomic.Bool
+	input, output atomic.Int64
+	cacheRead     atomic.Int64
+	cacheCreation atomic.Int64
+}
+
+func (u *usageCounters) add(t TokenUsage) {
+	u.input.Add(t.InputTokens)
+	u.output.Add(t.OutputTokens)
+	u.cacheRead.Add(t.CacheReadInputTokens)
+	u.cacheCreation.Add(t.CacheCreationInputTokens)
+	u.seen.Store(true)
+}
+
+// snapshot returns nil when no usage was ever reported.
+func (u *usageCounters) snapshot() *TokenUsage {
+	if !u.seen.Load() {
+		return nil
+	}
+	return &TokenUsage{
+		InputTokens:              u.input.Load(),
+		OutputTokens:             u.output.Load(),
+		CacheReadInputTokens:     u.cacheRead.Load(),
+		CacheCreationInputTokens: u.cacheCreation.Load(),
+	}
+}
+
 // throughputWindow is the trailing window rollingRate averages over.
 const throughputWindow = 5 * time.Second
 
@@ -210,8 +252,22 @@ type ProxyConn struct {
 	lastWriteNano atomic.Int64
 	ended         atomic.Bool // guards ProxyMetrics.end against a double call
 
+	usage usageCounters // Anthropic-native token usage; unused on other paths
+
 	rate    *rollingRate
 	metrics *ProxyMetrics // for the process-wide rate/counters
+}
+
+// noteUsage records token usage the native Anthropic path's tap observed, on
+// this connection and the process-wide total. Nil-safe.
+func (c *ProxyConn) noteUsage(u TokenUsage) {
+	if c == nil {
+		return
+	}
+	c.usage.add(u)
+	if c.metrics != nil {
+		c.metrics.totalUsage.add(u)
+	}
 }
 
 func (c *ProxyConn) setTarget(kind, target string) {
@@ -317,6 +373,7 @@ func (c *ProxyConn) snapshot(now time.Time) ProxyConnInfo {
 		BytesOut:       c.bytesOut.Load(),
 		BytesOutPerSec: c.rate.rate(now),
 		AgeSeconds:     int(now.Sub(c.startedAt).Seconds()),
+		Usage:          c.usage.snapshot(),
 	}
 	if header != 0 {
 		info.LastByteAt = time.Unix(0, lastWrite)
@@ -354,6 +411,7 @@ type ProxyMetrics struct {
 	totalRequests atomic.Uint64
 	totalBytesIn  atomic.Int64
 	totalBytesOut atomic.Int64
+	totalUsage    usageCounters
 	inRate        *rollingRate
 	outRate       *rollingRate
 }
@@ -448,6 +506,7 @@ func (m *ProxyMetrics) end(c *ProxyConn) {
 		BytesIn:    c.bytesIn + c.upgradedBytesIn.Load(),
 		BytesOut:   c.bytesOut.Load(),
 		FinishedAt: now,
+		Usage:      c.usage.snapshot(),
 	}
 	if h := c.headerNano.Load(); h != 0 {
 		info.TTFBMs = time.Unix(0, h).Sub(c.startedAt).Milliseconds()
@@ -485,7 +544,8 @@ type ProxyConnInfo struct {
 	BytesIn              int64
 	BytesOut             int64
 	BytesOutPerSec       float64
-	State                string // ConnStateActive | ConnStateQuiet | ConnStateStalled
+	State                string      // ConnStateActive | ConnStateQuiet | ConnStateStalled
+	Usage                *TokenUsage // nil until the native Anthropic path reports usage
 }
 
 // ProxyAggregate is the process-wide proxy summary feeding
@@ -499,6 +559,7 @@ type ProxyAggregate struct {
 	TotalBytesOut  int64
 	TotalRequests  uint64
 	WindowSeconds  int
+	TotalUsage     *TokenUsage // nil until any request reported usage
 }
 
 // RecentRequestInfo is one completed proxy request, feeding
@@ -516,6 +577,7 @@ type RecentRequestInfo struct {
 	BytesIn    int64
 	BytesOut   int64
 	FinishedAt time.Time
+	Usage      *TokenUsage // nil unless the native Anthropic path reported usage
 }
 
 // Snapshot returns every in-flight connection, the process-wide aggregate,
@@ -563,6 +625,7 @@ func (m *ProxyMetrics) Snapshot() ([]ProxyConnInfo, ProxyAggregate, []RecentRequ
 		TotalBytesOut:  m.totalBytesOut.Load(),
 		TotalRequests:  m.totalRequests.Load(),
 		WindowSeconds:  int(throughputWindow.Seconds()),
+		TotalUsage:     m.totalUsage.snapshot(),
 	}
 	return infos, agg, recentOut
 }

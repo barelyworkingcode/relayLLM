@@ -146,6 +146,7 @@ func settingsSchema() []FieldDecl {
 						{ID: "apiKey", Label: "API key", Type: "secret"},
 						{ID: "group", Label: "Group", Type: "text", Help: "Display group; defaults to Name."},
 						{ID: "strict", Label: "Strict", Type: "bool", Help: "Gate non-standard fields (OpenAI/Azure)."},
+						{ID: "api", Label: "APIs served", Type: "string[]", Help: "Wire APIs this upstream serves: openai, anthropic. Add anthropic to send Claude Code /v1/messages natively instead of translating. Blank = openai."},
 					},
 				}},
 			},
@@ -171,6 +172,7 @@ func settingsSchema() []FieldDecl {
 			Fields: []FieldDecl{
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "/usr/local/bin/llama-server"},
 				{ID: "modelDir", Label: "Model directory", Type: "text", Help: "Base directory for relative model paths."},
+				{ID: "api", Label: "APIs served", Type: "string[]", Help: "Wire APIs this upstream serves: openai, anthropic. Add anthropic to send Claude Code /v1/messages natively instead of translating. Blank = openai."},
 				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "8090", Help: "First port; each model instance increments from here. Blank uses the 8090 default."},
 				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
 				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total estimated memory across loaded models. Sizes are computed from each GGUF (weights + KV cache at the configured ctx-size). Blank = unlimited."},
@@ -192,6 +194,7 @@ func settingsSchema() []FieldDecl {
 			Fields: []FieldDecl{
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "~/.local/mlx-serve/mlx-serve"},
 				{ID: "modelDir", Label: "Model directory", Type: "text", Help: "Base directory for relative model paths."},
+				{ID: "api", Label: "APIs served", Type: "string[]", Help: "Wire APIs this upstream serves: openai, anthropic. Add anthropic to send Claude Code /v1/messages natively instead of translating. Blank = openai."},
 				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "9400", Help: "First port; each model instance increments from here. Blank uses the 9400 default."},
 				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
 				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total estimated memory across loaded models. Sizes are computed from the model directory (weights + KV cache from config.json). Blank = unlimited."},
@@ -212,6 +215,7 @@ func settingsSchema() []FieldDecl {
 			ID: "splash-serve", Label: "Splash server (splash)", Type: "object",
 			Fields: []FieldDecl{
 				{ID: "binaryPath", Label: "Binary path", Type: "text", Placeholder: "splash", Help: "Blank uses splash on PATH."},
+				{ID: "api", Label: "APIs served", Type: "string[]", Help: "Wire APIs this upstream serves: openai, anthropic. Add anthropic to send Claude Code /v1/messages natively instead of translating. Blank = openai."},
 				{ID: "basePort", Label: "Base port", Type: "number", Placeholder: "9500", Help: "First port; each model instance increments from here. Blank uses the 9500 default."},
 				{ID: "maxLoaded", Label: "Max loaded models", Type: "number", Help: "Cap on models resident at once. When full, the least-recently-used idle model is stopped. Blank = unlimited."},
 				{ID: "maxMemoryGB", Label: "Memory budget (GB)", Type: "number", Help: "Cap on total memory across loaded models. Splash models count only their per-model memoryGB override; a model without one counts against Max loaded but not this budget. Blank = unlimited."},

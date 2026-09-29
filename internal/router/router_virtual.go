@@ -279,6 +279,19 @@ func applyAffinity(candidates []ResolvedVirtualTarget, pinned string) []Resolved
 // entry — handleProxy's single `defer p.metrics.end(conn)` owns the
 // connection's lifetime regardless of how many candidates ran here.
 func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []ResolvedVirtualTarget, body []byte, affinityKey string, conn *ProxyConn) {
+	p.routeVirtualWith(w, r, name, candidates, affinityKey, conn, writeRouterError,
+		func(target ResolvedVirtualTarget) (bool, int, error) {
+			return p.attemptVirtual(w, r, target, body)
+		})
+}
+
+// routeVirtualWith is routeVirtual's failover walk with the per-candidate
+// attempt and the all-failed error writer supplied by the caller, so the
+// native Anthropic path reuses the identical failover, affinity and metrics
+// rules with its own request building and error envelope.
+func (p *RelayRouter) routeVirtualWith(w http.ResponseWriter, r *http.Request, name string, candidates []ResolvedVirtualTarget, affinityKey string, conn *ProxyConn,
+	writeAllFailed func(w http.ResponseWriter, status int, msg string),
+	attempt func(target ResolvedVirtualTarget) (wrote bool, status int, err error)) {
 	var failures []string
 	for _, target := range candidates {
 		// A caller that has already hung up (client disconnect →
@@ -304,7 +317,7 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 		// candidate's Set simply overwrites this one's — only the candidate
 		// that actually flushes a response leaves its value on the wire.
 		setModelTargetHeader(w, target.TargetHeaderValue())
-		wrote, status, err := p.attemptVirtual(w, r, target, body)
+		wrote, status, err := attempt(target)
 		if err == nil {
 			// Pin only a response the backend actually stands behind. A 5xx
 			// is exactly the kind of incident virtualAffinityStore guards
@@ -332,7 +345,7 @@ func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name 
 		}
 		failures = append(failures, fmt.Sprintf("%s: %v", target.Label(), err))
 	}
-	writeRouterError(w, http.StatusServiceUnavailable,
+	writeAllFailed(w, http.StatusServiceUnavailable,
 		fmt.Sprintf("virtual model %q: no target reachable (%s)", name, strings.Join(failures, "; ")))
 }
 
