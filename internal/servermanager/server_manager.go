@@ -219,10 +219,6 @@ func NewServerManager(profile config.ServerProfile, cfg *config.ServerConfig, bi
 	if !cfg.IdleTimeoutSet && cfg.IdleTimeoutMinutes == 0 {
 		m.idleTimeout = time.Duration(profile.DefaultIdleTimeoutMinutes) * time.Minute
 	}
-	if profile.Kind == splashKind && cfg.ModelDir != "" {
-		slog.Warn("splash: modelDir is ignored; models are Hugging Face repo ids in Splash's own store",
-			"modelDir", cfg.ModelDir)
-	}
 	if m.admissionTimeout <= 0 {
 		m.admissionTimeout = defaultAdmissionTimeout
 	}
@@ -941,8 +937,8 @@ func (m *ServerManager) StopInstance(alias string) error {
 
 	slog.Info(fmt.Sprintf("%s: stopping server", m.profile.Kind), "alias", alias, "port", inst.port)
 	if m.profile.KillProcessGroup {
-		// Signal the whole group, and SIGKILL it even when the leader has
-		// exited: the launcher's child can outlive it.
+		// Signal the whole group, then SIGKILL it: the launcher's native
+		// child winds down slower than our grace.
 		_ = syscall.Kill(-inst.cmd.Process.Pid, syscall.SIGTERM)
 		time.Sleep(m.stopGrace)
 		_ = syscall.Kill(-inst.cmd.Process.Pid, syscall.SIGKILL)

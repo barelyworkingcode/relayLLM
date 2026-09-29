@@ -102,7 +102,7 @@ A spawned llama-server/mlx-serve child's environment always goes through
 `os.Environ()` directly — it is a managed subprocess like any other spawn
 path, not a trusted extension of relayLLM itself, so every relay credential
 name is stripped before the child ever sees the environment. This is the
-only `exec.Command` call site left in the repo.
+only `exec.Command` call site left in the repo (test fakes aside).
 
 ## Relay-router (`internal/router/router.go`)
 
