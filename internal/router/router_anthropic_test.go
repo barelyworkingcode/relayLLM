@@ -174,9 +174,8 @@ func TestAnthropic_Passthrough_APIPrefixReachesUpstream(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // anthropicRedirectFixture wires a router whose "local-model" modelMap
-// target is a managed alias backed by upstream — same trick
-// the older managed-alias tests used, reused here so
-// the redirect path exercises a real managed-server Acquire/dispatch, not a
+// target is a managed alias backed by upstream (InjectReadyInstanceForTest
+// pointed at a real port), so the redirect path exercises a real managed-server Acquire/dispatch, not a
 // mock of it.
 func anthropicRedirectFixture(t *testing.T, alias string, upstream *httptest.Server, modelMap map[string]string) *RelayRouter {
 	t.Helper()
