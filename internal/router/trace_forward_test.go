@@ -43,7 +43,7 @@ func (r *recorder) record(h http.Header) {
 	r.seen = append(r.seen, seenReq{trace: h.Get(logging.TraceHeader), auth: h.Get("Authorization"), hasTrace: has})
 }
 
-func (r *recorder) only(t *testing.T) seenReq {
+func (r *recorder) single(t *testing.T) seenReq {
 	t.Helper()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -123,7 +123,7 @@ func TestForward_OnBoxUpstreamGetsRouterTraceID(t *testing.T) {
 				}
 				post(t, base+d.path, d.body, hdr)
 
-				got := rec.only(t)
+				got := rec.single(t)
 				if got.auth != clientAuth {
 					t.Errorf("upstream Authorization = %q, want %q", got.auth, clientAuth)
 				}
@@ -176,7 +176,7 @@ func TestForward_OffBoxUpstreamNeverGetsTraceID(t *testing.T) {
 				if resp.StatusCode != 200 {
 					t.Fatalf("status = %d, want 200 via the recording transport", resp.StatusCode)
 				}
-				got := rec.only(t)
+				got := rec.single(t)
 				if got.hasTrace {
 					t.Errorf("off-box upstream saw X-Trace-Id %q", got.trace)
 				}
