@@ -6,9 +6,11 @@ import (
 	"os"
 
 	"relayllm/internal/app"
+	"relayllm/internal/logging"
 )
 
 func main() {
+	logging.Install(os.Stderr, logging.Options{DefaultService: logging.DefaultService})
 	// The one non-flag subcommand this binary has (C10): `relayllm router-key
 	// <add|list|revoke>` manages {dataDir}/router_keys.json offline, never as
 	// part of the normal server-start flow below. Any other invocation

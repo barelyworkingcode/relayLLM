@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
+	"relayllm/internal/logging"
 	"relayllm/internal/relay"
 	"relayllm/internal/types"
 	"sort"
@@ -37,6 +39,18 @@ var relaySecretEnvKeys = []string{
 	relay.EnvProjectTokenLegacy,
 	"RELAY_LLM_TOKEN",
 	"RELAY_LLM_HOOK_TOKEN",
+	// An inherited trace ID names someone else's action; childEnv sets ours.
+	logging.EnvTraceID,
+}
+
+// childEnv is childBaseEnv plus RELAY_TRACE_ID naming the action that started
+// the child, when traceID is valid. The child uses it for startup lines only.
+func childEnv(traceID string) []string {
+	env := childBaseEnv()
+	if logging.ValidTraceID(traceID) {
+		env = append(env, logging.EnvTraceID+"="+traceID)
+	}
+	return env
 }
 
 // childBaseEnv returns os.Environ() with every relaySecretEnvKeys entry
@@ -488,9 +502,11 @@ func (m *ServerManager) Acquire(ctx context.Context, alias string) (*config.Open
 			continue
 		}
 
-		inst, err := m.launchLocked(alias, need)
+		start := m.clock.Now()
+		inst, err := m.launchLocked(logging.TraceFromContext(ctx), alias, need)
 		if err != nil {
 			m.mu.Unlock()
+			m.logServerStart(ctx, alias, 0, start, err)
 			return nil, nil, err
 		}
 		// Hold a lease across the health check so a concurrent Acquire cannot
@@ -511,10 +527,28 @@ func (m *ServerManager) Acquire(ctx context.Context, alias string) (*config.Open
 		release := m.releaser(inst)
 		if err := m.awaitReady(alias, inst); err != nil {
 			release()
+			m.logServerStart(ctx, alias, inst.port, start, err)
 			return nil, nil, err
 		}
+		m.logServerStart(ctx, alias, inst.port, start, nil)
 		return endpointForPort(m.profile, inst.port), release, nil
 	}
+}
+
+// logServerStart writes the one server.start line for a launch this call
+// owned, when the server became ready or the launch failed.
+func (m *ServerManager) logServerStart(ctx context.Context, alias string, port int, start time.Time, err error) {
+	attrs := []any{"op", "server.start", "duration_ms", m.clock.Since(start).Milliseconds(), "kind", m.profile.Kind, "alias", alias}
+	if port != 0 {
+		attrs = append(attrs, "port", port)
+	}
+	if err != nil {
+		attrs = append(attrs, "status", "error", "error", err.Error())
+		slog.Log(ctx, slog.LevelError, fmt.Sprintf("%s: server failed to start", m.profile.Kind), attrs...)
+		return
+	}
+	attrs = append(attrs, "status", "ok")
+	slog.Log(ctx, slog.LevelInfo, fmt.Sprintf("%s: server ready", m.profile.Kind), attrs...)
 }
 
 // checkDeadline converts an expired admission deadline or a cancelled ctx
@@ -558,7 +592,7 @@ func (m *ServerManager) timeUntil(deadline time.Time) time.Duration {
 // Must be called with m.mu held and with the budget already checked; the
 // caller keeps the lock until the instance is in the map so the budget cannot
 // be double-spent. cmd.Start is a fork/exec, fast enough to hold the lock for.
-func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstance, error) {
+func (m *ServerManager) launchLocked(traceID, alias string, memory int64) (*serverInstance, error) {
 	cfg := m.config.FindByAlias(alias)
 	if cfg == nil {
 		return nil, fmt.Errorf("%s: unknown model alias %q", m.profile.Kind, alias)
@@ -610,7 +644,7 @@ func (m *ServerManager) launchLocked(alias string, memory int64) (*serverInstanc
 	// other spawn path and must not inherit relayLLM's own credentials
 	// (internal bearer, project tokens) just because nothing here ever
 	// set cmd.Env before.
-	cmd.Env = childBaseEnv()
+	cmd.Env = childEnv(traceID)
 	if m.profile.KillProcessGroup {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
@@ -674,7 +708,6 @@ func (m *ServerManager) awaitReady(alias string, inst *serverInstance) error {
 	delete(m.loadErrors, alias)
 	m.mu.Unlock()
 
-	slog.Info(fmt.Sprintf("%s: server ready", m.profile.Kind), "alias", alias, "port", inst.port)
 	return nil
 }
 
@@ -1285,29 +1318,106 @@ func endpointForPort(profile config.ServerProfile, port int) *config.OpenAIEndpo
 // once the OS pipe buffer then fills, the child's next write blocks.
 const maxLogLineBytes = 8 * 1024 * 1024
 
-// logProcessOutput pipes cmd's stdout and stderr to slog, one line at a
-// time via bufio.Scanner. This correctly handles partial writes and
-// multi-line output, unlike a bare io.Writer.
+// Child output rate limit, per child across both streams. A chatty child must
+// not flood relayLLM's own log; the excess is counted, not written.
+const (
+	childLinesPerWindow = 50
+	childLineWindow     = 10 * time.Second
+)
+
+// childLineLogger writes a child's output lines as relayLLM's own lines, with
+// the text in one bounded, redacted field and never in msg, so it cannot pose
+// as a service line.
+type childLineLogger struct {
+	source string
+	clock  clk.Clock
+
+	mu          sync.Mutex
+	windowStart time.Time
+	inWindow    int
+	dropped     int
+}
+
+func newChildLineLogger(kind, alias string, c clk.Clock) *childLineLogger {
+	return &childLineLogger{source: fmt.Sprintf("%s[%s]", kind, alias), clock: c}
+}
+
+// redactChildLine cuts at the first `{`: what follows is most likely a JSON
+// body (request or response), which may carry a prompt.
+func redactChildLine(line string) string {
+	if i := strings.IndexByte(line, '{'); i >= 0 {
+		line = line[:i] + "{redacted}"
+	}
+	return logging.Truncate(line)
+}
+
+func (l *childLineLogger) log(stream, line string) {
+	l.mu.Lock()
+	now := l.clock.Now()
+	if l.windowStart.IsZero() || now.Sub(l.windowStart) >= childLineWindow {
+		l.flushDroppedLocked()
+		l.windowStart = now
+		l.inWindow = 0
+	}
+	if l.inWindow >= childLinesPerWindow {
+		l.dropped++
+		l.mu.Unlock()
+		return
+	}
+	l.inWindow++
+	l.mu.Unlock()
+
+	lvl := slog.LevelInfo // stderr
+	if stream == "stdout" {
+		lvl = slog.LevelDebug
+	}
+	slog.Log(context.Background(), lvl, "child output", "op", "child.output", "status", "ok",
+		"source", l.source, "stream", stream, "child_line", redactChildLine(line))
+}
+
+// close reports lines dropped in the last window. Call once, after both pipes
+// reach EOF.
+func (l *childLineLogger) close() {
+	l.mu.Lock()
+	l.flushDroppedLocked()
+	l.mu.Unlock()
+}
+
+func (l *childLineLogger) flushDroppedLocked() {
+	if l.dropped == 0 {
+		return
+	}
+	n := l.dropped
+	l.dropped = 0
+	slog.Log(context.Background(), slog.LevelInfo, "child output suppressed", "op", "child.output", "status", "ok",
+		"source", l.source, "dropped", n)
+}
+
+// logProcessOutput pipes cmd's stdout and stderr to slog through a
+// childLineLogger, one line at a time via bufio.Scanner. This correctly
+// handles partial writes and multi-line output, unlike a bare io.Writer.
 func logProcessOutput(cmd *exec.Cmd, kind, alias string) {
-	source := fmt.Sprintf("%s[%s]", kind, alias)
-	stdout, err := cmd.StdoutPipe()
-	if err == nil {
+	cl := newChildLineLogger(kind, alias, clk.DefaultClock)
+	var wg sync.WaitGroup
+	pump := func(r io.Reader, stream string) {
+		wg.Add(1)
 		go func() {
-			scanner := bufio.NewScanner(stdout)
+			defer wg.Done()
+			scanner := bufio.NewScanner(r)
 			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 			for scanner.Scan() {
-				slog.Debug(scanner.Text(), "source", source)
+				cl.log(stream, scanner.Text())
 			}
 		}()
 	}
-	stderr, err := cmd.StderrPipe()
-	if err == nil {
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
-			for scanner.Scan() {
-				slog.Warn(scanner.Text(), "source", source)
-			}
-		}()
+	if stdout, err := cmd.StdoutPipe(); err == nil {
+		pump(stdout, "stdout")
 	}
+	if stderr, err := cmd.StderrPipe(); err == nil {
+		pump(stderr, "stderr")
+	}
+	go func() {
+		wg.Wait()
+		cl.close()
+	}()
 }

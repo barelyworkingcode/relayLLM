@@ -114,7 +114,7 @@ func (p *RelayRouter) ListenSocket(path string, want func() (peertoken.Process, 
 		return err
 	}
 	srv := &http.Server{
-		Handler:           admitRelayOnly(want, p.SocketHandler()),
+		Handler:           traceRequests("socket", admitRelayOnly(want, p.SocketHandler())),
 		ReadHeaderTimeout: 30 * time.Second,
 		// Admission is decided once per connection, not once per request:
 		// the peer's identity cannot change over the life of one accepted
