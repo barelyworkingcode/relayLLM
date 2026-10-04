@@ -1,7 +1,9 @@
 package router
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/logging"
 	"relayllm/internal/netutil"
 	"relayllm/internal/registry"
 	"relayllm/internal/servermanager"
@@ -184,6 +187,10 @@ func (p *RelayRouter) Listen(addrs []string) error {
 // the server is tracking at once) and logs only if that wasn't the expected
 // shutdown signal.
 func (p *RelayRouter) Serve() {
+	// Wrapped here, not in NewRelayRouter: auth wiring replaces
+	// p.server.Handler after construction, and the trace middleware has to sit
+	// outside it so a 401 is logged as denied.
+	p.server.Handler = traceRequests("tcp", p.server.Handler)
 	scheme := "http"
 	if p.tlsCert != "" {
 		scheme = "https"
@@ -306,7 +313,7 @@ func (p *RelayRouter) handleModelUnload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := mgr.StopInstance(model); err != nil {
-		slog.Debug("relay router: unload of a model that was not running", "model", model, "error", err)
+		slog.DebugContext(r.Context(), "relay router: unload of a model that was not running", "model", model, "error", err)
 	}
 	writeRouterJSON(w, http.StatusOK, map[string]any{"success": true, "model": model})
 }
@@ -471,7 +478,7 @@ func (p *RelayRouter) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn.setTarget("unknown", "")
-	slog.Warn("relay router: unknown model", "model", envelope.Model)
+	slog.WarnContext(r.Context(), "relay router: unknown model", "model", envelope.Model)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("unknown model %q", envelope.Model)})
@@ -482,7 +489,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 	// stream, so the budget cannot evict this instance mid-response.
 	endpoint, release, err := mgr.Acquire(r.Context(), alias)
 	if err != nil {
-		slog.Warn("relay router: failed to launch managed server", "kind", mgr.Profile().Kind, "model", alias, "error", err)
+		slog.WarnContext(r.Context(), "relay router: failed to launch managed server", "kind", mgr.Profile().Kind, "model", alias, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -510,7 +517,7 @@ func (p *RelayRouter) routeManaged(w http.ResponseWriter, r *http.Request, mgr *
 		// Director dereferences target.Scheme unconditionally, so passing a
 		// nil target would panic inside the handler instead of failing the
 		// request cleanly.
-		slog.Warn("relay router: bad managed server endpoint", "kind", mgr.Profile().Kind, "alias", alias, "error", err)
+		slog.WarnContext(r.Context(), "relay router: bad managed server endpoint", "kind", mgr.Profile().Kind, "alias", alias, "error", err)
 		writeRouterError(w, http.StatusBadGateway, fmt.Sprintf("invalid managed server endpoint: %v", err))
 		return
 	}
@@ -524,13 +531,13 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep con
 	setModelTargetHeader(w, ep.Name+"/"+upstreamID)
 	rewritten, err := rewriteProxyBody(body, upstreamID)
 	if err != nil {
-		slog.Warn("relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
+		slog.WarnContext(r.Context(), "relay router: body rewrite failed", "endpoint", ep.Name, "error", err)
 		http.Error(w, `{"error":"failed to rewrite model field"}`, http.StatusBadRequest)
 		return
 	}
 	target, err := url.Parse(ep.BaseURL)
 	if err != nil {
-		slog.Warn("relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", ep.BaseURL, "error", err)
+		slog.WarnContext(r.Context(), "relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", logging.SafeURL(ep.BaseURL), "error", err)
 		http.Error(w, `{"error":"invalid endpoint configuration"}`, http.StatusInternalServerError)
 		return
 	}
@@ -625,6 +632,14 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 			}
 			req.Header.Del("X-Api-Key")
 			deleteRelayHeaders(req.Header)
+			// Forward the trace ID only to a destination on this machine; a
+			// hosted provider gets none, and a caller-supplied value never
+			// passes through.
+			if id := logging.TraceFromContext(req.Context()); id != "" && logging.OnBoxURL(target) {
+				req.Header.Set(logging.TraceHeader, id)
+			} else {
+				req.Header.Del(logging.TraceHeader)
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			deleteRelayHeaders(resp.Header)
@@ -632,7 +647,7 @@ func newUpstreamProxy(target *url.URL, body []byte, apiKey, branch, label string
 		},
 		FlushInterval: -1, // flush immediately for SSE streaming
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			slog.Warn("relay router: backend error", "branch", branch, "target", label, "error", err)
+			slog.WarnContext(r.Context(), "relay router: backend error", "branch", branch, "target", label, "error", err)
 			if onError != nil && onError(err) {
 				return
 			}
@@ -807,3 +822,110 @@ func (p *RelayRouter) MaybeServeTCP(addrs []string, routerCfg *config.RouterConf
 	p.Serve()
 	return true, nil
 }
+
+// traceRequests accepts or creates the request's trace ID, puts it on the
+// request context and writes one model.request line when the request ends.
+// transport is "tcp" or "socket". It never writes the ID onto the inbound
+// headers, and never logs a body, query, header or a rejected inbound ID.
+func traceRequests(transport string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := logging.TraceIDOrNew(r.Header.Get(logging.TraceHeader))
+		r = r.WithContext(logging.ContextWithTrace(r.Context(), id))
+		ctx := r.Context()
+		start := time.Now()
+		tw := &traceResponseWriter{ResponseWriter: w}
+		aborted, panicked := false, false
+		defer func() {
+			rec := recover()
+			if rec != nil {
+				if rec == http.ErrAbortHandler {
+					aborted = true
+				} else {
+					panicked = true
+				}
+			}
+			logModelRequest(ctx, transport, r, tw, time.Since(start), aborted, panicked)
+			if rec != nil {
+				panic(rec) // not swallowed: net/http still sees it
+			}
+		}()
+		next.ServeHTTP(tw, r)
+	})
+}
+
+func logModelRequest(ctx context.Context, transport string, r *http.Request, tw *traceResponseWriter, d time.Duration, aborted, panicked bool) {
+	code := tw.status
+	if code == 0 {
+		code = http.StatusOK
+	}
+	level, status, errText := slog.LevelInfo, "ok", ""
+	switch {
+	case aborted:
+		level, status, errText = slog.LevelWarn, "error", "aborted"
+	case panicked:
+		level, status, errText = slog.LevelError, "error", "panic"
+	case code < 400:
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && quietPath(r.URL.Path) {
+			return
+		}
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		level, status, errText = slog.LevelWarn, "denied", fmt.Sprintf("http_%d", code)
+	case code < 500:
+		level, status, errText = slog.LevelWarn, "error", fmt.Sprintf("http_%d", code)
+	default:
+		level, status, errText = slog.LevelError, "error", fmt.Sprintf("http_%d", code)
+	}
+	attrs := []any{
+		"op", "model.request", "status", status, "duration_ms", d.Milliseconds(), "error", errText,
+		"method", r.Method, "path", logging.Truncate(r.URL.Path), "http_status", code, "transport", transport,
+	}
+	if t := tw.Header().Get("X-Relay-Model-Target"); t != "" {
+		attrs = append(attrs, "target", logging.Truncate(t))
+	}
+	slog.Log(ctx, level, "model request", attrs...)
+}
+
+func quietPath(p string) bool {
+	return p == "/health" || p == "/models" || p == "/v1/models"
+}
+
+// traceResponseWriter records the status the handler produced. It must keep
+// SSE flushing and websocket upgrades working, so it forwards Flush and
+// Hijack and exposes Unwrap for http.ResponseController.
+type traceResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (t *traceResponseWriter) WriteHeader(code int) {
+	if t.status == 0 && (code >= 200 || code == http.StatusSwitchingProtocols) {
+		t.status = code
+	}
+	t.ResponseWriter.WriteHeader(code)
+}
+
+func (t *traceResponseWriter) Write(b []byte) (int, error) {
+	if t.status == 0 {
+		t.status = http.StatusOK
+	}
+	return t.ResponseWriter.Write(b)
+}
+
+func (t *traceResponseWriter) Flush() {
+	if t.status == 0 {
+		t.status = http.StatusOK
+	}
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (t *traceResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(t.ResponseWriter).Hijack()
+	if err == nil {
+		t.status = http.StatusSwitchingProtocols
+	}
+	return conn, brw, err
+}
+
+func (t *traceResponseWriter) Unwrap() http.ResponseWriter { return t.ResponseWriter }
