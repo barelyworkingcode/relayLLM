@@ -430,6 +430,10 @@ func warnVirtualModelConfig(virtual *config.VirtualLLMConfig, managers []*server
 				if !found {
 					slog.Warn("router: virtual model target names an endpoint absent from openai.endpoints",
 						"name", v.Name, "endpoint", target.Endpoint)
+					if target.HasParams() {
+						slog.Warn("router: virtual model target declares params but is never used; the params are never sent",
+							"name", v.Name, "target", target.Label())
+					}
 					continue
 				}
 				usable++
@@ -444,6 +448,10 @@ func warnVirtualModelConfig(virtual *config.VirtualLLMConfig, managers []*server
 				if !found {
 					slog.Warn("router: virtual model target names an alias no manager has",
 						"name", v.Name, "alias", target.Alias)
+					if target.HasParams() {
+						slog.Warn("router: virtual model target declares params but is never used; the params are never sent",
+							"name", v.Name, "target", target.Label())
+					}
 					continue
 				}
 				usable++
@@ -457,6 +465,10 @@ func warnVirtualModelConfig(virtual *config.VirtualLLMConfig, managers []*server
 						"name", v.Name, "model", target.Model)
 				}
 				// else: neither shape set at all — nothing specific to warn.
+				if target.HasParams() {
+					slog.Warn("router: virtual model target declares params but is never used; the params are never sent",
+						"name", v.Name, "target", target.Label())
+				}
 			}
 		}
 		if usable == 0 {
