@@ -1,6 +1,11 @@
 package config
 
-import "net/http"
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
 
 // OpenAIEndpoint describes a single OpenAI-compatible chat completions server.
 // Multiple endpoints can be configured side-by-side (Ollama's /v1, LM Studio,
@@ -108,6 +113,44 @@ type VirtualLLMTarget struct {
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
 	Alias    string `json:"alias"`
+	// Params are default request fields sent when the client omits them.
+	// Kept as RawMessage so the declared bytes (number formatting, key
+	// content) reach the upstream exactly as written; ValidateVirtualParams
+	// checks it is an object at load.
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+// Label renders the target for log and error text. Precedence matches
+// router.ClassifyVirtualTarget: endpoint+model, then alias; any other shape
+// prints every field set so the invalid target can be found in config.
+func (t VirtualLLMTarget) Label() string {
+	switch {
+	case t.Endpoint != "" && t.Model != "":
+		return fmt.Sprintf("endpoint %q model %q", t.Endpoint, t.Model)
+	case t.Alias != "":
+		return fmt.Sprintf("alias %q", t.Alias)
+	}
+	parts := []string{}
+	if t.Endpoint != "" {
+		parts = append(parts, fmt.Sprintf("endpoint %q", t.Endpoint))
+	}
+	if t.Model != "" {
+		parts = append(parts, fmt.Sprintf("model %q", t.Model))
+	}
+	if t.Alias != "" {
+		parts = append(parts, fmt.Sprintf("alias %q", t.Alias))
+	}
+	return strings.Join(parts, " ")
+}
+
+// HasParams reports whether the target declares a non-empty params object.
+// Absent, null and {} all read as no params.
+func (t VirtualLLMTarget) HasParams() bool {
+	var m map[string]json.RawMessage
+	if len(t.Params) == 0 || json.Unmarshal(t.Params, &m) != nil {
+		return false
+	}
+	return len(m) > 0
 }
 
 func (c *VirtualLLMConfig) Find(name string) *VirtualLLM {

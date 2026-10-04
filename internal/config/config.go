@@ -211,6 +211,9 @@ func parseUnifiedConfig(data []byte, source string) (*LoadedConfig, error) {
 	if raw.VirtualLLMs != nil {
 		virtualCfg = raw.VirtualLLMs
 	}
+	if err := ValidateVirtualParams(virtualCfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", source, err)
+	}
 	routerCfg := &RouterConfig{}
 	if raw.Router != nil {
 		routerCfg = raw.Router

@@ -162,6 +162,7 @@ func settingsSchema() []FieldDecl {
 							{ID: "endpoint", Label: "Endpoint", Type: "text", Help: "Name of an OpenAI-compatible endpoint (with Upstream model)."},
 							{ID: "model", Label: "Upstream model", Type: "text", Help: "Model id sent to the OpenAI-compatible endpoint."},
 							{ID: "alias", Label: "Managed alias", Type: "text", Help: "Local llama.cpp or MLX model alias; use instead of Endpoint/Upstream model."},
+							{ID: "params", Label: "Default request fields", Type: "json", Help: "JSON object of top-level request fields sent when the client omits them, e.g. {\"chat_template_kwargs\":{\"enable_thinking\":false}}. Client values win; objects merge key by key. Not checked against the upstream."},
 						}}},
 					},
 				}},

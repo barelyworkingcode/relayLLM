@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,9 @@ type ResolvedVirtualTarget struct {
 	upstreamID string
 	manager    *servermanager.ServerManager
 	alias      string
+	// params are this target's declared default request fields, applied per
+	// attempt by applyVirtualParams.
+	params json.RawMessage
 }
 
 // Manager returns the managed-server manager for an alias target, or nil for
@@ -154,15 +158,15 @@ func CandidatesForVirtual(virtual *config.VirtualLLM, statuses []registry.Endpoi
 		switch ClassifyVirtualTarget(target) {
 		case VirtualTargetEndpoint:
 			if endpoint, ok := online[target.Endpoint]; ok {
-				fresh = append(fresh, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
+				fresh = append(fresh, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model, params: target.Params})
 			} else if endpoint, ok := configured[target.Endpoint]; ok {
-				stale = append(stale, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model})
+				stale = append(stale, ResolvedVirtualTarget{endpoint: endpoint, upstreamID: target.Model, params: target.Params})
 			}
 			// else: names an endpoint that doesn't exist in config — skip.
 		case VirtualTargetAlias:
 			for _, manager := range managers {
 				if manager.HasAlias(target.Alias) {
-					fresh = append(fresh, ResolvedVirtualTarget{manager: manager, alias: target.Alias})
+					fresh = append(fresh, ResolvedVirtualTarget{manager: manager, alias: target.Alias, params: target.Params})
 					break
 				}
 			}
@@ -281,7 +285,7 @@ func applyAffinity(candidates []ResolvedVirtualTarget, pinned string) []Resolved
 func (p *RelayRouter) routeVirtual(w http.ResponseWriter, r *http.Request, name string, candidates []ResolvedVirtualTarget, body []byte, affinityKey string, conn *ProxyConn) {
 	p.routeVirtualWith(w, r, name, candidates, affinityKey, conn, writeRouterError,
 		func(target ResolvedVirtualTarget) (bool, int, error) {
-			return p.attemptVirtual(w, r, target, body)
+			return p.attemptVirtual(w, r, name, target, body)
 		})
 }
 
@@ -358,13 +362,25 @@ func (p *RelayRouter) routeVirtualWith(w http.ResponseWriter, r *http.Request, n
 // in a real net/http server panics with http.ErrAbortHandler — recovered by
 // the standard library one frame up — and a bare post-call release() would
 // leak the managed-server lease on that path.
-func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, target ResolvedVirtualTarget, body []byte) (wrote bool, status int, err error) {
+func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, name string, target ResolvedVirtualTarget, body []byte) (wrote bool, status int, err error) {
+	// Params are applied per attempt, always from routeVirtual's original
+	// body: a failover candidate without params must send what the client
+	// sent, not the previous candidate's injected fields.
+	sent, use := applyVirtualParams(body, target.params)
+	rec := &virtualResponseRecorder{ResponseWriter: w}
+	// Deferred so the line is also written when the proxy panics with
+	// http.ErrAbortHandler mid-stream.
+	defer func() {
+		if use.applied && rec.wrote {
+			logVirtualParams(r.Context(), name, target, use, rec.statusCode)
+		}
+	}()
 	var backendErr error
 	// onError intercepts the proxy's default 502 write: returning true tells
 	// newUpstreamProxy the caller is handling the failure itself, so a
 	// retryable attempt never leaks a partial error body to the client before
 	// routeVirtual tries the next candidate.
-	proxy, release, buildErr := p.buildVirtualAttempt(r.Context(), target, body, func(e error) bool {
+	proxy, release, buildErr := p.buildVirtualAttempt(r.Context(), target, sent, func(e error) bool {
 		backendErr = e
 		return true
 	})
@@ -373,7 +389,6 @@ func (p *RelayRouter) attemptVirtual(w http.ResponseWriter, r *http.Request, tar
 	}
 	defer release()
 
-	rec := &virtualResponseRecorder{ResponseWriter: w}
 	proxy.ServeHTTP(rec, r)
 	if backendErr != nil {
 		return rec.wrote, rec.statusCode, backendErr
