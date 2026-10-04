@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"relayllm/internal/logging"
 	"relayllm/internal/peertoken"
 )
 
@@ -73,6 +75,7 @@ type BridgeRequest struct {
 	Name      string          `json:"name,omitempty"`
 	Token     string          `json:"token,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	TraceID   string          `json:"trace_id,omitempty"`
 }
 
 // BridgeResponse is the on-wire response envelope.
@@ -102,10 +105,17 @@ func relayBridgeSocketPath() string {
 // the parsed envelope. Refuses unless Launched(): a standalone process has no
 // bound identity, so relay would treat the call as unauthenticated.
 func SendBridgeRequest(reqType string, args json.RawMessage) (BridgeResponse, error) {
+	return SendBridgeRequestContext(context.Background(), reqType, args)
+}
+
+// SendBridgeRequestContext is SendBridgeRequest carrying ctx's trace ID, when
+// it has a valid one, in the envelope's trace_id field. ctx does not cancel the
+// round trip.
+func SendBridgeRequestContext(ctx context.Context, reqType string, args json.RawMessage) (BridgeResponse, error) {
 	if !Launched() {
 		return BridgeResponse{}, fmt.Errorf("relay bridge unavailable: not launched by relay")
 	}
-	return roundTrip(relayBridgeSocketPath(), BridgeRequest{Type: reqType, Arguments: args})
+	return roundTrip(relayBridgeSocketPath(), BridgeRequest{Type: reqType, Arguments: args, TraceID: logging.TraceFromContext(ctx)})
 }
 
 // dialBridge dials sockPath and returns the connection alongside the peer

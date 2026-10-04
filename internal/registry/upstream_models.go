@@ -3,8 +3,10 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"relayllm/internal/config"
@@ -31,6 +33,17 @@ type UpstreamModel struct {
 // Connect itself is bounded separately, at 1s, by endpoint.ProbeTransport().
 const modelsFetchTimeout = 10 * time.Second
 
+// stripURLErr drops the request URL a *url.Error carries (userinfo, query
+// string), keeping only the underlying cause. The error text reaches logs and
+// the status API.
+func stripURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
+
 // FetchOpenAIModels queries /v1/models on the endpoint and returns the raw
 // upstream models (IDs carry no endpoint prefix). The error return distinguishes
 // "endpoint unreachable / unhealthy" from "endpoint healthy but empty" so the
@@ -39,14 +52,14 @@ func FetchOpenAIModels(ctx context.Context, endpoint config.OpenAIEndpoint) ([]U
 	client := &http.Client{Timeout: modelsFetchTimeout, Transport: endpoint.ProbeTransport()}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.BaseURL+"/models", nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", stripURLErr(err))
 	}
 	if endpoint.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("unreachable: %w", err)
+		return nil, fmt.Errorf("unreachable: %w", stripURLErr(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

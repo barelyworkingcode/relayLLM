@@ -537,7 +537,7 @@ func (p *RelayRouter) routeOpenAI(w http.ResponseWriter, r *http.Request, ep con
 	}
 	target, err := url.Parse(ep.BaseURL)
 	if err != nil {
-		slog.WarnContext(r.Context(), "relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", logging.SafeURL(ep.BaseURL), "error", err)
+		slog.WarnContext(r.Context(), "relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", logging.SafeURL(ep.BaseURL), "error", stripURLErr(err))
 		http.Error(w, `{"error":"invalid endpoint configuration"}`, http.StatusInternalServerError)
 		return
 	}
