@@ -43,6 +43,7 @@ For *why* a non-obvious architectural choice was made, check the comment at the 
 | Relay supervises service restarts | relay | The launch secret is single-use, so a crashed relayLLM cannot restart itself into a working bridge identity — only a fresh relay launch can. Relay must own restart-on-exit. |
 
 ## Closed (recent — for context)
+- Relay logging standard (#25): JSON lines on stderr (`RELAY_LOG_LEVEL`, 30-minute debug window), `X-Trace-Id` accepted or created and forwarded on-box only (dropped on the passthrough and hosted-endpoint hops), `trace_id` on the bridge request, `RELAY_TRACE_ID` in child env, one `model.request` line per request, child output wrapped in `child_line`, credentialed URLs scrubbed from logs.
 
 - Virtual target `params` (#23): a `virtual-llms` target can declare default request fields (absent-only injection, recursive object merge, client values win, applied per attempt so failover carries none, not on the native Anthropic path), with a config-load check that `params` is an object and one log line per request that used them.
 - `router.systemModels` (#20): listed catalog ids carry `"system": true` in `/v1/models` so relay can hide them from chat pickers; dispatch unchanged. Relay-side filtering is a separate issue.

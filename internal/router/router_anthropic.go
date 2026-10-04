@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"relayllm/internal/config"
+	"relayllm/internal/logging"
 	"relayllm/internal/registry"
 )
 
@@ -65,7 +66,7 @@ func (p *RelayRouter) setAnthropic(cfg *config.AnthropicRouterConfig) {
 	}
 	u, err := url.Parse(upstreamRaw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		slog.Error("relay router: invalid router.anthropic.upstream, anthropic compatibility disabled", "upstream", upstreamRaw, "error", err)
+		slog.Error("relay router: invalid router.anthropic.upstream, anthropic compatibility disabled", "upstream", logging.SafeURL(upstreamRaw), "error", stripURLErr(err))
 		return
 	}
 
@@ -283,6 +284,7 @@ func (p *RelayRouter) newAnthropicPassthroughProxy() *httputil.ReverseProxy {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			pr.Out.Host = upstream.Host
+			setTraceHeader(pr, upstream)
 			// C10: X-Relay-Router-Key authenticates the caller to relayLLM
 			// ITSELF on this route (auth.go's requiresRouterKeyHeader) —
 			// Authorization is the client's own real Anthropic credential

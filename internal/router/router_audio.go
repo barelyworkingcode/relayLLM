@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"relayllm/internal/logging"
 	"strings"
 )
 
@@ -96,7 +97,7 @@ func (p *RelayRouter) handleAudioTranscription(w http.ResponseWriter, r *http.Re
 
 	target, err := url.Parse(ep.BaseURL)
 	if err != nil {
-		slog.Warn("relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", ep.BaseURL, "error", err)
+		slog.Warn("relay router: bad endpoint baseURL", "endpoint", ep.Name, "baseURL", logging.SafeURL(ep.BaseURL), "error", stripURLErr(err))
 		writeRouterError(w, http.StatusInternalServerError, "invalid endpoint configuration")
 		return
 	}

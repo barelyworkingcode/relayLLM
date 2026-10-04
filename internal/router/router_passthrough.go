@@ -25,6 +25,7 @@ package router
 // translator covers neither.
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -36,6 +37,7 @@ import (
 	"strings"
 
 	"relayllm/internal/config"
+	"relayllm/internal/logging"
 	"relayllm/internal/netutil"
 )
 
@@ -72,7 +74,7 @@ func (p *RelayRouter) setPassthrough(cfg map[string]config.PassthroughConfig) {
 			defer p.metrics.end(conn)
 			proxy.ServeHTTP(mw, r)
 		})
-		slog.Info("relay router: passthrough mounted", "path", "/"+name+"/", "upstream", upstream.String())
+		slog.Info("relay router: passthrough mounted", "path", "/"+name+"/", "upstream", logging.SafeURL(upstream.String()))
 	}
 }
 
@@ -91,13 +93,13 @@ func newPassthroughProxy(name string, cfg config.PassthroughConfig) (*httputil.R
 	}
 	upstream, err := url.Parse(cfg.Upstream)
 	if err != nil || upstream.Host == "" || (upstream.Scheme != "https" && upstream.Scheme != "http") {
-		return nil, nil, fmt.Errorf("upstream %q must be an absolute http(s) URL", cfg.Upstream)
+		return nil, nil, fmt.Errorf("upstream %q must be an absolute http(s) URL", logging.SafeURL(cfg.Upstream))
 	}
 	// The client's real credential rides every request. Sending it in
 	// plaintext off the box would undo the TLS the client used before it was
 	// pointed here.
 	if upstream.Scheme == "http" && !netutil.IsLoopbackHost(upstream.Hostname()) {
-		return nil, nil, fmt.Errorf("upstream %q must use https (only a loopback upstream may be plain http)", cfg.Upstream)
+		return nil, nil, fmt.Errorf("upstream %q must use https (only a loopback upstream may be plain http)", logging.SafeURL(cfg.Upstream))
 	}
 
 	// DisableCompression keeps Accept-Encoding as the client sent it. Go's
@@ -113,6 +115,7 @@ func newPassthroughProxy(name string, cfg config.PassthroughConfig) (*httputil.R
 			pr.Out.URL.RawPath = strings.TrimPrefix(pr.In.URL.RawPath, prefix)
 			pr.SetURL(upstream)
 			pr.Out.Host = upstream.Host
+			setTraceHeader(pr, upstream)
 			// C10: X-Relay-Router-Key authenticates the caller to relayLLM
 			// ITSELF on this route (auth.go) — Authorization/X-Api-Key are
 			// what's forwarded byte-for-byte, on purpose, to the real
@@ -129,4 +132,25 @@ func newPassthroughProxy(name string, cfg config.PassthroughConfig) (*httputil.R
 		},
 	}
 	return proxy, upstream, nil
+}
+
+// setTraceHeader always drops a client-sent trace header, then sets relayLLM's
+// own only when the destination is on this machine. A hosted provider never
+// sees a trace ID, whether the client or the router made it.
+func setTraceHeader(pr *httputil.ProxyRequest, upstream *url.URL) {
+	pr.Out.Header.Del(logging.TraceHeader)
+	if id := logging.TraceFromContext(pr.In.Context()); id != "" && logging.OnBoxURL(upstream) {
+		pr.Out.Header.Set(logging.TraceHeader, id)
+	}
+}
+
+// stripURLErr drops the raw URL a *url.Error carries, which may hold userinfo
+// or a query string, keeping only the underlying cause. Log sites that report
+// a url.Parse failure use it.
+func stripURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

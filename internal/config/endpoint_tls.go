@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"strings"
 
+	"relayllm/internal/logging"
 	"relayllm/internal/netutil"
 )
 
@@ -69,7 +71,7 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 	u, err := url.Parse(ep.BaseURL)
 	if err != nil {
-		return fmt.Errorf("endpoint %q: invalid baseURL %q: %w", ep.Name, ep.BaseURL, err)
+		return fmt.Errorf("endpoint %q: invalid baseURL %q: %w", ep.Name, logging.SafeURL(ep.BaseURL), stripURLErr(err))
 	}
 
 	switch u.Scheme {
@@ -78,10 +80,10 @@ func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 	case "http":
 		if !netutil.IsLoopbackHost(u.Hostname()) {
 			if !allowPlaintext {
-				return fmt.Errorf("endpoint %q: baseURL %q is plain http to a non-loopback host; use https with caFile, or set top-level \"allowPlaintextEndpoints\": true to acknowledge this hop is unencrypted", ep.Name, ep.BaseURL)
+				return fmt.Errorf("endpoint %q: baseURL %q is plain http to a non-loopback host; use https with caFile, or set top-level \"allowPlaintextEndpoints\": true to acknowledge this hop is unencrypted", ep.Name, logging.SafeURL(ep.BaseURL))
 			}
 			slog.Warn("endpoint TLS: plaintext http to a non-loopback host allowed by allowPlaintextEndpoints",
-				"endpoint", ep.Name, "baseURL", ep.BaseURL)
+				"endpoint", ep.Name, "baseURL", logging.SafeURL(ep.BaseURL))
 		}
 	default:
 		return fmt.Errorf("endpoint %q: baseURL scheme must be http or https, got %q", ep.Name, u.Scheme)
@@ -120,7 +122,7 @@ func validateEndpointTransport(ep OpenAIEndpoint, allowPlaintext bool) error {
 func newEndpointTransport(ep OpenAIEndpoint, base *http.Transport) (*http.Transport, error) {
 	u, err := url.Parse(ep.BaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("endpoint %q: invalid baseURL %q: %w", ep.Name, ep.BaseURL, err)
+		return nil, fmt.Errorf("endpoint %q: invalid baseURL %q: %w", ep.Name, logging.SafeURL(ep.BaseURL), stripURLErr(err))
 	}
 	t := base.Clone()
 	if u.Scheme != "https" {
@@ -197,4 +199,14 @@ func PrepareEndpointTransports(ep *OpenAIEndpoint, allowPlaintext bool) error {
 	ep.virtualTransport = vt
 	ep.probeTransport = pt
 	return nil
+}
+
+// stripURLErr drops the raw URL a *url.Error carries, which may hold userinfo
+// or a query string, keeping only the underlying cause.
+func stripURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
