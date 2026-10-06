@@ -18,6 +18,7 @@ import (
 	"relayllm/internal/config"
 	"relayllm/internal/registry"
 	"relayllm/internal/servermanager"
+	"relayllm/internal/testutil"
 	"testing"
 	"time"
 )
@@ -630,7 +631,16 @@ func TestAnthropic_Passthrough_MessagesRouteRecordsMetrics(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 
-	active, _, recent := r.Metrics().Snapshot()
+	// end() runs in a defer after the proxy flushed the body, so the
+	// snapshot can lag the client's read; wait for the row to land.
+	var (
+		active []ProxyConnInfo
+		recent []RecentRequestInfo
+	)
+	testutil.WaitFor(t, 2*time.Second, func() bool {
+		active, _, recent = r.Metrics().Snapshot()
+		return len(active) == 0 && len(recent) == 1
+	})
 	if len(active) != 0 {
 		t.Errorf("active connections after request completed = %+v, want empty", active)
 	}
@@ -672,7 +682,16 @@ func TestAnthropic_Passthrough_APIPrefixRecordsMetrics(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 
-	active, _, recent := r.Metrics().Snapshot()
+	// end() runs in a defer after the proxy flushed the body, so the
+	// snapshot can lag the client's read; wait for the row to land.
+	var (
+		active []ProxyConnInfo
+		recent []RecentRequestInfo
+	)
+	testutil.WaitFor(t, 2*time.Second, func() bool {
+		active, _, recent = r.Metrics().Snapshot()
+		return len(active) == 0 && len(recent) == 1
+	})
 	if len(active) != 0 {
 		t.Errorf("active connections after request completed = %+v, want empty", active)
 	}
