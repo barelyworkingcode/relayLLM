@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,5 +159,75 @@ func TestSec_DetailedStatus_NeverLeaksEndpointSecrets(t *testing.T) {
 	}
 	if strings.Contains(string(data), secretKey) {
 		t.Errorf("GET /api/status/detailed leaked the endpoint's APIKey into the response body")
+	}
+}
+
+// An endpoint baseURL may carry userinfo or a query credential. The anonymous
+// diagnostics front must show the endpoint's address without them.
+func TestSec_DetailedStatus_RedactsBaseURLCredentials(t *testing.T) {
+	const (
+		user  = "fakeuser"
+		pass  = "fakepass123"
+		qkey  = "fakekey456"
+		clean = "http://127.0.0.1:1/v1"
+	)
+	ep := config.OpenAIEndpoint{Name: "acme", BaseURL: "http://" + user + ":" + pass + "@127.0.0.1:1/v1?key=" + qkey}
+	reg := registry.NewProxyRegistry(&config.OpenAIConfig{Endpoints: []config.OpenAIEndpoint{ep}})
+	reg.SetStatusForTest(ep, true, registry.UpstreamModel{ID: "m"})
+
+	mux := http.NewServeMux()
+	RegisterDetailedStatusRoutes(mux, DetailedStatusDeps{Registry: reg, StartTime: time.Now()})
+	srv := httptest.NewServer(TCPDiagnosticsOnly(mux))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/api/status/detailed")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := buf.String()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var gotURL string
+	found := false
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if x["name"] == "acme" {
+				if u, ok := x["baseURL"].(string); ok {
+					gotURL, found = u, true
+				}
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	walk(doc)
+	if !found {
+		t.Fatalf("endpoint row %q with baseURL not in response: %s", "acme", body)
+	}
+	for _, secret := range []string{user, pass, qkey} {
+		if strings.Contains(body, secret) {
+			t.Errorf("response leaked %q", secret)
+		}
+	}
+	if gotURL != clean {
+		t.Errorf("baseURL = %q, want %q", gotURL, clean)
 	}
 }
