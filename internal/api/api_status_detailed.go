@@ -18,6 +18,7 @@ import (
 	"context"
 	"embed"
 	"net/http"
+	"net/url"
 	clk "relayllm/internal/clock"
 	"relayllm/internal/config"
 	"relayllm/internal/registry"
@@ -433,7 +434,7 @@ func detailedEndpointRows(statuses []registry.EndpointStatus, activeByEndpointNa
 		}
 		rows = append(rows, map[string]any{
 			"name":           s.Endpoint.Name,
-			"baseURL":        s.Endpoint.BaseURL,
+			"baseURL":        redactURL(s.Endpoint.BaseURL),
 			"group":          s.Endpoint.Group,
 			"online":         s.Online,
 			"lastChecked":    s.LastChecked.UTC().Format(time.RFC3339),
@@ -445,4 +446,16 @@ func detailedEndpointRows(statuses []registry.EndpointStatus, activeByEndpointNa
 		})
 	}
 	return rows
+}
+
+// redactURL keeps scheme, host (with port) and path only. The anonymous
+// --http-port front serves this payload, so credentials in userinfo, query or
+// fragment must not leave the process. An unparseable URL yields "" and never
+// falls back to the raw string.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String()
 }
