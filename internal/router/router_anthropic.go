@@ -511,16 +511,24 @@ func (tw *translatingResponseWriter) Write(b []byte) (int, error) {
 
 // Flush satisfies http.Flusher — required for httputil.ReverseProxy's
 // FlushInterval: -1 (used by every backend p.handleProxy dispatches to) to
-// flush through this writer at all. Gated on wantStream: in non-streaming
-// mode nothing has been written to the real ResponseWriter yet (finish()
-// writes the whole aggregated Message in one shot), and calling the real
-// http.Flusher before its first WriteHeader implicitly sends a premature
-// 200 — this is called on every proxied write regardless of whether Write
-// itself did anything, so the guard has to live here too, not just in Write.
+// flush through this writer at all. Gated on realStarted, not on wantStream:
+// flushing the real ResponseWriter before its first WriteHeader implicitly
+// sends a premature 200, and that must only ever happen once beginReal has
+// actually committed the Anthropic-shaped 200. A backend that answers
+// non-200 (a context-overflow 400 from the redirect target, say) is
+// buffered instead — beginReal never ran, realStarted stays false, and the
+// mapped error is written in finish(). ReverseProxy still calls Flush after
+// every proxied write regardless, so gating on wantStream alone let that
+// Flush commit a 200 to the client's socket first, after which
+// writeAnthropicError's real 4xx/5xx status line became a dropped
+// "superfluous WriteHeader" and the streaming client saw a successful, empty
+// 200 turn instead of the backend's error. realStarted is true only once
+// beginReal has run, so it also covers the non-streaming case: nothing has
+// been written to the real ResponseWriter yet, so there is nothing to flush.
 func (tw *translatingResponseWriter) Flush() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
-	if tw.wantStream {
+	if tw.realStarted {
 		tw.flushReal()
 	}
 }

@@ -390,6 +390,42 @@ func TestAnthropic_Redirect_ContextOverflowErrorNormalized(t *testing.T) {
 	}
 }
 
+func TestAnthropic_Redirect_ContextOverflowErrorNormalized_StreamingClient(t *testing.T) {
+	// Same upstream failure as the test above, but with the streaming client
+	// Claude Code actually uses. The mapped error must reach the client with
+	// its real status: a Flush on the translating writer (ReverseProxy calls
+	// it after every proxied write, FlushInterval: -1) must not commit a
+	// premature 200 that turns the backend 400 into a successful, empty turn.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"the request exceeds the available context size (32768 tokens)"}}`))
+	}))
+	defer upstream.Close()
+
+	r := anthropicRedirectFixture(t, "local-model", upstream, map[string]string{"claude-haiku-4-5": "local-model"})
+	srv := httptest.NewServer(r.server.Handler)
+	defer srv.Close()
+
+	resp := postBytes(t, srv.URL+"/v1/messages",
+		[]byte(`{"model":"claude-haiku-4-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a streaming client, body=%s", resp.StatusCode, body)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode body %q: %v", body, err)
+	}
+	if decoded["type"] != "error" {
+		t.Errorf("body = %v, want Anthropic error envelope (not a success turn)", decoded)
+	}
+	msg, _ := decoded["error"].(map[string]any)["message"].(string)
+	if len(msg) < len("prompt is too long:") || msg[:len("prompt is too long:")] != "prompt is too long:" {
+		t.Errorf("message = %q, want prefix %q", msg, "prompt is too long:")
+	}
+}
+
 func TestAnthropic_Redirect_BackendDown_MapsToOverloadedError(t *testing.T) {
 	// A managed alias whose "already running" instance points at a closed
 	// port: Acquire succeeds (the instance exists in the manager's map,
