@@ -432,6 +432,14 @@ type translatingResponseWriter struct {
 	errBuf        bytes.Buffer
 	realStarted   bool // true once anything has actually been written to `real`
 
+	// pending: a streaming 200 whose head is held back until the first event
+	// that produces output, so a backend error frame sent inside the 200
+	// stream can still become a real 4xx/5xx. pend holds the translated
+	// events produced meanwhile. The ping tick commits it, so a slow first
+	// token still gets Claude Code's idle-watchdog keepalive.
+	pending bool
+	pend    bytes.Buffer
+
 	pingStop chan struct{}
 	pingWG   sync.WaitGroup
 }
@@ -469,7 +477,47 @@ func (tw *translatingResponseWriter) WriteHeader(status int) {
 		tw.isError = true
 		return // don't touch the real ResponseWriter yet — buffered in Write, mapped in finish()
 	}
+	if tw.wantStream {
+		tw.pending = true
+		tw.startPing()
+		return
+	}
 	tw.beginReal()
+}
+
+// commitStream starts the held streaming response and flushes what was
+// translated while it waited. Called with tw.mu held.
+func (tw *translatingResponseWriter) commitStream() {
+	if !tw.pending {
+		return
+	}
+	tw.pending = false
+	tw.realStarted = true
+	tw.real.Header().Set("Content-Type", "text/event-stream")
+	tw.real.Header().Set("Cache-Control", "no-cache")
+	tw.real.Header().Set("Connection", "keep-alive")
+	tw.real.WriteHeader(http.StatusOK)
+	tw.translator.Start(tw.real)
+	tw.real.Write(tw.pend.Bytes())
+	tw.pend.Reset()
+	tw.flushReal()
+}
+
+// failFromStream turns a backend error frame into the error the client sees.
+// Called with tw.mu held.
+func (tw *translatingResponseWriter) failFromStream() {
+	msg := tw.translator.streamErr
+	tw.isError = true
+	tw.errBuf.Reset()
+	tw.errBuf.WriteString(msg)
+	// mapAnthropicBackendError only normalizes overflow wording on a 400.
+	if isContextOverflowMessage(msg) {
+		tw.backendStatus = http.StatusBadRequest
+	} else {
+		tw.backendStatus = http.StatusInternalServerError
+	}
+	tw.pending = false
+	tw.pend.Reset()
 }
 
 // beginReal starts the real Anthropic-shaped response. Called with tw.mu held.
@@ -497,14 +545,30 @@ func (tw *translatingResponseWriter) Write(b []byte) (int, error) {
 		tw.beginReal()
 	}
 	if tw.isError {
-		tw.errBuf.Write(b)
+		if tw.translator.streamErr == "" { // an error frame's message is already captured
+			tw.errBuf.Write(b)
+		}
 		return len(b), nil
 	}
-	if tw.wantStream {
+	switch {
+	case tw.pending:
+		tw.translator.Feed(b, &tw.pend)
+		if tw.translator.streamErr != "" {
+			tw.failFromStream()
+		} else if tw.pend.Len() > 0 {
+			tw.commitStream()
+		}
+	case tw.wantStream:
 		tw.translator.Feed(b, tw.real)
 		tw.flushReal()
-	} else {
+		if tw.translator.streamErr != "" {
+			tw.isError = true // mid-stream: finish() ends it with an in-band error event
+		}
+	default:
 		tw.translator.Feed(b, io.Discard)
+		if tw.translator.streamErr != "" {
+			tw.failFromStream()
+		}
 	}
 	return len(b), nil
 }
@@ -520,7 +584,9 @@ func (tw *translatingResponseWriter) Write(b []byte) (int, error) {
 func (tw *translatingResponseWriter) Flush() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
-	if tw.wantStream {
+	// Not while pending or failed: flushing the real writer before its first
+	// WriteHeader sends an implicit 200 and forfeits the error status.
+	if tw.wantStream && !tw.pending && !(tw.isError && !tw.realStarted) {
 		tw.flushReal()
 	}
 }
@@ -578,6 +644,7 @@ func (tw *translatingResponseWriter) pingTick() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 	if !tw.isError && tw.backendStatus == http.StatusOK {
+		tw.commitStream()
 		io.WriteString(tw.real, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
 		tw.flushReal()
 	}
@@ -613,6 +680,14 @@ func (tw *translatingResponseWriter) finish() {
 		// error event instead of attempting a second WriteHeader (which
 		// net/http would silently drop anyway, but the client would still
 		// be left with a stream that never reached message_stop).
+		if tw.realStarted && tw.translator.streamErr != "" {
+			tw.errBuf.Reset()
+			tw.errBuf.WriteString(tw.translator.streamErr)
+			tw.backendStatus = http.StatusInternalServerError
+			if isContextOverflowMessage(tw.translator.streamErr) {
+				tw.backendStatus = http.StatusBadRequest
+			}
+		}
 		mapped := mapAnthropicBackendError(tw.backendStatus, tw.errBuf.Bytes())
 		if tw.realStarted {
 			writeSSEEvent(tw.real, "error", map[string]any{
@@ -638,6 +713,7 @@ func (tw *translatingResponseWriter) finish() {
 		return
 	}
 	if tw.wantStream {
+		tw.commitStream()
 		tw.translator.Finish(tw.real)
 		tw.flushReal()
 		return

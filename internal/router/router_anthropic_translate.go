@@ -556,6 +556,12 @@ type anthropicStreamTranslator struct {
 	usage          anthropicUsage
 	sseBuf         bytes.Buffer
 	textAccum      strings.Builder
+
+	// streamErr is the message of the first `data: {"error": ...}` frame the
+	// backend sent. Some engines refuse a request (e.g. a context overflow)
+	// this way inside an already-200 stream; dropping the frame produced an
+	// empty end_turn. The writer reads it after each Feed.
+	streamErr string
 }
 
 func newAnthropicStreamTranslator(streaming bool, model string, inputTokensEstimate int64) *anthropicStreamTranslator {
@@ -637,6 +643,12 @@ func (t *anthropicStreamTranslator) applyEvent(event []byte, w io.Writer) {
 		if len(payload) == 0 || string(payload) == "[DONE]" {
 			continue
 		}
+		if msg, ok := openaiErrorFrame(payload); ok {
+			if t.streamErr == "" {
+				t.streamErr = msg
+			}
+			continue
+		}
 		var chunk openaiStreamChunk
 		if err := json.Unmarshal(payload, &chunk); err != nil {
 			slog.Debug("relay router: anthropic translate: skipping unparseable SSE chunk", "error", err)
@@ -644,6 +656,28 @@ func (t *anthropicStreamTranslator) applyEvent(event []byte, w io.Writer) {
 		}
 		t.applyChunk(chunk, w)
 	}
+}
+
+// openaiErrorFrame recognizes an SSE payload of the form {"error": {...}} or
+// {"error": "text"} and returns its message.
+func openaiErrorFrame(payload []byte) (string, bool) {
+	var f struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &f); err != nil || len(f.Error) == 0 || string(f.Error) == "null" {
+		return "", false
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(f.Error, &obj) == nil && obj.Message != "" {
+		return obj.Message, true
+	}
+	var str string
+	if json.Unmarshal(f.Error, &str) == nil && str != "" {
+		return str, true
+	}
+	return "backend returned an error frame with no message", true
 }
 
 type openaiStreamChunk struct {
@@ -999,6 +1033,7 @@ func isContextOverflowMessage(msg string) bool {
 	for _, substr := range []string{
 		"context size", "context length", "context window",
 		"exceeds the available context", "maximum context length", "too long",
+		"cannot be enqueued", "total cache allocated",
 	} {
 		if strings.Contains(lower, substr) {
 			return true
