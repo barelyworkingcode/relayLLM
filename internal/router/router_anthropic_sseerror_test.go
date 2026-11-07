@@ -77,7 +77,7 @@ func TestAnthropic_Redirect_SSEErrorFrame_NonOverflow_IsAPIError(t *testing.T) {
 	if resp.StatusCode < 400 {
 		t.Fatalf("status = %d, want an error; body = %s", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), "model crashed") {
-		t.Errorf("body = %s, want upstream message", body)
+	if !strings.Contains(string(body), "model crashed") || !strings.Contains(string(body), `"api_error"`) {
+		t.Errorf("body = %s, want api_error carrying the upstream message", body)
 	}
 }

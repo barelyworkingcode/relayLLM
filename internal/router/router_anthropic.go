@@ -545,7 +545,9 @@ func (tw *translatingResponseWriter) Write(b []byte) (int, error) {
 		tw.beginReal()
 	}
 	if tw.isError {
-		tw.errBuf.Write(b)
+		if tw.translator.streamErr == "" { // an error frame's message is already captured
+			tw.errBuf.Write(b)
+		}
 		return len(b), nil
 	}
 	switch {
@@ -682,6 +684,9 @@ func (tw *translatingResponseWriter) finish() {
 			tw.errBuf.Reset()
 			tw.errBuf.WriteString(tw.translator.streamErr)
 			tw.backendStatus = http.StatusInternalServerError
+			if isContextOverflowMessage(tw.translator.streamErr) {
+				tw.backendStatus = http.StatusBadRequest
+			}
 		}
 		mapped := mapAnthropicBackendError(tw.backendStatus, tw.errBuf.Bytes())
 		if tw.realStarted {
